@@ -1,1 +1,3 @@
-message(STATUS "Configuring cryptobench_core layer")
+add_library(cryptobench_core STATIC
+    core.cpp
+)
