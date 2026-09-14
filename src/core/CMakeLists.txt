@@ -1,6 +1,7 @@
 add_library(cryptobench_core STATIC
     core.cpp
     AlgorithmProfileId.cpp
+    AlgorithmRegistry.cpp
 )
 
 target_include_directories(cryptobench_core
