@@ -13,6 +13,8 @@
 namespace cryptobench::tests {
 using namespace core;
 
+int runValidatorTests();
+
 using Profiles = std::span<const AlgorithmProfile>;
 
 constexpr std::array canonicalIds{
@@ -427,6 +429,7 @@ int main()
         runTest("AES references", testAesReferences, profiles, passed);
         runTest("RSA references", testRsaReferences, profiles, passed);
         runTest("post-quantum references", testPostQuantumReferences, profiles, passed);
+        passed += runValidatorTests();
         std::cout << "PASS total=" << passed << '\n';
         return 0;
     } catch (const std::exception& error) {
