@@ -1,5 +1,6 @@
 add_library(cryptobench_crypto STATIC
-    crypto.cpp
+    adapters/DigestAdapter.cpp
+    openssl/OpenSslError.cpp
 )
 
 target_link_libraries(cryptobench_crypto
