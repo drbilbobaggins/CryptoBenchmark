@@ -14,6 +14,7 @@ namespace cryptobench::tests {
 using namespace core;
 
 int runValidatorTests();
+int runCoreExecutionContractTests();
 
 using Profiles = std::span<const AlgorithmProfile>;
 
@@ -430,6 +431,7 @@ int main()
         runTest("RSA references", testRsaReferences, profiles, passed);
         runTest("post-quantum references", testPostQuantumReferences, profiles, passed);
         passed += runValidatorTests();
+        passed += runCoreExecutionContractTests();
         std::cout << "PASS total=" << passed << '\n';
         return 0;
     } catch (const std::exception& error) {

@@ -3,6 +3,7 @@ add_library(cryptobench_core STATIC
     AlgorithmProfileId.cpp
     AlgorithmRegistry.cpp
     ConfigValidator.cpp
+    BenchmarkTask.cpp
 )
 
 target_include_directories(cryptobench_core

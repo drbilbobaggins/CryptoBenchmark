@@ -1,6 +1,7 @@
 message(STATUS "Configuring tests")
 
 add_executable(CryptoBenchmarkTests
+	CoreExecutionContractTests.cpp
 	RegistryConsistencyTests.cpp
 	ValidatorTests.cpp
 )
