@@ -33,3 +33,14 @@ target_include_directories(CryptoBenchmarkCryptoTests
 )
 
 add_test(NAME CryptoBenchmarkCryptoTests COMMAND CryptoBenchmarkCryptoTests)
+
+add_executable(CryptoBenchmarkIpcTests
+	IpcCodecTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkIpcTests
+	PRIVATE
+		cryptobench_ipc
+)
+
+add_test(NAME CryptoBenchmarkIpcTests COMMAND CryptoBenchmarkIpcTests)
