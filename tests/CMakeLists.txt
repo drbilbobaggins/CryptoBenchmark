@@ -4,6 +4,7 @@ add_executable(CryptoBenchmarkTests
 	CoreExecutionContractTests.cpp
 	BenchmarkRunnerTests.cpp
 	RegistryConsistencyTests.cpp
+	RunnerErrorContextTests.cpp
 	RunnerMeasurementContractTests.cpp
 	StatisticsTests.cpp
 	ValidatorTests.cpp
