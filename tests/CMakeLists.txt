@@ -1,7 +1,13 @@
 message(STATUS "Configuring tests")
 
 add_executable(CryptoBenchmarkTests
+	CoreExecutionContractTests.cpp
+	CoreResultModelTests.cpp
+	BenchmarkRunnerTests.cpp
 	RegistryConsistencyTests.cpp
+	RunnerErrorContextTests.cpp
+	RunnerMeasurementContractTests.cpp
+	StatisticsTests.cpp
 	ValidatorTests.cpp
 )
 
