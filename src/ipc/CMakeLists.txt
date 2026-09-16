@@ -1,6 +1,7 @@
 add_library(cryptobench_ipc STATIC
     FrameCodec.cpp
     JsonCodec.cpp
+    WorkerIpcChannel.cpp
 )
 
 target_include_directories(cryptobench_ipc

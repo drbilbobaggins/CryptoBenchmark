@@ -44,3 +44,14 @@ target_link_libraries(CryptoBenchmarkIpcTests
 )
 
 add_test(NAME CryptoBenchmarkIpcTests COMMAND CryptoBenchmarkIpcTests)
+
+add_executable(CryptoBenchmarkWorkerIpcTests
+	WorkerIpcChannelTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkWorkerIpcTests
+	PRIVATE
+		cryptobench_ipc
+)
+
+add_test(NAME CryptoBenchmarkWorkerIpcTests COMMAND CryptoBenchmarkWorkerIpcTests)
