@@ -6,6 +6,7 @@ add_library(cryptobench_core STATIC
     BenchmarkTask.cpp
     BenchmarkRunner.cpp
     BenchmarkStatisticsCalculator.cpp
+    ResultAssembler.cpp
     StatisticsCalculator.cpp
 )
 
