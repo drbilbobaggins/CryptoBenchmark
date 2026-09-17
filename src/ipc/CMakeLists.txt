@@ -1,8 +1,12 @@
 add_library(cryptobench_ipc STATIC
     FrameCodec.cpp
     JsonCodec.cpp
+    ParentIpcChannel.cpp
+    include/cryptobench/ipc/ParentIpcChannel.h
     WorkerIpcChannel.cpp
 )
+
+set_target_properties(cryptobench_ipc PROPERTIES AUTOMOC ON)
 
 target_include_directories(cryptobench_ipc
     PUBLIC
