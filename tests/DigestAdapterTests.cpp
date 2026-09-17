@@ -1,5 +1,7 @@
 #include "adapters/DigestAdapter.h"
 
+#include <cryptobench/crypto/AdapterFactory.h>
+
 #include <cryptobench/core/AlgorithmRegistry.h>
 #include <cryptobench/core/BenchmarkRunner.h>
 #include <cryptobench/core/BenchmarkTask.h>
@@ -39,7 +41,9 @@ using core::ProcessCpuTimeSource;
 using core::ProgressInfo;
 using core::ProgressSink;
 using core::RunMeasurementCoordinator;
+using core::ValidationResult;
 using core::WorkerRunMeasurement;
+using crypto::AdapterFactory;
 
 void require(bool condition, std::string_view message)
 {
@@ -158,6 +162,103 @@ void testDigestAdapterRunsThroughBenchmarkRunner()
             "SHA-256 integration run 1 CPU delta mismatch");
 }
 
+core::ValidatedBenchmarkConfig validateFactoryConfig(core::BenchmarkConfig config)
+{
+    ValidationResult validation;
+    auto validated = ConfigValidator{}.validateAndCreate(config, validation);
+    require(validated.has_value() && validation.isValid(), "factory test configuration validation failed");
+    return std::move(*validated);
+}
+
+const core::AlgorithmProfile& canonicalFactoryProfile(core::AlgorithmProfileId id)
+{
+    const auto* profile = AlgorithmRegistry::find(id);
+    require(profile != nullptr, "canonical factory test profile was not found");
+    return *profile;
+}
+
+void testAdapterFactoryCreatesAndExecutesCanonicalSha256()
+{
+    const core::BenchmarkConfig config{
+        core::AlgorithmProfileId::Sha256,
+        BenchmarkOperation::Hash,
+        1,
+        1,
+        core::HashConfig{64}
+    };
+    auto validated = validateFactoryConfig(config);
+    const auto& profile = canonicalFactoryProfile(config.profile);
+
+    auto adapter = AdapterFactory{}.create(profile, config.operation, validated);
+    require(adapter != nullptr, "factory did not create the canonical SHA-256 adapter");
+    adapter->prepareSeries();
+    adapter->prepareRun();
+    adapter->executeIteration();
+}
+
+void testAdapterFactoryRejectsUnsupportedStrategy()
+{
+    const core::BenchmarkConfig config{
+        core::AlgorithmProfileId::Aes128Gcm,
+        BenchmarkOperation::Encrypt,
+        1,
+        1,
+        core::AeadConfig{1}
+    };
+    auto validated = validateFactoryConfig(config);
+    const auto& profile = canonicalFactoryProfile(config.profile);
+
+    bool rejected = false;
+    try {
+        static_cast<void>(AdapterFactory{}.create(profile, config.operation, validated));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    require(rejected, "factory did not reject the unsupported AEAD strategy");
+}
+
+void testAdapterFactoryRejectsProfileMismatch()
+{
+    const core::BenchmarkConfig config{
+        core::AlgorithmProfileId::Sha256,
+        BenchmarkOperation::Hash,
+        1,
+        1,
+        core::HashConfig{64}
+    };
+    auto validated = validateFactoryConfig(config);
+    const auto& mismatchedProfile = canonicalFactoryProfile(core::AlgorithmProfileId::Sha224);
+
+    bool rejected = false;
+    try {
+        static_cast<void>(AdapterFactory{}.create(mismatchedProfile, BenchmarkOperation::Hash, validated));
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    require(rejected, "factory did not reject a profile identity mismatch");
+}
+
+void testAdapterFactoryRejectsOperationMismatch()
+{
+    const core::BenchmarkConfig config{
+        core::AlgorithmProfileId::Sha256,
+        BenchmarkOperation::Hash,
+        1,
+        1,
+        core::HashConfig{64}
+    };
+    auto validated = validateFactoryConfig(config);
+    const auto& profile = canonicalFactoryProfile(config.profile);
+
+    bool rejected = false;
+    try {
+        static_cast<void>(AdapterFactory{}.create(profile, BenchmarkOperation::Xof, validated));
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    require(rejected, "factory did not reject an operation mismatch");
+}
+
 } // namespace
 } // namespace cryptobench::tests
 
@@ -169,7 +270,11 @@ int main()
             std::pair{"empty input", &testEmptyInput},
             std::pair{"abc input", &testAbcInput},
             std::pair{"repeated iterations", &testRepeatedIterations},
-            std::pair{"DigestAdapter through BenchmarkRunner", &testDigestAdapterRunsThroughBenchmarkRunner}
+            std::pair{"DigestAdapter through BenchmarkRunner", &testDigestAdapterRunsThroughBenchmarkRunner},
+            std::pair{"AdapterFactory creates and executes canonical SHA-256", &testAdapterFactoryCreatesAndExecutesCanonicalSha256},
+            std::pair{"AdapterFactory rejects unsupported strategy", &testAdapterFactoryRejectsUnsupportedStrategy},
+            std::pair{"AdapterFactory rejects profile mismatch", &testAdapterFactoryRejectsProfileMismatch},
+            std::pair{"AdapterFactory rejects operation mismatch", &testAdapterFactoryRejectsOperationMismatch}
         };
         for (const auto& [name, test] : tests) {
             test();
