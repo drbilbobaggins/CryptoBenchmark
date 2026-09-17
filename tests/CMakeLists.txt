@@ -3,6 +3,7 @@ message(STATUS "Configuring tests")
 add_executable(CryptoBenchmarkTests
 	CoreExecutionContractTests.cpp
 	CoreResultModelTests.cpp
+	ResultAssemblerTests.cpp
 	BenchmarkRunnerTests.cpp
 	RegistryConsistencyTests.cpp
 	RunnerErrorContextTests.cpp
@@ -17,6 +18,32 @@ target_link_libraries(CryptoBenchmarkTests
 )
 
 add_test(NAME CryptoBenchmarkTests COMMAND CryptoBenchmarkTests)
+
+add_executable(CryptoBenchmarkEnvironmentInfoTests
+	EnvironmentInfoProviderTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkEnvironmentInfoTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkEnvironmentInfoTests COMMAND CryptoBenchmarkEnvironmentInfoTests)
+
+add_executable(CryptoBenchmarkBenchmarkControllerTests
+	BenchmarkControllerTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBenchmarkControllerTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBenchmarkControllerTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBenchmarkControllerTests COMMAND CryptoBenchmarkBenchmarkControllerTests)
 
 add_executable(CryptoBenchmarkCryptoTests
 	DigestAdapterTests.cpp
@@ -55,6 +82,19 @@ target_link_libraries(CryptoBenchmarkWorkerIpcTests
 )
 
 add_test(NAME CryptoBenchmarkWorkerIpcTests COMMAND CryptoBenchmarkWorkerIpcTests)
+
+add_executable(CryptoBenchmarkParentIpcTests
+	ParentIpcChannelTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkParentIpcTests
+	PRIVATE
+		cryptobench_ipc
+		Qt6::Core
+		Qt6::Network
+)
+
+add_test(NAME CryptoBenchmarkParentIpcTests COMMAND CryptoBenchmarkParentIpcTests)
 
 add_executable(CryptoBenchmarkWorkerSessionTests
 	WorkerSessionTests.cpp
@@ -99,3 +139,35 @@ target_link_libraries(CryptoBenchmarkPlatformWindowsTests
 )
 
 add_test(NAME CryptoBenchmarkPlatformWindowsTests COMMAND CryptoBenchmarkPlatformWindowsTests)
+
+add_executable(CryptoBenchmarkWorkerMemorySamplerTests
+	WorkerMemorySamplerTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkWorkerMemorySamplerTests
+	PRIVATE
+		cryptobench_ipc
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkWorkerMemorySamplerTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkWorkerMemorySamplerTests COMMAND CryptoBenchmarkWorkerMemorySamplerTests)
+
+add_executable(CryptoBenchmarkWindowsWorkerProcessTests
+	WindowsWorkerProcessTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkWindowsWorkerProcessTests
+	PRIVATE
+		cryptobench_ipc
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkWindowsWorkerProcessTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkWindowsWorkerProcessTests COMMAND CryptoBenchmarkWindowsWorkerProcessTests)

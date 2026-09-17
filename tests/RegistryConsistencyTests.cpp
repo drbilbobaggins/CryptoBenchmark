@@ -20,6 +20,7 @@ int runRunnerMeasurementContractTests();
 int runBenchmarkRunnerTests();
 int runRunnerErrorContextTests();
 int runCoreResultModelTests();
+int runResultAssemblerTests();
 
 using Profiles = std::span<const AlgorithmProfile>;
 
@@ -442,6 +443,7 @@ int main()
         passed += runBenchmarkRunnerTests();
         passed += runRunnerErrorContextTests();
         passed += runCoreResultModelTests();
+        passed += runResultAssemblerTests();
         std::cout << "PASS total=" << passed << '\n';
         return 0;
     } catch (const std::exception& error) {
