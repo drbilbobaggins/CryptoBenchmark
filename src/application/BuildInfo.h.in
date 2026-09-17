@@ -1,0 +1,12 @@
+#pragma once
+
+#include <string_view>
+
+namespace cryptobench::application::build_info {
+
+inline constexpr std::string_view applicationVersion = "@CRYPTOBENCH_APPLICATION_VERSION@";
+inline constexpr std::string_view gitCommit = "@CRYPTOBENCH_GIT_COMMIT@";
+inline constexpr std::string_view opensslVersion = "@CRYPTOBENCH_OPENSSL_VERSION@";
+inline constexpr std::string_view buildType = "@CRYPTOBENCH_BUILD_TYPE@";
+
+} // namespace cryptobench::application::build_info
