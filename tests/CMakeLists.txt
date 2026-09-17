@@ -113,6 +113,22 @@ target_link_libraries(CryptoBenchmarkPlatformWindowsTests
 
 add_test(NAME CryptoBenchmarkPlatformWindowsTests COMMAND CryptoBenchmarkPlatformWindowsTests)
 
+add_executable(CryptoBenchmarkWorkerMemorySamplerTests
+	WorkerMemorySamplerTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkWorkerMemorySamplerTests
+	PRIVATE
+		cryptobench_ipc
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkWorkerMemorySamplerTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkWorkerMemorySamplerTests COMMAND CryptoBenchmarkWorkerMemorySamplerTests)
+
 add_executable(CryptoBenchmarkWindowsWorkerProcessTests
 	WindowsWorkerProcessTests.cpp
 )
