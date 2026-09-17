@@ -1,5 +1,4 @@
 #include <QCoreApplication>
-#include <QEventLoop>
 #include <QTimer>
 
 #include <cstdlib>

@@ -91,8 +91,8 @@ void testRealWorkerLifecycle()
     worker.start(endpoint());
     require(worker.state() == QProcess::Starting || worker.state() == QProcess::Running,
             "first worker did not enter an active state");
-        waitUntil([&] { return worker.state() == QProcess::Running; },
-                            "first worker did not reach Running");
+    waitUntil([&] { return worker.state() == QProcess::Running; },
+              "first worker did not reach Running");
 
     bool rejectedSecondStart = false;
     try {
