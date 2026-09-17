@@ -201,6 +201,72 @@ void testInvalidConfigIsReportedByWorker()
     server.close();
 }
 
+void testMalformedRequestIsReportedAsDeserializationFailure()
+{
+    QLocalServer server;
+    server.setSocketOptions(QLocalServer::UserAccessOption);
+    const auto name = endpoint();
+    require(server.listen(name), "test server listen failed");
+
+    auto future = std::async(std::launch::async, [&] {
+        return worker::runWorkerSession(name);
+    });
+    auto socket = acceptConnection(server);
+    FrameReader reader;
+    receiveReady(*socket, reader);
+    sendFrame(*socket, ipc::MessageType::BenchmarkRequest, QByteArrayLiteral("{"));
+
+    const auto outcomeFrame = receiveFrame(*socket, reader);
+    require(outcomeFrame.messageType == ipc::MessageType::WorkerOutcome,
+            "malformed request did not produce a WorkerOutcome frame");
+    const auto outcome = ipc::decodeWorkerOutcome(outcomeFrame.payload);
+    require(outcome.status == ipc::WorkerOutcomeStatus::Failed && outcome.error,
+            "malformed request did not produce failed outcome");
+    require(outcome.error->code == core::ErrorCode::WorkerCommunicationFailed,
+            "malformed request error code mismatch");
+    require(outcome.error->stage == core::FailureStage::ConfigDeserialization,
+            "malformed request failure stage mismatch");
+    require(!outcome.error->runIndex, "malformed request unexpectedly contained a run index");
+    require(future.get() != 0, "malformed request returned success");
+    require(reader.pending.empty() && socket->bytesAvailable() == 0,
+            "malformed request started a measurement handshake");
+    server.close();
+}
+
+void testFrameErrorRemainsWorkerCommunicationFailure()
+{
+    QLocalServer server;
+    server.setSocketOptions(QLocalServer::UserAccessOption);
+    const auto name = endpoint();
+    require(server.listen(name), "test server listen failed");
+
+    auto future = std::async(std::launch::async, [&] {
+        return worker::runWorkerSession(name);
+    });
+    auto socket = acceptConnection(server);
+    FrameReader reader;
+    receiveReady(*socket, reader);
+
+    const auto invalidTypeFrame = QByteArray::fromHex("000a00000000");
+    require(socket->write(invalidTypeFrame) == invalidTypeFrame.size(),
+            "invalid frame write failed");
+    require(socket->waitForBytesWritten(10'000), "invalid frame write timed out");
+
+    const auto outcomeFrame = receiveFrame(*socket, reader);
+    require(outcomeFrame.messageType == ipc::MessageType::WorkerOutcome,
+            "frame error did not produce a WorkerOutcome frame");
+    const auto outcome = ipc::decodeWorkerOutcome(outcomeFrame.payload);
+    require(outcome.status == ipc::WorkerOutcomeStatus::Failed && outcome.error,
+            "frame error did not produce failed outcome");
+    require(outcome.error->code == core::ErrorCode::WorkerCommunicationFailed,
+            "frame error code mismatch");
+    require(outcome.error->stage == core::FailureStage::WorkerCommunication,
+            "frame error failure stage mismatch");
+    require(!outcome.error->runIndex, "frame error unexpectedly contained a run index");
+    require(future.get() != 0, "frame error returned success");
+    server.close();
+}
+
 void testUnsupportedStrategyIsReportedByWorker()
 {
     QLocalServer server;
@@ -246,6 +312,8 @@ int main(int argc, char* argv[])
     try {
         testSuccessfulSha256Session();
         testInvalidConfigIsReportedByWorker();
+        testMalformedRequestIsReportedAsDeserializationFailure();
+        testFrameErrorRemainsWorkerCommunicationFailure();
         testUnsupportedStrategyIsReportedByWorker();
         std::cout << "WorkerSessionTests passed\n";
         return 0;

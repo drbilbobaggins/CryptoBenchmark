@@ -39,7 +39,12 @@ void WorkerIpcChannel::sendWorkerReady()
 
 BenchmarkRequest WorkerIpcChannel::receiveBenchmarkRequest()
 {
-    return decodeBenchmarkRequest(receiveExpected(MessageType::BenchmarkRequest).payload);
+    const auto frame = receiveExpected(MessageType::BenchmarkRequest);
+    try {
+        return decodeBenchmarkRequest(frame.payload);
+    } catch (const std::invalid_argument& error) {
+        throw BenchmarkRequestDecodeError(error.what());
+    }
 }
 
 void WorkerIpcChannel::sendWorkerOutcome(const WorkerOutcome& outcome)

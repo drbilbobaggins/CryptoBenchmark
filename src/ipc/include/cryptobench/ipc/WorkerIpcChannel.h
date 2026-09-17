@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 #include <QLocalSocket>
@@ -12,6 +13,11 @@
 #include <cryptobench/ipc/JsonCodec.h>
 
 namespace cryptobench::ipc {
+
+class BenchmarkRequestDecodeError final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 class WorkerIpcChannel final
     : public core::ProgressSink

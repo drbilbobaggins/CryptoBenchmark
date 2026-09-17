@@ -96,7 +96,21 @@ int runWorkerSession(const QString& endpoint)
         connected = true;
         channel.sendWorkerReady();
 
-        const auto request = channel.receiveBenchmarkRequest();
+        ipc::BenchmarkRequest request;
+        try {
+            request = channel.receiveBenchmarkRequest();
+        } catch (const ipc::BenchmarkRequestDecodeError& error) {
+            const ErrorInfo info{
+                ErrorCode::WorkerCommunicationFailed,
+                FailureStage::ConfigDeserialization,
+                std::nullopt,
+                error.what(),
+                std::nullopt
+            };
+            trySendFailure(channel, info);
+            return 1;
+        }
+
         core::ConfigValidator validator;
         core::ValidationResult validation;
         auto validated = validator.validateAndCreate(request.config, validation);
