@@ -45,6 +45,26 @@ add_dependencies(CryptoBenchmarkBenchmarkControllerTests CryptoBenchmarkWorker)
 
 add_test(NAME CryptoBenchmarkBenchmarkControllerTests COMMAND CryptoBenchmarkBenchmarkControllerTests)
 
+add_executable(CryptoBenchmarkCancellationTests
+	BenchmarkCancellationTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkCancellationTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkCancellationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkCancellationTests CryptoBenchmarkTestScriptedWorker)
+
+add_test(NAME CryptoBenchmarkCancellationTests COMMAND CryptoBenchmarkCancellationTests)
+
 add_executable(CryptoBenchmarkCryptoTests
 	DigestAdapterTests.cpp
 )
@@ -185,7 +205,9 @@ set_target_properties(CryptoBenchmarkTestScriptedWorker
 
 target_link_libraries(CryptoBenchmarkTestScriptedWorker
 	PRIVATE
+		cryptobench_ipc
 		Qt6::Core
+		Qt6::Network
 )
 
 add_dependencies(CryptoBenchmarkWindowsWorkerProcessTests CryptoBenchmarkTestScriptedWorker)

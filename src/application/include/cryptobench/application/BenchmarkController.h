@@ -25,6 +25,7 @@ public:
     ~BenchmarkController() override;
 
     void start(const core::BenchmarkConfig& config);
+    void requestCancel();
     bool isBusy() const noexcept;
 
 signals:
@@ -40,6 +41,7 @@ private:
         WaitingForWorkerRunMeasurement,
         WaitingForWorkerOutcome,
         WaitingForWorkerExit,
+        Cancelling,
         Aborting
     };
 
@@ -58,6 +60,7 @@ private:
     void armTimeout();
     void enterFailure(core::ErrorInfo error);
     void finishSuccessfully();
+    void finishCancelled();
 
     State state_ = State::Idle;
     bool sessionActive_ = false;

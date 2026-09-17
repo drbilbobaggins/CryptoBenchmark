@@ -74,6 +74,18 @@ bool BenchmarkController::isBusy() const noexcept
     return state_ != State::Idle;
 }
 
+void BenchmarkController::requestCancel()
+{
+    if (!sessionActive_ || state_ == State::Cancelling || state_ == State::Aborting) return;
+
+    state_ = State::Cancelling;
+    technicalTimer_.stop();
+    memorySampler_.stopAndDiscard();
+    pendingMemory_.reset();
+    workerProcess_.kill();
+    if (!workerProcess_.isRunning()) finishCancelled();
+}
+
 void BenchmarkController::start(const core::BenchmarkConfig& config)
 {
     if (isBusy()) throw std::logic_error("BenchmarkController is already running");
@@ -115,7 +127,7 @@ void BenchmarkController::start(const core::BenchmarkConfig& config)
 
 void BenchmarkController::onWorkerReady(const ipc::WorkerReady& value)
 {
-    if (!sessionActive_) return;
+    if (!sessionActive_ || state_ == State::Cancelling) return;
     if (state_ != State::WaitingForWorkerReady) {
         enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
                                  core::FailureStage::WorkerCommunication,
@@ -142,7 +154,7 @@ void BenchmarkController::onWorkerReady(const ipc::WorkerReady& value)
 
 void BenchmarkController::onProgress(const core::ProgressInfo& value)
 {
-    if (!sessionActive_) return;
+    if (!sessionActive_ || state_ == State::Cancelling) return;
     if (state_ == State::Measuring) {
         enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
                                  core::FailureStage::WorkerCommunication,
@@ -167,7 +179,7 @@ void BenchmarkController::onProgress(const core::ProgressInfo& value)
 
 void BenchmarkController::onMeasurementReady(std::uint32_t runIndex)
 {
-    if (!sessionActive_) return;
+    if (!sessionActive_ || state_ == State::Cancelling) return;
     if (state_ != State::WaitingForMeasurementReady || !config_ ||
         runIndex != expectedRunIndex_ || runIndex >= config_->runs) {
         enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
@@ -199,7 +211,7 @@ void BenchmarkController::onMeasurementReady(std::uint32_t runIndex)
 
 void BenchmarkController::onMeasurementFinished(std::uint32_t runIndex)
 {
-    if (!sessionActive_) return;
+    if (!sessionActive_ || state_ == State::Cancelling) return;
     if (state_ != State::Measuring || runIndex != expectedRunIndex_ ||
         !memorySampler_.isActive()) {
         enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
@@ -226,7 +238,7 @@ void BenchmarkController::onMeasurementFinished(std::uint32_t runIndex)
 
 void BenchmarkController::onWorkerRunMeasurement(const core::WorkerRunMeasurement& value)
 {
-    if (!sessionActive_) return;
+    if (!sessionActive_ || state_ == State::Cancelling) return;
     if (state_ != State::WaitingForWorkerRunMeasurement || !config_ ||
         !pendingMemory_ || value.runIndex != expectedRunIndex_ ||
         pendingMemory_->runIndex != value.runIndex) {
@@ -269,7 +281,7 @@ void BenchmarkController::onWorkerRunMeasurement(const core::WorkerRunMeasuremen
 
 void BenchmarkController::onWorkerOutcome(const ipc::WorkerOutcome& value)
 {
-    if (!sessionActive_) return;
+    if (!sessionActive_ || state_ == State::Cancelling) return;
     if (value.status == ipc::WorkerOutcomeStatus::Failed) {
         if (!value.error) {
             enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
@@ -298,7 +310,7 @@ void BenchmarkController::onWorkerOutcome(const ipc::WorkerOutcome& value)
 
 void BenchmarkController::onTransportError(const QString& message)
 {
-    if (sessionActive_ && state_ != State::Aborting) {
+    if (sessionActive_ && state_ != State::Aborting && state_ != State::Cancelling) {
         enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
                                  core::FailureStage::WorkerCommunication,
                                  message.toStdString()));
@@ -307,7 +319,8 @@ void BenchmarkController::onTransportError(const QString& message)
 
 void BenchmarkController::onDisconnected()
 {
-    if (!sessionActive_ || state_ == State::WaitingForWorkerExit || state_ == State::Aborting) return;
+    if (!sessionActive_ || state_ == State::WaitingForWorkerExit ||
+        state_ == State::Cancelling || state_ == State::Aborting) return;
     enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
                              core::FailureStage::WorkerCommunication,
                              "Worker IPC channel disconnected unexpectedly"));
@@ -315,7 +328,7 @@ void BenchmarkController::onDisconnected()
 
 void BenchmarkController::onWorkerError(QProcess::ProcessError, const QString& message)
 {
-    if (sessionActive_ && state_ != State::Aborting) {
+    if (sessionActive_ && state_ != State::Aborting && state_ != State::Cancelling) {
         const auto startupFailure = state_ == State::WaitingForWorkerReady;
         enterFailure(parentError(startupFailure
                                      ? core::ErrorCode::WorkerStartupFailed
@@ -330,6 +343,10 @@ void BenchmarkController::onWorkerError(QProcess::ProcessError, const QString& m
 void BenchmarkController::onWorkerFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     if (!sessionActive_ || state_ == State::Aborting) return;
+    if (state_ == State::Cancelling) {
+        finishCancelled();
+        return;
+    }
     if (exitStatus != QProcess::NormalExit || exitCode != 0) {
         enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
                                  core::FailureStage::WorkerCommunication,
@@ -351,7 +368,7 @@ void BenchmarkController::onWorkerFinished(int exitCode, QProcess::ExitStatus ex
 
 void BenchmarkController::onTimeout()
 {
-    if (!sessionActive_) return;
+    if (!sessionActive_ || state_ == State::Cancelling) return;
     enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
                              core::FailureStage::WorkerCommunication,
                              "Worker session timed out", expectedRunIndex_));
@@ -400,6 +417,23 @@ void BenchmarkController::finishSuccessfully()
                                  error.what()));
         return;
     }
+    terminalResultEmitted_ = true;
+    technicalTimer_.stop();
+    ipcChannel_.close();
+    sessionActive_ = false;
+    state_ = State::Idle;
+    emit benchmarkFinished(result);
+}
+
+void BenchmarkController::finishCancelled()
+{
+    if (!sessionActive_ || state_ != State::Cancelling || terminalResultEmitted_ ||
+        workerProcess_.isRunning() || memorySampler_.isActive() || pendingMemory_) {
+        return;
+    }
+
+    const auto result = core::ResultAssembler::cancelled(
+        *config_, completedRuns_, *characteristics_, *environment_);
     terminalResultEmitted_ = true;
     technicalTimer_.stop();
     ipcChannel_.close();
