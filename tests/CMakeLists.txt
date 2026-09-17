@@ -56,6 +56,23 @@ target_link_libraries(CryptoBenchmarkWorkerIpcTests
 
 add_test(NAME CryptoBenchmarkWorkerIpcTests COMMAND CryptoBenchmarkWorkerIpcTests)
 
+add_executable(CryptoBenchmarkWorkerSessionTests
+	WorkerSessionTests.cpp
+	${CMAKE_SOURCE_DIR}/src/worker/WorkerSession.cpp
+)
+
+target_link_libraries(CryptoBenchmarkWorkerSessionTests
+	PRIVATE
+		cryptobench_core
+		cryptobench_crypto
+		cryptobench_ipc
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_test(NAME CryptoBenchmarkWorkerSessionTests COMMAND CryptoBenchmarkWorkerSessionTests)
+
 add_executable(CryptoBenchmarkPlatformWindowsTests
 	WindowsProcessCpuTimeSourceTests.cpp
 )

@@ -1,4 +1,6 @@
 add_executable(CryptoBenchmarkWorker
+    WorkerSession.cpp
+    WorkerSession.h
     worker_main.cpp
 )
 
