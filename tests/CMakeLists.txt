@@ -112,3 +112,19 @@ target_link_libraries(CryptoBenchmarkPlatformWindowsTests
 )
 
 add_test(NAME CryptoBenchmarkPlatformWindowsTests COMMAND CryptoBenchmarkPlatformWindowsTests)
+
+add_executable(CryptoBenchmarkWindowsWorkerProcessTests
+	WindowsWorkerProcessTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkWindowsWorkerProcessTests
+	PRIVATE
+		cryptobench_ipc
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkWindowsWorkerProcessTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkWindowsWorkerProcessTests COMMAND CryptoBenchmarkWindowsWorkerProcessTests)

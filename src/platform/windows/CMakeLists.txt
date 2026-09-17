@@ -1,6 +1,10 @@
 add_library(cryptobench_platform_windows STATIC
+    WindowsWorkerProcess.cpp
     WindowsProcessCpuTimeSource.cpp
+    include/cryptobench/platform/windows/WindowsWorkerProcess.h
 )
+
+set_target_properties(cryptobench_platform_windows PROPERTIES AUTOMOC ON)
 
 target_include_directories(cryptobench_platform_windows
     PUBLIC
@@ -10,4 +14,5 @@ target_include_directories(cryptobench_platform_windows
 target_link_libraries(cryptobench_platform_windows
     PUBLIC
         cryptobench_core
+    Qt6::Core
 )
