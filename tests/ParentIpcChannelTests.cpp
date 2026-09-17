@@ -189,6 +189,34 @@ void testRemoteDisconnectCanCloseReentrantly()
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
 }
 
+void testSequentialSessionReuseDoesNotLeakOldSocketEvents()
+{
+    ipc::ParentIpcChannel channel;
+    int disconnectedCount = 0;
+    QString transportError;
+    channel.connect(&channel, &ipc::ParentIpcChannel::disconnected,
+                    [&] { ++disconnectedCount; });
+    channel.connect(&channel, &ipc::ParentIpcChannel::transportError,
+                    [&](const QString& value) { transportError = value; });
+
+    const auto firstName = endpoint();
+    channel.startListening(firstName);
+    auto firstSocket = connectWorker(channel, firstName);
+    channel.close();
+
+    const auto secondName = endpoint();
+    channel.startListening(secondName);
+    auto secondSocket = connectWorker(channel, secondName);
+    require(channel.isConnected(), "second session did not connect");
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+    require(disconnectedCount == 0 && transportError.isEmpty(),
+            "old session event masqueraded as a second-session event");
+
+    secondSocket->disconnectFromServer();
+    firstSocket->disconnectFromServer();
+    channel.close();
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -199,6 +227,7 @@ int main(int argc, char* argv[])
         testWorkerMessagesAndStreamHandling();
         testWrongDirectionIsObservableError();
         testRemoteDisconnectCanCloseReentrantly();
+        testSequentialSessionReuseDoesNotLeakOldSocketEvents();
         std::cout << "Parent IPC channel tests passed\n";
         return 0;
     } catch (const std::exception& error) {

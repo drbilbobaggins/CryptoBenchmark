@@ -160,6 +160,11 @@ add_executable(CryptoBenchmarkWindowsWorkerProcessTests
 	WindowsWorkerProcessTests.cpp
 )
 
+set_target_properties(CryptoBenchmarkWindowsWorkerProcessTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
 target_link_libraries(CryptoBenchmarkWindowsWorkerProcessTests
 	PRIVATE
 		cryptobench_ipc
@@ -168,6 +173,21 @@ target_link_libraries(CryptoBenchmarkWindowsWorkerProcessTests
 		Qt6::Network
 )
 
-add_dependencies(CryptoBenchmarkWindowsWorkerProcessTests CryptoBenchmarkWorker)
+add_executable(CryptoBenchmarkTestScriptedWorker
+	TestScriptedWorker.cpp
+)
+
+set_target_properties(CryptoBenchmarkTestScriptedWorker
+	PROPERTIES
+		OUTPUT_NAME CryptoBenchmarkWorker
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkTestScriptedWorker
+	PRIVATE
+		Qt6::Core
+)
+
+add_dependencies(CryptoBenchmarkWindowsWorkerProcessTests CryptoBenchmarkTestScriptedWorker)
 
 add_test(NAME CryptoBenchmarkWindowsWorkerProcessTests COMMAND CryptoBenchmarkWindowsWorkerProcessTests)

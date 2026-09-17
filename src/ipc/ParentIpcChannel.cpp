@@ -36,6 +36,7 @@ void ParentIpcChannel::close()
 {
     server_.close();
     if (socket_) {
+        QObject::disconnect(socket_, nullptr, this, nullptr);
         socket_->disconnectFromServer();
         socket_->deleteLater();
         socket_ = nullptr;
