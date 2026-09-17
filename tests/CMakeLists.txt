@@ -30,6 +30,21 @@ target_link_libraries(CryptoBenchmarkEnvironmentInfoTests
 
 add_test(NAME CryptoBenchmarkEnvironmentInfoTests COMMAND CryptoBenchmarkEnvironmentInfoTests)
 
+add_executable(CryptoBenchmarkBenchmarkControllerTests
+	BenchmarkControllerTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBenchmarkControllerTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBenchmarkControllerTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBenchmarkControllerTests COMMAND CryptoBenchmarkBenchmarkControllerTests)
+
 add_executable(CryptoBenchmarkCryptoTests
 	DigestAdapterTests.cpp
 )
