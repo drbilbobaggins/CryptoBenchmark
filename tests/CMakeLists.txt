@@ -55,3 +55,14 @@ target_link_libraries(CryptoBenchmarkWorkerIpcTests
 )
 
 add_test(NAME CryptoBenchmarkWorkerIpcTests COMMAND CryptoBenchmarkWorkerIpcTests)
+
+add_executable(CryptoBenchmarkPlatformWindowsTests
+	WindowsProcessCpuTimeSourceTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkPlatformWindowsTests
+	PRIVATE
+		cryptobench_platform_windows
+)
+
+add_test(NAME CryptoBenchmarkPlatformWindowsTests COMMAND CryptoBenchmarkPlatformWindowsTests)
