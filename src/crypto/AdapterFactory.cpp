@@ -6,6 +6,7 @@
 #include "adapters/AeadAdapter.h"
 #include "adapters/DigestAdapter.h"
 #include "adapters/EcdhAdapter.h"
+#include "adapters/MlKemAdapter.h"
 #include "adapters/XofAdapter.h"
 #include "adapters/XdhAdapter.h"
 
@@ -79,12 +80,26 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
         return std::make_unique<XdhAdapter>(
             *xdhParameters, operation, characteristics.sharedSecretBytes);
     }
+    case core::ExecutionStrategyId::MlKem: {
+        const auto* mlKemParameters = std::get_if<core::MlKemParameters>(&profile.parameters);
+        if (mlKemParameters == nullptr) {
+            throw std::logic_error("MlKem strategy requires MlKemParameters");
+        }
+        const auto* keyEstablishmentConfig =
+            std::get_if<core::KeyEstablishmentConfig>(&validatedConfig.parameters);
+        if (keyEstablishmentConfig == nullptr) {
+            throw std::logic_error("MlKem strategy requires KeyEstablishmentConfig");
+        }
+        const auto& characteristics = std::get<core::KeyEstablishmentCharacteristics>(profile.characteristics);
+        return std::make_unique<MlKemAdapter>(
+            *mlKemParameters, operation, characteristics.ciphertextBytes.value(),
+            characteristics.sharedSecretBytes);
+    }
     case core::ExecutionStrategyId::RsaPssSignature:
     case core::ExecutionStrategyId::EcdsaSignature:
     case core::ExecutionStrategyId::EdDsaSignature:
     case core::ExecutionStrategyId::MlDsaSignature:
     case core::ExecutionStrategyId::SlhDsaSignature:
-    case core::ExecutionStrategyId::MlKem:
         throw std::invalid_argument("AdapterFactory execution strategy is unsupported");
     case core::ExecutionStrategyId::Aead: {
         const auto* aeadConfig = std::get_if<core::AeadConfig>(&validatedConfig.parameters);

@@ -113,6 +113,22 @@ target_include_directories(CryptoBenchmarkEcdhXdhTests
 
 add_test(NAME CryptoBenchmarkEcdhXdhTests COMMAND CryptoBenchmarkEcdhXdhTests)
 
+add_executable(CryptoBenchmarkMlKemTests
+	MlKemAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkMlKemTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkMlKemTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkMlKemTests COMMAND CryptoBenchmarkMlKemTests)
+
 add_executable(CryptoBenchmarkIpcTests
 	IpcCodecTests.cpp
 )
