@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <variant>
 
+#include "adapters/AeadAdapter.h"
 #include "adapters/DigestAdapter.h"
 #include "adapters/XofAdapter.h"
 
@@ -56,8 +57,29 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
     case core::ExecutionStrategyId::Ecdh:
     case core::ExecutionStrategyId::Xdh:
     case core::ExecutionStrategyId::MlKem:
-    case core::ExecutionStrategyId::Aead:
         throw std::invalid_argument("AdapterFactory execution strategy is unsupported");
+    case core::ExecutionStrategyId::Aead: {
+        const auto* aeadConfig = std::get_if<core::AeadConfig>(&validatedConfig.parameters);
+        if (aeadConfig == nullptr) {
+            throw std::logic_error("Aead strategy requires AeadConfig");
+        }
+
+        if (profile.family == core::AlgorithmFamily::AesGcm) {
+            const auto* aesParameters = std::get_if<core::AesGcmParameters>(&profile.parameters);
+            if (aesParameters == nullptr) {
+                throw std::logic_error("AES-GCM profile requires AesGcmParameters");
+            }
+            return std::make_unique<AeadAdapter>(*aesParameters, operation, aeadConfig->plaintextSize);
+        }
+        if (profile.family == core::AlgorithmFamily::ChaCha20Poly1305) {
+            const auto* chachaParameters = std::get_if<core::ChaCha20Poly1305Parameters>(&profile.parameters);
+            if (chachaParameters == nullptr) {
+                throw std::logic_error("ChaCha20-Poly1305 profile requires ChaCha20Poly1305Parameters");
+            }
+            return std::make_unique<AeadAdapter>(*chachaParameters, operation, aeadConfig->plaintextSize);
+        }
+        throw std::logic_error("Aead strategy requires AEAD parameters");
+    }
     }
 
     throw std::logic_error("AdapterFactory encountered an unknown execution strategy");

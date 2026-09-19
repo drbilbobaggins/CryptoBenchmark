@@ -305,7 +305,7 @@ void testAdapterFactoryCreatesAllCanonicalHashXofProfiles()
     }
 }
 
-void testAdapterFactoryRejectsUnsupportedStrategy()
+void testAdapterFactoryCreatesCanonicalAead()
 {
     const core::BenchmarkConfig config{
         core::AlgorithmProfileId::Aes128Gcm,
@@ -317,13 +317,31 @@ void testAdapterFactoryRejectsUnsupportedStrategy()
     auto validated = validateFactoryConfig(config);
     const auto& profile = canonicalFactoryProfile(config.profile);
 
+    auto adapter = AdapterFactory{}.create(profile, config.operation, validated);
+    require(adapter != nullptr, "factory did not create the canonical AEAD adapter");
+    adapter->prepareSeries();
+    adapter->executeIteration();
+}
+
+void testAdapterFactoryRejectsUnimplementedStrategy()
+{
+    const core::BenchmarkConfig config{
+        core::AlgorithmProfileId::SlhDsaSha2128S,
+        BenchmarkOperation::Sign,
+        1,
+        1,
+        core::SignatureConfig{core::MessageInput{1}}
+    };
+    auto validated = validateFactoryConfig(config);
+    const auto& profile = canonicalFactoryProfile(config.profile);
+
     bool rejected = false;
     try {
         static_cast<void>(AdapterFactory{}.create(profile, config.operation, validated));
     } catch (const std::invalid_argument&) {
         rejected = true;
     }
-    require(rejected, "factory did not reject the unsupported AEAD strategy");
+    require(rejected, "factory did not reject the unimplemented SLH-DSA strategy");
 }
 
 void testAdapterFactoryRejectsProfileMismatch()
@@ -407,7 +425,8 @@ int main()
             std::pair{"DigestAdapter through BenchmarkRunner", &testDigestAdapterRunsThroughBenchmarkRunner},
             std::pair{"AdapterFactory creates and executes canonical SHA-256", &testAdapterFactoryCreatesAndExecutesCanonicalSha256},
             std::pair{"AdapterFactory creates all canonical Hash/XOF profiles", &testAdapterFactoryCreatesAllCanonicalHashXofProfiles},
-            std::pair{"AdapterFactory rejects unsupported strategy", &testAdapterFactoryRejectsUnsupportedStrategy},
+            std::pair{"AdapterFactory creates canonical AEAD", &testAdapterFactoryCreatesCanonicalAead},
+            std::pair{"AdapterFactory rejects unimplemented strategy", &testAdapterFactoryRejectsUnimplementedStrategy},
             std::pair{"AdapterFactory rejects profile mismatch", &testAdapterFactoryRejectsProfileMismatch},
             std::pair{"AdapterFactory rejects operation mismatch", &testAdapterFactoryRejectsOperationMismatch},
             std::pair{"AdapterFactory rejects incorrect parameter variant", &testAdapterFactoryRejectsIncorrectParameterVariant}

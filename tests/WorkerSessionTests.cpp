@@ -275,11 +275,11 @@ void testUnsupportedStrategyIsReportedByWorker()
     require(server.listen(name), "test server listen failed");
 
     const core::BenchmarkConfig config{
-        core::AlgorithmProfileId::Aes128Gcm,
-        core::BenchmarkOperation::Encrypt,
+        core::AlgorithmProfileId::SlhDsaSha2128S,
+        core::BenchmarkOperation::Sign,
         1,
         1,
-        core::AeadConfig{1}
+        core::SignatureConfig{core::MessageInput{1}}
     };
 
     auto future = std::async(std::launch::async, [&] {

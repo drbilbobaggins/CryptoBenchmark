@@ -1,5 +1,6 @@
 add_library(cryptobench_crypto STATIC
     AdapterFactory.cpp
+    adapters/AeadAdapter.cpp
     adapters/DigestAdapter.cpp
     adapters/XofAdapter.cpp
     openssl/OpenSslError.cpp

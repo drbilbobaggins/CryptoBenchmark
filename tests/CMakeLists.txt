@@ -81,6 +81,22 @@ target_include_directories(CryptoBenchmarkCryptoTests
 
 add_test(NAME CryptoBenchmarkCryptoTests COMMAND CryptoBenchmarkCryptoTests)
 
+add_executable(CryptoBenchmarkAeadTests
+	AeadAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkAeadTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkAeadTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkAeadTests COMMAND CryptoBenchmarkAeadTests)
+
 add_executable(CryptoBenchmarkIpcTests
 	IpcCodecTests.cpp
 )
