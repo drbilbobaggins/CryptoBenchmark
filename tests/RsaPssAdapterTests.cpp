@@ -181,6 +181,26 @@ void requireDirectVerify(
         "direct RSA-PSS verification failed");
 }
 
+int directMessageVerify(
+    EVP_PKEY* key,
+    SignatureDigest digest,
+    std::span<const unsigned char> message,
+    std::span<const unsigned char> signature)
+{
+    auto md = fetchDigest(digest);
+    crypto::openssl::EvpMdCtxPtr context(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+    require(context != nullptr, "could not create direct message verify context");
+    EVP_PKEY_CTX* borrowedContext = nullptr;
+    require(
+        EVP_DigestVerifyInit(context.get(), &borrowedContext, md.get(), nullptr, key) == 1,
+        "direct message verify init failed");
+    configurePss(borrowedContext, md.get());
+    require(
+        EVP_DigestVerifyUpdate(context.get(), message.data(), message.size()) == 1,
+        "direct message verify update failed");
+    return EVP_DigestVerifyFinal(context.get(), signature.data(), signature.size());
+}
+
 void testKeyGenUsability()
 {
     for (const auto& testCase : keyGenCases) {
@@ -275,7 +295,119 @@ void testRepeatedSignAndVerify()
     verify.executeIteration();
 }
 
-void testFactoryCreatesAllM075Paths()
+void testProductionMessageSignCorrectness()
+{
+    for (const auto& testCase : pssCases) {
+        auto adapterOwner = createAdapter(
+            testCase.profile, BenchmarkOperation::Sign,
+            SignatureConfig{core::MessageInput{32}});
+        auto& adapter = asRsaPss(*adapterOwner);
+        adapter.prepareSeries();
+        require(adapter.messageForTesting().size() == 32, "message size mismatch");
+        adapter.executeIteration();
+        require(adapter.signatureForTesting().size() == testCase.signatureBytes, "message signature size mismatch");
+        require(
+            directMessageVerify(
+                adapter.signingKeyForTesting(), testCase.digest,
+                adapter.messageForTesting(), adapter.signatureForTesting()) == 1,
+            "independent Message Sign verification failed");
+    }
+}
+
+void testProductionMessageVerifyCorrectness()
+{
+    for (const auto& testCase : pssCases) {
+        auto adapterOwner = createAdapter(
+            testCase.profile, BenchmarkOperation::Verify,
+            SignatureConfig{core::MessageInput{32}});
+        auto& adapter = asRsaPss(*adapterOwner);
+        adapter.prepareSeries();
+        adapter.executeIteration();
+        require(adapter.messageForTesting().size() == 32, "verify message size mismatch");
+        require(adapter.signatureForTesting().size() == testCase.signatureBytes, "verify message signature size mismatch");
+    }
+}
+
+void testMessageSizesAndPattern()
+{
+    constexpr std::array messageSizes{
+        std::size_t{1}, std::size_t{32}, std::size_t{1024},
+        std::size_t{16 * 1024}, std::size_t{1024 * 1024}};
+    for (const auto messageSize : messageSizes) {
+        auto adapterOwner = createAdapter(
+            AlgorithmProfileId::RsaPss2048Sha256, BenchmarkOperation::Sign,
+            SignatureConfig{core::MessageInput{messageSize}});
+        auto& adapter = asRsaPss(*adapterOwner);
+        adapter.prepareSeries();
+        require(adapter.messageForTesting().size() == messageSize, "configured message size was not retained");
+        for (std::size_t index = 0; index < messageSize; ++index) {
+            require(
+                adapter.messageForTesting()[index] == static_cast<unsigned char>('a' + (index % 3)),
+                "message pattern mismatch");
+        }
+        adapter.executeIteration();
+        require(
+            directMessageVerify(
+                adapter.signingKeyForTesting(), SignatureDigest::Sha256,
+                adapter.messageForTesting(), adapter.signatureForTesting()) == 1,
+            "sized Message Sign verification failed");
+    }
+}
+
+void testRepeatedMessageSignAndVerify()
+{
+    auto signOwner = createAdapter(
+        AlgorithmProfileId::RsaPss2048Sha256, BenchmarkOperation::Sign,
+        SignatureConfig{core::MessageInput{32}});
+    auto& sign = asRsaPss(*signOwner);
+    sign.prepareSeries();
+    sign.executeIteration();
+    require(
+        directMessageVerify(sign.signingKeyForTesting(), SignatureDigest::Sha256,
+                            sign.messageForTesting(), sign.signatureForTesting()) == 1,
+        "first repeated Message Sign failed");
+    sign.executeIteration();
+    require(
+        directMessageVerify(sign.signingKeyForTesting(), SignatureDigest::Sha256,
+                            sign.messageForTesting(), sign.signatureForTesting()) == 1,
+        "second repeated Message Sign failed");
+
+    auto verifyOwner = createAdapter(
+        AlgorithmProfileId::RsaPss2048Sha256, BenchmarkOperation::Verify,
+        SignatureConfig{core::MessageInput{32}});
+    auto& verify = asRsaPss(*verifyOwner);
+    verify.prepareSeries();
+    verify.executeIteration();
+    verify.executeIteration();
+}
+
+void testMessageRejectsWrongMessageAndTamperedSignature()
+{
+    auto adapterOwner = createAdapter(
+        AlgorithmProfileId::RsaPss2048Sha256, BenchmarkOperation::Sign,
+        SignatureConfig{core::MessageInput{32}});
+    auto& adapter = asRsaPss(*adapterOwner);
+    adapter.prepareSeries();
+    adapter.executeIteration();
+    auto wrongMessage = std::vector<unsigned char>(
+        adapter.messageForTesting().begin(), adapter.messageForTesting().end());
+    wrongMessage[0] ^= 0x01U;
+    require(
+        directMessageVerify(
+            adapter.signingKeyForTesting(), SignatureDigest::Sha256,
+            wrongMessage, adapter.signatureForTesting()) == 0,
+        "wrong message unexpectedly verified");
+    auto tamperedSignature = std::vector<unsigned char>(
+        adapter.signatureForTesting().begin(), adapter.signatureForTesting().end());
+    tamperedSignature.back() ^= 0x01U;
+    require(
+        directMessageVerify(
+            adapter.signingKeyForTesting(), SignatureDigest::Sha256,
+            adapter.messageForTesting(), tamperedSignature) == 0,
+        "tampered signature unexpectedly verified");
+}
+
+void testFactoryCreatesAllM075AndM076Paths()
 {
     for (const auto& testCase : keyGenCases) {
         auto adapter = createAdapter(
@@ -291,23 +423,13 @@ void testFactoryCreatesAllM075Paths()
                 SignatureConfig{core::PrehashedInput{}});
             adapter->prepareSeries();
             adapter->executeIteration();
+            auto messageAdapter = createAdapter(
+                testCase.profile, operation,
+                SignatureConfig{core::MessageInput{32}});
+            messageAdapter->prepareSeries();
+            messageAdapter->executeIteration();
         }
     }
-}
-
-void testMessageInputRemainsUnsupported()
-{
-    const auto validated = validateConfig(
-        AlgorithmProfileId::RsaPss2048Sha256, BenchmarkOperation::Sign,
-        SignatureConfig{core::MessageInput{1}});
-    bool rejected = false;
-    try {
-        static_cast<void>(AdapterFactory{}.create(
-            profileFor(AlgorithmProfileId::RsaPss2048Sha256), BenchmarkOperation::Sign, validated));
-    } catch (const std::invalid_argument&) {
-        rejected = true;
-    }
-    require(rejected, "RSA-PSS Message input was not rejected before M07.6");
 }
 
 void testFactoryRejectsIncorrectParameterVariant()
@@ -340,8 +462,12 @@ int main()
             std::pair{"production Prehashed Sign correctness", &testProductionSignCorrectness},
             std::pair{"production Prehashed Verify correctness", &testProductionVerifyCorrectness},
             std::pair{"repeated RSA-PSS Sign and Verify", &testRepeatedSignAndVerify},
-            std::pair{"all M07.5 factory paths", &testFactoryCreatesAllM075Paths},
-            std::pair{"Message input remains unsupported", &testMessageInputRemainsUnsupported},
+            std::pair{"production Message Sign correctness", &testProductionMessageSignCorrectness},
+            std::pair{"production Message Verify correctness", &testProductionMessageVerifyCorrectness},
+            std::pair{"Message sizes and pattern", &testMessageSizesAndPattern},
+            std::pair{"repeated Message Sign and Verify", &testRepeatedMessageSignAndVerify},
+            std::pair{"Message rejects wrong message and tampering", &testMessageRejectsWrongMessageAndTamperedSignature},
+            std::pair{"all M07.5 and M07.6 factory paths", &testFactoryCreatesAllM075AndM076Paths},
             std::pair{"factory rejects incorrect parameter variant", &testFactoryRejectsIncorrectParameterVariant}};
         for (const auto& [name, test] : tests) {
             test();

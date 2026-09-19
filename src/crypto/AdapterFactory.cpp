@@ -122,11 +122,13 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
         if (operation != core::BenchmarkOperation::Sign && operation != core::BenchmarkOperation::Verify) {
             throw std::logic_error("RSA-PSS parameters require Sign or Verify");
         }
-        if (std::holds_alternative<core::MessageInput>(signatureConfig->input)) {
-            throw std::invalid_argument("RSA-PSS Message input is not implemented until M07.6");
+        if (const auto* messageInput = std::get_if<core::MessageInput>(&signatureConfig->input)) {
+            return std::make_unique<RsaPssAdapter>(
+                *pssParameters, operation, RsaPssAdapter::InputMode::Message,
+                characteristics.signatureSize->bytes, messageInput->messageSize);
         }
         if (!std::holds_alternative<core::PrehashedInput>(signatureConfig->input)) {
-            throw std::logic_error("RSA-PSS Sign and Verify require PrehashedInput in M07.5");
+            throw std::logic_error("RSA-PSS Sign and Verify require PrehashedInput or MessageInput");
         }
         return std::make_unique<RsaPssAdapter>(
             *pssParameters, operation, RsaPssAdapter::InputMode::Prehashed,

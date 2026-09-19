@@ -1,8 +1,8 @@
 #include "RsaPssAdapter.h"
 
+#include <array>
 #include <stdexcept>
 #include <string_view>
-#include <type_traits>
 
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
@@ -60,18 +60,23 @@ RsaPssAdapter::RsaPssAdapter(
     core::RsaPssParameters parameters,
     core::BenchmarkOperation operation,
     InputMode inputMode,
-    core::ByteCount signatureBytes)
+    core::ByteCount signatureBytes,
+    core::WorkloadBytes messageSize)
     : parameters_(parameters),
       operation_(operation),
       inputMode_(inputMode),
-      signatureBytes_(signatureBytes)
+      signatureBytes_(signatureBytes),
+      messageSize_(messageSize)
 {
     static_cast<void>(digestName(parameters.digest));
     if (operation_ != core::BenchmarkOperation::Sign && operation_ != core::BenchmarkOperation::Verify) {
         throw std::invalid_argument("RsaPssAdapter PSS parameters require Sign or Verify");
     }
-    if (inputMode_ != InputMode::Prehashed) {
-        throw std::invalid_argument("RsaPssAdapter supports only Prehashed input in M07.5");
+    if (inputMode_ == InputMode::NoInput) {
+        throw std::invalid_argument("RsaPssAdapter PSS requires Prehashed or Message input");
+    }
+    if (inputMode_ == InputMode::Message && messageSize_ == 0) {
+        throw std::invalid_argument("RsaPssAdapter Message input requires a non-zero message size");
     }
     if (signatureBytes_ == 0) {
         throw std::invalid_argument("RsaPssAdapter signature size must be non-zero");
@@ -110,16 +115,51 @@ void RsaPssAdapter::prepareSignature()
     if (!digest_) {
         openssl::throwOpenSslError("EVP_MD_fetch(RSA-PSS digest)");
     }
-    digestBytes_.assign(digestBytes(parameters.digest), 0xA5U);
+    if (inputMode_ == InputMode::Prehashed) {
+        digestBytes_.assign(digestBytes(parameters.digest), 0xA5U);
+        context_ = openssl::EvpPkeyCtxPtr(
+            EVP_PKEY_CTX_new_from_pkey(nullptr, signingKey_.get(), nullptr), &EVP_PKEY_CTX_free);
+        if (!context_) {
+            openssl::throwOpenSslError("EVP_PKEY_CTX_new_from_pkey(RSA-PSS)");
+        }
+    }
+    if (inputMode_ == InputMode::Message) {
+        message_.resize(static_cast<std::size_t>(messageSize_));
+        constexpr std::array pattern{'a', 'b', 'c'};
+        for (std::size_t index = 0; index < message_.size(); ++index) {
+            message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+        }
+        messageContext_ = openssl::EvpMdCtxPtr(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+        if (!messageContext_) {
+            openssl::throwOpenSslError("EVP_MD_CTX_new(RSA-PSS message)");
+        }
+    }
     signature_.resize(signatureBytes_);
 
-    context_ = openssl::EvpPkeyCtxPtr(
-        EVP_PKEY_CTX_new_from_pkey(nullptr, signingKey_.get(), nullptr), &EVP_PKEY_CTX_free);
-    if (!context_) {
-        openssl::throwOpenSslError("EVP_PKEY_CTX_new_from_pkey(RSA-PSS)");
-    }
-    if (operation_ == core::BenchmarkOperation::Verify) {
+    if (operation_ == core::BenchmarkOperation::Verify && inputMode_ == InputMode::Prehashed) {
         createPrerequisiteSignature();
+    }
+    if (operation_ == core::BenchmarkOperation::Verify && inputMode_ == InputMode::Message) {
+        openssl::EvpMdCtxPtr prerequisiteContext(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+        if (!prerequisiteContext) {
+            openssl::throwOpenSslError("EVP_MD_CTX_new(RSA-PSS message prerequisite)");
+        }
+        EVP_PKEY_CTX* borrowedContext = nullptr;
+        openssl::checkOpenSslReturn(
+            EVP_DigestSignInit(
+                prerequisiteContext.get(), &borrowedContext, digest_.get(), nullptr, signingKey_.get()),
+            "EVP_DigestSignInit(RSA-PSS message prerequisite)");
+        configurePss(borrowedContext);
+        openssl::checkOpenSslReturn(
+            EVP_DigestSignUpdate(prerequisiteContext.get(), message_.data(), message_.size()),
+            "EVP_DigestSignUpdate(RSA-PSS message prerequisite)");
+        std::size_t signatureLength = signature_.size();
+        openssl::checkOpenSslReturn(
+            EVP_DigestSignFinal(prerequisiteContext.get(), signature_.data(), &signatureLength),
+            "EVP_DigestSignFinal(RSA-PSS message prerequisite)");
+        if (signatureLength != signature_.size()) {
+            throw std::runtime_error("RSA-PSS message prerequisite signature length mismatch");
+        }
     }
 }
 
@@ -162,7 +202,12 @@ void RsaPssAdapter::createPrerequisiteSignature()
 
 void RsaPssAdapter::executeIteration()
 {
-    if (!context_) {
+    if (operation_ == core::BenchmarkOperation::KeyGen && !context_) {
+        throw std::logic_error("RsaPssAdapter is not prepared");
+    }
+    if (operation_ != core::BenchmarkOperation::KeyGen &&
+        ((inputMode_ == InputMode::Prehashed && !context_) ||
+         (inputMode_ == InputMode::Message && !messageContext_))) {
         throw std::logic_error("RsaPssAdapter is not prepared");
     }
     switch (operation_) {
@@ -195,6 +240,25 @@ void RsaPssAdapter::executeKeyGeneration()
 
 void RsaPssAdapter::executeSign()
 {
+    if (inputMode_ == InputMode::Message) {
+        EVP_PKEY_CTX* borrowedContext = nullptr;
+        openssl::checkOpenSslReturn(
+            EVP_DigestSignInit(
+                messageContext_.get(), &borrowedContext, digest_.get(), nullptr, signingKey_.get()),
+            "EVP_DigestSignInit(RSA-PSS message)");
+        configurePss(borrowedContext);
+        openssl::checkOpenSslReturn(
+            EVP_DigestSignUpdate(messageContext_.get(), message_.data(), message_.size()),
+            "EVP_DigestSignUpdate(RSA-PSS message)");
+        std::size_t signatureLength = signature_.size();
+        openssl::checkOpenSslReturn(
+            EVP_DigestSignFinal(messageContext_.get(), signature_.data(), &signatureLength),
+            "EVP_DigestSignFinal(RSA-PSS message)");
+        if (signatureLength != signature_.size()) {
+            throw std::runtime_error("RSA-PSS message signature length mismatch");
+        }
+        return;
+    }
     std::size_t signatureLength = signature_.size();
     openssl::checkOpenSslReturn(EVP_PKEY_sign_init(context_.get()), "EVP_PKEY_sign_init");
     configurePss(context_.get());
@@ -210,6 +274,26 @@ void RsaPssAdapter::executeSign()
 
 void RsaPssAdapter::executeVerify()
 {
+    if (inputMode_ == InputMode::Message) {
+        EVP_PKEY_CTX* borrowedContext = nullptr;
+        openssl::checkOpenSslReturn(
+            EVP_DigestVerifyInit(
+                messageContext_.get(), &borrowedContext, digest_.get(), nullptr, signingKey_.get()),
+            "EVP_DigestVerifyInit(RSA-PSS message)");
+        configurePss(borrowedContext);
+        openssl::checkOpenSslReturn(
+            EVP_DigestVerifyUpdate(messageContext_.get(), message_.data(), message_.size()),
+            "EVP_DigestVerifyUpdate(RSA-PSS message)");
+        const int result = EVP_DigestVerifyFinal(
+            messageContext_.get(), signature_.data(), signature_.size());
+        if (result == 1) {
+            return;
+        }
+        if (result == 0) {
+            throw std::runtime_error("RSA-PSS message verification failed for a valid prerequisite signature");
+        }
+        openssl::throwOpenSslError("EVP_DigestVerifyFinal(RSA-PSS message)");
+    }
     openssl::checkOpenSslReturn(EVP_PKEY_verify_init(context_.get()), "EVP_PKEY_verify_init");
     configurePss(context_.get());
     const int result = EVP_PKEY_verify(
@@ -226,7 +310,6 @@ void RsaPssAdapter::executeVerify()
 
 void RsaPssAdapter::configurePss(EVP_PKEY_CTX* context) const
 {
-    const auto& parameters = std::get<core::RsaPssParameters>(parameters_);
     openssl::checkOpenSslReturn(
         EVP_PKEY_CTX_set_rsa_padding(context, RSA_PKCS1_PSS_PADDING),
         "EVP_PKEY_CTX_set_rsa_padding");
@@ -239,12 +322,16 @@ void RsaPssAdapter::configurePss(EVP_PKEY_CTX* context) const
     openssl::checkOpenSslReturn(
         EVP_PKEY_CTX_set_rsa_pss_saltlen(context, RSA_PSS_SALTLEN_DIGEST),
         "EVP_PKEY_CTX_set_rsa_pss_saltlen");
-    static_cast<void>(parameters);
 }
 
 std::span<const unsigned char> RsaPssAdapter::digestForTesting() const noexcept
 {
     return digestBytes_;
+}
+
+std::span<const unsigned char> RsaPssAdapter::messageForTesting() const noexcept
+{
+    return message_;
 }
 
 std::span<const unsigned char> RsaPssAdapter::signatureForTesting() const noexcept
