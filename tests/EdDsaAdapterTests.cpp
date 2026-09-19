@@ -336,21 +336,6 @@ void testFixedSignatureMetadata()
     }
 }
 
-void testUnsupportedStrategiesRemainRejected()
-{
-    const auto validated = validateConfig(
-        AlgorithmProfileId::SlhDsaSha2128S, BenchmarkOperation::Sign,
-        SignatureConfig{core::MessageInput{32}});
-    bool rejected = false;
-    try {
-        static_cast<void>(AdapterFactory{}.create(profileFor(AlgorithmProfileId::SlhDsaSha2128S),
-                                                   BenchmarkOperation::Sign, validated));
-    } catch (const std::invalid_argument&) {
-        rejected = true;
-    }
-    require(rejected, "SLH-DSA unsupported strategy was not rejected");
-}
-
 void testTypedAndInputNegativeCoverage()
 {
     const auto canonicalProfile = profileFor(AlgorithmProfileId::Ed25519);
@@ -395,7 +380,6 @@ int main()
         std::pair{"EdDSA repeated and tamper tests", &testRepeatedMessageOperationsAndTamperNegatives},
         std::pair{"all EdDSA factory paths", &testFactoryCreatesAllEdDsaPaths},
         std::pair{"fixed EdDSA signature metadata", &testFixedSignatureMetadata},
-        std::pair{"unsupported strategies remain rejected", &testUnsupportedStrategiesRemainRejected},
         std::pair{"typed and input negative coverage", &testTypedAndInputNegativeCoverage}};
     try {
         for (const auto& [name, test] : tests) {

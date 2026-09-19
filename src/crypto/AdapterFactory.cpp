@@ -11,6 +11,7 @@
 #include "adapters/MlKemAdapter.h"
 #include "adapters/MlDsaAdapter.h"
 #include "adapters/RsaPssAdapter.h"
+#include "adapters/SlhDsaAdapter.h"
 #include "adapters/XofAdapter.h"
 #include "adapters/XdhAdapter.h"
 
@@ -240,8 +241,39 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
             *mlDsaParameters, operation, MlDsaAdapter::InputMode::Message,
             characteristics.signatureSize->bytes, messageInput->messageSize);
     }
-    case core::ExecutionStrategyId::SlhDsaSignature:
-        throw std::invalid_argument("AdapterFactory execution strategy is unsupported");
+    case core::ExecutionStrategyId::SlhDsaSignature: {
+        const auto* signatureConfig = std::get_if<core::SignatureConfig>(&validatedConfig.parameters);
+        if (signatureConfig == nullptr) {
+            throw std::logic_error("SLH-DSA strategy requires SignatureConfig");
+        }
+        const auto& characteristics = std::get<core::SignatureCharacteristics>(profile.characteristics);
+        if (!characteristics.signatureSize ||
+            characteristics.signatureSize->kind != core::SignatureSizeReferenceKind::Fixed) {
+            throw std::logic_error("SLH-DSA profile requires fixed signature-size characteristics");
+        }
+        const auto* slhDsaParameters = std::get_if<core::SlhDsaParameters>(&profile.parameters);
+        if (slhDsaParameters == nullptr) {
+            throw std::logic_error("SLH-DSA strategy requires SlhDsaParameters");
+        }
+        if (operation == core::BenchmarkOperation::KeyGen) {
+            if (!std::holds_alternative<core::NoSignatureInput>(signatureConfig->input)) {
+                throw std::logic_error("SLH-DSA KeyGen requires NoSignatureInput");
+            }
+            return std::make_unique<SlhDsaAdapter>(
+                *slhDsaParameters, operation, SlhDsaAdapter::InputMode::NoInput,
+                characteristics.signatureSize->bytes);
+        }
+        if (operation != core::BenchmarkOperation::Sign && operation != core::BenchmarkOperation::Verify) {
+            throw std::logic_error("SLH-DSA parameters require KeyGen, Sign, or Verify");
+        }
+        const auto* messageInput = std::get_if<core::MessageInput>(&signatureConfig->input);
+        if (messageInput == nullptr) {
+            throw std::logic_error("SLH-DSA Sign and Verify require MessageInput");
+        }
+        return std::make_unique<SlhDsaAdapter>(
+            *slhDsaParameters, operation, SlhDsaAdapter::InputMode::Message,
+            characteristics.signatureSize->bytes, messageInput->messageSize);
+    }
     case core::ExecutionStrategyId::Aead: {
         const auto* aeadConfig = std::get_if<core::AeadConfig>(&validatedConfig.parameters);
         if (aeadConfig == nullptr) {

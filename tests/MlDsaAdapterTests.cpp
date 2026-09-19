@@ -272,16 +272,6 @@ void testTypedAndInputNegativeCoverage()
     }
     require(prehashedRejected, "ML-DSA Prehashed input was not rejected");
 
-    const auto slhProfile = profileFor(AlgorithmProfileId::SlhDsaSha2128S);
-    auto slhValidated = validateConfig(AlgorithmProfileId::SlhDsaSha2128S, BenchmarkOperation::Sign,
-                                       SignatureConfig{core::MessageInput{32}});
-    bool slhRejected = false;
-    try {
-        static_cast<void>(AdapterFactory{}.create(slhProfile, BenchmarkOperation::Sign, slhValidated));
-    } catch (const std::invalid_argument&) {
-        slhRejected = true;
-    }
-    require(slhRejected, "SLH-DSA unsupported strategy was not rejected");
 }
 
 } // namespace
