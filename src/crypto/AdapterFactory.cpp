@@ -5,6 +5,7 @@
 
 #include "adapters/AeadAdapter.h"
 #include "adapters/DigestAdapter.h"
+#include "adapters/EdDsaAdapter.h"
 #include "adapters/EcdhAdapter.h"
 #include "adapters/EcdsaAdapter.h"
 #include "adapters/MlKemAdapter.h"
@@ -172,6 +173,39 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
             characteristics.signatureSize->bytes);
     }
     case core::ExecutionStrategyId::EdDsaSignature:
+    {
+        const auto* signatureConfig = std::get_if<core::SignatureConfig>(&validatedConfig.parameters);
+        if (signatureConfig == nullptr) {
+            throw std::logic_error("EdDSA strategy requires SignatureConfig");
+        }
+        const auto& characteristics = std::get<core::SignatureCharacteristics>(profile.characteristics);
+        if (!characteristics.signatureSize ||
+            characteristics.signatureSize->kind != core::SignatureSizeReferenceKind::Fixed) {
+            throw std::logic_error("EdDSA profile requires fixed signature-size characteristics");
+        }
+        const auto* eddsaParameters = std::get_if<core::EdDsaParameters>(&profile.parameters);
+        if (eddsaParameters == nullptr) {
+            throw std::logic_error("EdDSA strategy requires EdDsaParameters");
+        }
+        if (operation == core::BenchmarkOperation::KeyGen) {
+            if (!std::holds_alternative<core::NoSignatureInput>(signatureConfig->input)) {
+                throw std::logic_error("EdDSA KeyGen requires NoSignatureInput");
+            }
+            return std::make_unique<EdDsaAdapter>(
+                *eddsaParameters, operation, EdDsaAdapter::InputMode::NoInput,
+                characteristics.signatureSize->bytes);
+        }
+        if (operation != core::BenchmarkOperation::Sign && operation != core::BenchmarkOperation::Verify) {
+            throw std::logic_error("EdDSA parameters require KeyGen, Sign, or Verify");
+        }
+        const auto* messageInput = std::get_if<core::MessageInput>(&signatureConfig->input);
+        if (messageInput == nullptr) {
+            throw std::logic_error("EdDSA Sign and Verify require MessageInput");
+        }
+        return std::make_unique<EdDsaAdapter>(
+            *eddsaParameters, operation, EdDsaAdapter::InputMode::Message,
+            characteristics.signatureSize->bytes, messageInput->messageSize);
+    }
     case core::ExecutionStrategyId::MlDsaSignature:
     case core::ExecutionStrategyId::SlhDsaSignature:
         throw std::invalid_argument("AdapterFactory execution strategy is unsupported");
