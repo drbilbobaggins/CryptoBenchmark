@@ -4,6 +4,8 @@
 #include <QLocalSocket>
 #include <QTimer>
 
+#include <windows.h>
+
 #include <cryptobench/core/ProgressInfo.h>
 #include <cryptobench/ipc/FrameCodec.h>
 #include <cryptobench/ipc/JsonCodec.h>
@@ -11,6 +13,7 @@
 
 #include <cstdlib>
 #include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -82,6 +85,21 @@ void sendProgressAndMeasurementReady(
     sendFrame(socket, MessageType::MeasurementReady, encodeRunIndexPayload(runIndex));
 }
 
+void sendFailureOutcome(QLocalSocket& socket, std::uint32_t runIndex, const char* message)
+{
+    sendFrame(socket, MessageType::WorkerOutcome,
+              encodeWorkerOutcome({
+                  WorkerOutcomeStatus::Failed,
+                  core::ErrorInfo{
+                      core::ErrorCode::CryptoOperationFailed,
+                      core::FailureStage::Measurement,
+                      runIndex,
+                      message,
+                      std::string("scripted-library-details")
+                  }
+              }));
+}
+
 QString argumentValue(int argc, char* argv[], int index)
 {
     return index < argc && argv[index] != nullptr
@@ -124,6 +142,63 @@ int main(int argc, char* argv[])
             return 4;
         }
         const auto config = decodeBenchmarkRequest(request.payload).config;
+
+        if (scenario == QStringLiteral("failed-before-measurement") ||
+            scenario == QStringLiteral("failed-immediately") ||
+            scenario == QStringLiteral("failed-disconnect-immediately")) {
+            sendFailureOutcome(socket, 0, "scripted worker failure");
+            if (scenario == QStringLiteral("failed-disconnect-immediately")) {
+                socket.disconnectFromServer();
+                socket.waitForDisconnected(1'000);
+            }
+            return 9;
+        }
+
+        if (scenario == QStringLiteral("failed-during-measurement")) {
+            sendProgressAndMeasurementReady(socket, 0, config.runs);
+            receiveExpected(socket, parser, MessageType::StartMeasurement);
+            signalMeasurementStarted(0);
+            sendFailureOutcome(socket, 0, "scripted active-measurement failure");
+            return 9;
+        }
+
+        if (scenario == QStringLiteral("failed-after-memory-window-closed")) {
+            sendProgressAndMeasurementReady(socket, 0, config.runs);
+            receiveExpected(socket, parser, MessageType::StartMeasurement);
+            signalMeasurementStarted(0);
+            sendFrame(socket, MessageType::MeasurementFinished, encodeRunIndexPayload(0));
+            receiveExpected(socket, parser, MessageType::MemoryWindowClosed);
+            sendFailureOutcome(socket, 0, "scripted pending-memory failure");
+            return 9;
+        }
+
+        if (scenario == QStringLiteral("crash-during-measurement")) {
+            sendProgressAndMeasurementReady(socket, 0, config.runs);
+            receiveExpected(socket, parser, MessageType::StartMeasurement);
+            signalMeasurementStarted(0);
+            return 9;
+        }
+
+        if (scenario == QStringLiteral("actual-crash-during-measurement")) {
+            sendProgressAndMeasurementReady(socket, 0, config.runs);
+            receiveExpected(socket, parser, MessageType::StartMeasurement);
+            signalMeasurementStarted(0);
+            RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+            return 9;
+        }
+
+        if (scenario == QStringLiteral("unexpected-disconnect")) {
+            sendFrame(socket, MessageType::Progress,
+                      encodeProgress({core::BenchmarkPhase::Preparing, std::nullopt, config.runs}));
+            socket.disconnectFromServer();
+            socket.waitForDisconnected(1'000);
+            return 0;
+        }
+
+        if (scenario == QStringLiteral("protocol-error")) {
+            sendFrame(socket, MessageType::BenchmarkRequest, {});
+            return 9;
+        }
 
         if (scenario == QStringLiteral("wait-before-measurement")) {
             sendFrame(socket, MessageType::Progress,

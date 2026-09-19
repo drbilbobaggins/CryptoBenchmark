@@ -37,6 +37,7 @@ core::BenchmarkConfig configFor(std::uint32_t runs)
 
 void waitForResult(QEventLoop& loop, QTimer& timeout, std::optional<core::BenchmarkResult>& result)
 {
+    if (result.has_value()) return;
     QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
     timeout.start(10'000);
     loop.exec();
@@ -251,6 +252,170 @@ void testCompletedPrefixCancellation()
     endScenario();
 }
 
+void requireFailedResult(const core::BenchmarkResult& result, std::size_t expectedRuns)
+{
+    require(result.status == core::BenchmarkStatus::Failed, "failure scenario did not fail");
+    require(result.error.has_value(), "Failed result has no error");
+    require(!result.statistics.has_value(), "Failed result contains statistics");
+    require(result.runs.size() == expectedRuns, "Failed result contains an incomplete run");
+}
+
+void requireScriptedWorkerError(const core::BenchmarkResult& result)
+{
+    require(result.error->code == core::ErrorCode::CryptoOperationFailed &&
+                result.error->stage == core::FailureStage::Measurement &&
+                result.error->runIndex == 0 &&
+                result.error->technicalMessage == "scripted worker failure" &&
+                result.error->libraryDetails == "scripted-library-details",
+            "worker ErrorInfo was not preserved exactly");
+}
+
+void testWorkerFailurePreservesErrorAndAllowsReuse()
+{
+    beginScenario("failed-disconnect-immediately");
+    application::BenchmarkController controller;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    std::optional<core::BenchmarkResult> firstResult;
+    std::optional<core::BenchmarkResult> secondResult;
+    int resultCount = 0;
+    bool firstSession = true;
+
+    QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
+                     [&](const core::BenchmarkResult& result) {
+                         ++resultCount;
+                         if (firstSession) {
+                             firstSession = false;
+                             firstResult = result;
+                             controller.start(configFor(1));
+                         } else {
+                             secondResult = result;
+                             loop.quit();
+                         }
+                     });
+
+    controller.start(configFor(1));
+    waitForResult(loop, timeout, firstResult);
+    require(resultCount == 2, "worker failure reuse did not produce two terminal results");
+    requireFailedResult(*firstResult, 0);
+    requireScriptedWorkerError(*firstResult);
+    requireFailedResult(*secondResult, 0);
+    requireScriptedWorkerError(*secondResult);
+    endScenario();
+}
+
+void testWorkerFailureDuringMeasurement()
+{
+    const auto signalPath = signalFilePath();
+    QFile::remove(signalPath);
+    beginScenario("failed-during-measurement");
+    require(qputenv("CRYPTOBENCH_TEST_WORKER_SIGNAL_FILE", signalPath.toLocal8Bit()),
+            "failed to configure active failure signal file");
+    application::BenchmarkController controller;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    std::optional<core::BenchmarkResult> result;
+    int resultCount = 0;
+    QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
+                     [&](const core::BenchmarkResult& value) {
+                         ++resultCount;
+                         result = value;
+                         loop.quit();
+                     });
+
+    controller.start(configFor(1));
+    waitForMarker(signalPath, "started 0", &result);
+    waitForResult(loop, timeout, result);
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+    require(resultCount == 1, "active worker failure produced duplicate results");
+    requireFailedResult(*result, 0);
+    endScenario();
+}
+
+void testWorkerFailureSurvivesImmediateDisconnect()
+{
+    beginScenario("failed-disconnect-immediately");
+    application::BenchmarkController controller;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    std::optional<core::BenchmarkResult> result;
+    int resultCount = 0;
+    QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
+                     [&](const core::BenchmarkResult& value) {
+                         ++resultCount;
+                         result = value;
+                         loop.quit();
+                     });
+
+    controller.start(configFor(1));
+    waitForResult(loop, timeout, result);
+    require(resultCount == 1, "immediate disconnect produced duplicate results");
+    requireFailedResult(*result, 0);
+    require(result->error->code == core::ErrorCode::CryptoOperationFailed &&
+                result->error->stage == core::FailureStage::Measurement &&
+                result->error->runIndex == 0 &&
+                result->error->technicalMessage == "scripted worker failure" &&
+                result->error->libraryDetails == "scripted-library-details",
+            "buffered worker ErrorInfo was not preserved after disconnect");
+    endScenario();
+}
+
+void testWorkerFailureDiscardsPendingMemory()
+{
+    beginScenario("failed-after-memory-window-closed");
+    application::BenchmarkController controller;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    std::optional<core::BenchmarkResult> result;
+    QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
+                     [&](const core::BenchmarkResult& value) {
+                         result = value;
+                         loop.quit();
+                     });
+
+    controller.start(configFor(1));
+    waitForResult(loop, timeout, result);
+    requireFailedResult(*result, 0);
+    require(result->error->technicalMessage == "scripted pending-memory failure",
+            "pending-memory failure error was not preserved");
+    endScenario();
+}
+
+void testParentDetectedFailureScenarios()
+{
+    for (const auto scenario : {"crash-during-measurement", "actual-crash-during-measurement",
+                                "unexpected-disconnect", "protocol-error"}) {
+        beginScenario(scenario);
+        application::BenchmarkController controller;
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        std::optional<core::BenchmarkResult> result;
+        int resultCount = 0;
+        QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
+                         [&](const core::BenchmarkResult& value) {
+                             ++resultCount;
+                             result = value;
+                             loop.quit();
+                         });
+
+        controller.start(configFor(1));
+        waitForResult(loop, timeout, result);
+        QCoreApplication::processEvents(QEventLoop::AllEvents);
+        require(resultCount == 1, "parent failure produced duplicate results");
+        requireFailedResult(*result, 0);
+        if (std::string_view(scenario) == "actual-crash-during-measurement") {
+            require(result->error->technicalMessage.find("crashed") != std::string::npos,
+                "actual crash evidence was: " + result->error->technicalMessage);
+        }
+        endScenario();
+    }
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -262,6 +427,11 @@ int main(int argc, char* argv[])
         testCancelBeforeMeasurementAndReuse();
         testCancelDuringMeasurement();
         testCompletedPrefixCancellation();
+        testWorkerFailurePreservesErrorAndAllowsReuse();
+        testWorkerFailureDuringMeasurement();
+        testWorkerFailureSurvivesImmediateDisconnect();
+        testWorkerFailureDiscardsPendingMemory();
+        testParentDetectedFailureScenarios();
         endScenario();
         std::cout << "Benchmark cancellation tests passed\n";
         return 0;

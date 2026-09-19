@@ -45,6 +45,12 @@ private:
         Aborting
     };
 
+    enum class FailureOrigin {
+        Parent,
+        Worker,
+        ProcessExit
+    };
+
     void onWorkerReady(const ipc::WorkerReady& value);
     void onProgress(const core::ProgressInfo& value);
     void onMeasurementReady(std::uint32_t runIndex);
@@ -58,7 +64,8 @@ private:
     void onTimeout();
 
     void armTimeout();
-    void enterFailure(core::ErrorInfo error);
+    void enterFailure(core::ErrorInfo error, FailureOrigin origin = FailureOrigin::Parent);
+    void finalizeFailure();
     void finishSuccessfully();
     void finishCancelled();
 
@@ -72,6 +79,10 @@ private:
     std::uint32_t expectedRunIndex_ = 0;
     std::vector<core::RunResult> completedRuns_;
     std::optional<core::ParentRunMemoryMeasurement> pendingMemory_;
+    std::optional<core::ErrorInfo> failureError_;
+    bool failureErrorAuthoritative_ = false;
+    bool failureDrainActive_ = false;
+    bool failureIpcDisconnected_ = false;
 
     ipc::ParentIpcChannel ipcChannel_;
     platform::windows::WindowsWorkerProcess workerProcess_;
