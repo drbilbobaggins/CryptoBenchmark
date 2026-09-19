@@ -4,6 +4,7 @@
 #include <variant>
 
 #include "adapters/DigestAdapter.h"
+#include "adapters/XofAdapter.h"
 
 namespace cryptobench::crypto {
 
@@ -34,6 +35,19 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
 
         return std::make_unique<DigestAdapter>(*digestParameters, hashConfig->inputSize);
     }
+    case core::ExecutionStrategyId::Xof: {
+        const auto* xofParameters = std::get_if<core::XofParameters>(&profile.parameters);
+        if (xofParameters == nullptr) {
+            throw std::logic_error("Xof strategy requires XofParameters");
+        }
+
+        const auto* hashConfig = std::get_if<core::HashConfig>(&validatedConfig.parameters);
+        if (hashConfig == nullptr) {
+            throw std::logic_error("Xof strategy requires HashConfig");
+        }
+
+        return std::make_unique<XofAdapter>(*xofParameters, hashConfig->inputSize);
+    }
     case core::ExecutionStrategyId::RsaPssSignature:
     case core::ExecutionStrategyId::EcdsaSignature:
     case core::ExecutionStrategyId::EdDsaSignature:
@@ -43,7 +57,6 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
     case core::ExecutionStrategyId::Xdh:
     case core::ExecutionStrategyId::MlKem:
     case core::ExecutionStrategyId::Aead:
-    case core::ExecutionStrategyId::Xof:
         throw std::invalid_argument("AdapterFactory execution strategy is unsupported");
     }
 
