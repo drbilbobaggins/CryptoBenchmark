@@ -6,6 +6,7 @@
 #include "adapters/AeadAdapter.h"
 #include "adapters/DigestAdapter.h"
 #include "adapters/EcdhAdapter.h"
+#include "adapters/EcdsaAdapter.h"
 #include "adapters/MlKemAdapter.h"
 #include "adapters/RsaPssAdapter.h"
 #include "adapters/XofAdapter.h"
@@ -134,7 +135,40 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
             *pssParameters, operation, RsaPssAdapter::InputMode::Prehashed,
             characteristics.signatureSize->bytes);
     }
-    case core::ExecutionStrategyId::EcdsaSignature:
+    case core::ExecutionStrategyId::EcdsaSignature: {
+        const auto* signatureConfig = std::get_if<core::SignatureConfig>(&validatedConfig.parameters);
+        if (signatureConfig == nullptr) {
+            throw std::logic_error("ECDSA strategy requires SignatureConfig");
+        }
+        const auto& characteristics = std::get<core::SignatureCharacteristics>(profile.characteristics);
+        if (!characteristics.signatureSize ||
+            characteristics.signatureSize->kind != core::SignatureSizeReferenceKind::MaximumDerEncoded) {
+            throw std::logic_error("ECDSA profile requires maximum DER signature-size characteristics");
+        }
+        if (const auto* keyGenParameters = std::get_if<core::EcKeyGenParameters>(&profile.parameters)) {
+            if (operation != core::BenchmarkOperation::KeyGen ||
+                !std::holds_alternative<core::NoSignatureInput>(signatureConfig->input)) {
+                throw std::logic_error("ECDSA KeyGen requires KeyGen and NoSignatureInput");
+            }
+            return std::make_unique<EcdsaAdapter>(*keyGenParameters, operation);
+        }
+        const auto* ecdsaParameters = std::get_if<core::EcdsaParameters>(&profile.parameters);
+        if (ecdsaParameters == nullptr) {
+            throw std::logic_error("ECDSA strategy requires ECDSA parameters");
+        }
+        if (operation != core::BenchmarkOperation::Sign && operation != core::BenchmarkOperation::Verify) {
+            throw std::logic_error("ECDSA parameters require Sign or Verify");
+        }
+        if (std::holds_alternative<core::MessageInput>(signatureConfig->input)) {
+            throw std::invalid_argument("ECDSA Message input is not implemented until M07.8");
+        }
+        if (!std::holds_alternative<core::PrehashedInput>(signatureConfig->input)) {
+            throw std::logic_error("ECDSA Sign and Verify require PrehashedInput or MessageInput");
+        }
+        return std::make_unique<EcdsaAdapter>(
+            *ecdsaParameters, operation, EcdsaAdapter::InputMode::Prehashed,
+            characteristics.signatureSize->bytes);
+    }
     case core::ExecutionStrategyId::EdDsaSignature:
     case core::ExecutionStrategyId::MlDsaSignature:
     case core::ExecutionStrategyId::SlhDsaSignature:

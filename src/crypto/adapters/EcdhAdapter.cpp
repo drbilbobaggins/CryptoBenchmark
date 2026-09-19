@@ -1,24 +1,13 @@
 #include "EcdhAdapter.h"
 
 #include <stdexcept>
-#include <string_view>
-
 #include <openssl/evp.h>
 
+#include "../EcKeyGen.h"
 #include "../openssl/OpenSslError.h"
 
 namespace cryptobench::crypto {
 namespace {
-
-std::string_view curveName(core::EcCurve curve)
-{
-    switch (curve) {
-    case core::EcCurve::P256: return "prime256v1";
-    case core::EcCurve::P384: return "secp384r1";
-    case core::EcCurve::P521: return "secp521r1";
-    }
-    throw std::invalid_argument("EcdhAdapter received an unknown curve");
-}
 
 } // namespace
 
@@ -28,7 +17,7 @@ EcdhAdapter::EcdhAdapter(
     core::ByteCount sharedSecretBytes)
     : parameters_(parameters), operation_(operation), sharedSecretBytes_(sharedSecretBytes)
 {
-    static_cast<void>(curveName(parameters_.curve));
+    static_cast<void>(ecCurveGroupName(parameters_.curve));
     if (operation_ != core::BenchmarkOperation::KeyGen && operation_ != core::BenchmarkOperation::Derive) {
         throw std::invalid_argument("EcdhAdapter supports only KeyGen and Derive");
     }
@@ -52,36 +41,14 @@ void EcdhAdapter::prepareRun()
 
 void EcdhAdapter::prepareKeyGeneration()
 {
-    context_ = openssl::EvpPkeyCtxPtr(
-        EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr), &EVP_PKEY_CTX_free);
-    if (!context_) {
-        openssl::throwOpenSslError("EVP_PKEY_CTX_new_from_name(EC)");
-    }
+    context_ = createEcKeyGenerationContext();
 }
 
 void EcdhAdapter::prepareDerive()
 {
-    openssl::EvpPkeyCtxPtr keygenContext(
-        EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr), &EVP_PKEY_CTX_free);
-    if (!keygenContext) {
-        openssl::throwOpenSslError("EVP_PKEY_CTX_new_from_name(EC)");
-    }
-
-    openssl::checkOpenSslReturn(EVP_PKEY_keygen_init(keygenContext.get()), "EVP_PKEY_keygen_init");
-    openssl::checkOpenSslReturn(
-        EVP_PKEY_CTX_set_group_name(keygenContext.get(), curveName(parameters_.curve).data()),
-        "EVP_PKEY_CTX_set_group_name");
-    EVP_PKEY* ownKey = nullptr;
-    openssl::checkOpenSslReturn(EVP_PKEY_generate(keygenContext.get(), &ownKey), "EVP_PKEY_generate");
-    ownKey_.reset(ownKey);
-
-    openssl::checkOpenSslReturn(EVP_PKEY_keygen_init(keygenContext.get()), "EVP_PKEY_keygen_init");
-    openssl::checkOpenSslReturn(
-        EVP_PKEY_CTX_set_group_name(keygenContext.get(), curveName(parameters_.curve).data()),
-        "EVP_PKEY_CTX_set_group_name");
-    EVP_PKEY* peerKey = nullptr;
-    openssl::checkOpenSslReturn(EVP_PKEY_generate(keygenContext.get(), &peerKey), "EVP_PKEY_generate");
-    peerKey_.reset(peerKey);
+    auto keygenContext = createEcKeyGenerationContext();
+    ownKey_ = generateEcKey(keygenContext.get(), parameters_.curve);
+    peerKey_ = generateEcKey(keygenContext.get(), parameters_.curve);
     peerKeyForDerive_ = peerKey_.get();
 
     context_ = openssl::EvpPkeyCtxPtr(
@@ -107,13 +74,7 @@ void EcdhAdapter::executeIteration()
 void EcdhAdapter::executeKeyGeneration()
 {
     currentKey_.reset();
-    openssl::checkOpenSslReturn(EVP_PKEY_keygen_init(context_.get()), "EVP_PKEY_keygen_init");
-    openssl::checkOpenSslReturn(
-        EVP_PKEY_CTX_set_group_name(context_.get(), curveName(parameters_.curve).data()),
-        "EVP_PKEY_CTX_set_group_name");
-    EVP_PKEY* generatedKey = nullptr;
-    openssl::checkOpenSslReturn(EVP_PKEY_generate(context_.get(), &generatedKey), "EVP_PKEY_generate");
-    currentKey_.reset(generatedKey);
+    currentKey_ = generateEcKey(context_.get(), parameters_.curve);
 }
 
 void EcdhAdapter::executeDerive()
