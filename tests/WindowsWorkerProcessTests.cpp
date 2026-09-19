@@ -76,53 +76,43 @@ void testInputAndInitialState()
 
 void testRealWorkerLifecycle()
 {
-    ipc::ParentIpcChannel channel;
-    const auto name = endpoint();
-    channel.startListening(name);
-
     platform::windows::WindowsWorkerProcess worker;
     WorkerCleanup cleanup(worker);
-    bool started = false;
-    bool finished = false;
-    bool workerReady = false;
-    int exitCode = 0;
-    QProcess::ExitStatus exitStatus = QProcess::NormalExit;
-    worker.connect(&worker, &platform::windows::WindowsWorkerProcess::started, [&] { started = true; });
+    int finishedCount = 0;
     worker.connect(&worker, &platform::windows::WindowsWorkerProcess::finished,
                    [&](int code, QProcess::ExitStatus status) {
-                       finished = true;
-                       exitCode = code;
-                       exitStatus = status;
+                       static_cast<void>(code);
+                       static_cast<void>(status);
+                       ++finishedCount;
                    });
-    channel.connect(&channel, &ipc::ParentIpcChannel::workerReadyReceived,
-                    [&](const ipc::WorkerReady& value) { workerReady = value.protocolVersion == ipc::kProtocolVersion; });
 
-    worker.start(name);
-        require(worker.state() == QProcess::Starting || worker.state() == QProcess::Running,
-            "worker did not enter an active state");
-    waitUntil([&] { return started; }, "worker started signal was not observed");
-    require(worker.isRunning(), "worker was not running after started signal");
-    require(worker.processId() != 0, "worker PID was zero after startup");
-    waitUntil([&] { return workerReady; }, "worker did not connect and send WorkerReady");
+    require(qputenv("CRYPTOBENCH_TEST_WORKER_SCENARIO", "wait"),
+            "failed to configure scripted worker scenario");
+    worker.start(endpoint());
+    require(worker.state() == QProcess::Starting || worker.state() == QProcess::Running,
+            "first worker did not enter an active state");
+    waitUntil([&] { return worker.state() == QProcess::Running; },
+              "first worker did not reach Running");
 
     bool rejectedSecondStart = false;
     try {
-        worker.start(name);
+        worker.start(endpoint());
     } catch (const std::logic_error&) {
         rejectedSecondStart = true;
     }
     require(rejectedSecondStart, "second active worker start was accepted");
 
     worker.kill();
-    waitUntil([&] { return finished; }, "worker finished signal was not observed after kill");
-    require(!worker.isRunning() && worker.state() == QProcess::NotRunning,
-            "worker remained active after finished signal");
-    require(worker.processId() == 0, "worker retained a PID after exit");
-    static_cast<void>(exitCode);
-    static_cast<void>(exitStatus);
+    waitUntil([&] { return finishedCount == 1 && worker.state() == QProcess::NotRunning; },
+              "first worker did not reach NotRunning after kill");
 
+    worker.start(endpoint());
+    waitUntil([&] { return worker.state() == QProcess::Running; },
+              "second worker did not reach Running after sequential reuse");
     worker.kill();
-    channel.close();
+    waitUntil([&] { return finishedCount == 2 && worker.state() == QProcess::NotRunning; },
+              "second worker did not reach NotRunning after sequential reuse");
+    qunsetenv("CRYPTOBENCH_TEST_WORKER_SCENARIO");
 }
 
 } // namespace

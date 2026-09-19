@@ -25,6 +25,7 @@ public:
     ~BenchmarkController() override;
 
     void start(const core::BenchmarkConfig& config);
+    void requestCancel();
     bool isBusy() const noexcept;
 
 signals:
@@ -40,7 +41,14 @@ private:
         WaitingForWorkerRunMeasurement,
         WaitingForWorkerOutcome,
         WaitingForWorkerExit,
+        Cancelling,
         Aborting
+    };
+
+    enum class FailureOrigin {
+        Parent,
+        Worker,
+        ProcessExit
     };
 
     void onWorkerReady(const ipc::WorkerReady& value);
@@ -56,8 +64,10 @@ private:
     void onTimeout();
 
     void armTimeout();
-    void enterFailure(core::ErrorInfo error);
+    void enterFailure(core::ErrorInfo error, FailureOrigin origin = FailureOrigin::Parent);
+    void finalizeFailure();
     void finishSuccessfully();
+    void finishCancelled();
 
     State state_ = State::Idle;
     bool sessionActive_ = false;
@@ -69,6 +79,11 @@ private:
     std::uint32_t expectedRunIndex_ = 0;
     std::vector<core::RunResult> completedRuns_;
     std::optional<core::ParentRunMemoryMeasurement> pendingMemory_;
+    std::optional<core::ErrorInfo> failureError_;
+    bool failureErrorAuthoritative_ = false;
+    bool failureDrainActive_ = false;
+    bool failureIpcDisconnected_ = false;
+    bool failureKillRequested_ = false;
 
     ipc::ParentIpcChannel ipcChannel_;
     platform::windows::WindowsWorkerProcess workerProcess_;

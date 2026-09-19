@@ -36,6 +36,7 @@ void ParentIpcChannel::close()
 {
     server_.close();
     if (socket_) {
+        QObject::disconnect(socket_, nullptr, this, nullptr);
         socket_->disconnectFromServer();
         socket_->deleteLater();
         socket_ = nullptr;
@@ -107,8 +108,9 @@ void ParentIpcChannel::handleReadyRead()
     }
 }
 
-void ParentIpcChannel::handleSocketError(QLocalSocket::LocalSocketError)
+void ParentIpcChannel::handleSocketError(QLocalSocket::LocalSocketError error)
 {
+    if (error == QLocalSocket::PeerClosedError) return;
     if (socket_) {
         reportTransportError(QStringLiteral("ParentIpcChannel socket error: ") + socket_->errorString());
     }
@@ -116,6 +118,11 @@ void ParentIpcChannel::handleSocketError(QLocalSocket::LocalSocketError)
 
 void ParentIpcChannel::handleDisconnected()
 {
+    const auto disconnectedSocket = socket_;
+    if (disconnectedSocket && disconnectedSocket->bytesAvailable() > 0) {
+        handleReadyRead();
+    }
+    if (socket_ != disconnectedSocket) return;
     emit disconnected();
 }
 
