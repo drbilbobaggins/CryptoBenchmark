@@ -1,5 +1,6 @@
 #include "EcdsaAdapter.h"
 
+#include <array>
 #include <stdexcept>
 #include <string_view>
 
@@ -46,19 +47,27 @@ EcdsaAdapter::EcdsaAdapter(
     core::EcdsaParameters parameters,
     core::BenchmarkOperation operation,
     InputMode inputMode,
-    core::ByteCount signatureBytes)
-    : parameters_(parameters), operation_(operation), inputMode_(inputMode), signatureBytes_(signatureBytes)
+    core::ByteCount signatureBytes,
+    core::WorkloadBytes messageSize)
+    : parameters_(parameters),
+      operation_(operation),
+      inputMode_(inputMode),
+      signatureBytes_(signatureBytes),
+      messageSize_(messageSize)
 {
     static_cast<void>(ecCurveGroupName(parameters.curve));
     static_cast<void>(digestName(parameters.digest));
     if (operation_ != core::BenchmarkOperation::Sign && operation_ != core::BenchmarkOperation::Verify) {
         throw std::invalid_argument("EcdsaAdapter ECDSA parameters require Sign or Verify");
     }
-    if (inputMode_ != InputMode::Prehashed) {
-        throw std::invalid_argument("EcdsaAdapter Message input is not implemented until M07.8");
-    }
     if (signatureBytes_ == 0) {
         throw std::invalid_argument("EcdsaAdapter signature size must be non-zero");
+    }
+    if (inputMode_ == InputMode::Message && messageSize_ == 0) {
+        throw std::invalid_argument("EcdsaAdapter Message input requires a non-zero message size");
+    }
+    if (inputMode_ != InputMode::Prehashed && inputMode_ != InputMode::Message) {
+        throw std::invalid_argument("EcdsaAdapter requires Prehashed or Message input");
     }
 }
 
@@ -90,15 +99,30 @@ void EcdsaAdapter::prepareSignature()
     if (!digest_) {
         openssl::throwOpenSslError("EVP_MD_fetch(ECDSA digest)");
     }
-    digestBytes_.assign(digestBytes(parameters.digest), 0xA5U);
-    signature_.resize(signatureBytes_);
-    context_ = openssl::EvpPkeyCtxPtr(
-        EVP_PKEY_CTX_new_from_pkey(nullptr, signingKey_.get(), nullptr), &EVP_PKEY_CTX_free);
-    if (!context_) {
-        openssl::throwOpenSslError("EVP_PKEY_CTX_new_from_pkey(ECDSA)");
+    if (inputMode_ == InputMode::Prehashed) {
+        digestBytes_.assign(digestBytes(parameters.digest), 0xA5U);
+        context_ = openssl::EvpPkeyCtxPtr(
+            EVP_PKEY_CTX_new_from_pkey(nullptr, signingKey_.get(), nullptr), &EVP_PKEY_CTX_free);
+        if (!context_) {
+            openssl::throwOpenSslError("EVP_PKEY_CTX_new_from_pkey(ECDSA)");
+        }
+    } else {
+        message_.resize(static_cast<std::size_t>(messageSize_));
+        constexpr std::array pattern{'a', 'b', 'c'};
+        for (std::size_t index = 0; index < message_.size(); ++index) {
+            message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+        }
+        messageContext_ = openssl::EvpMdCtxPtr(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+        if (!messageContext_) {
+            openssl::throwOpenSslError("EVP_MD_CTX_new(ECDSA message)");
+        }
     }
-    if (operation_ == core::BenchmarkOperation::Verify) {
+    signature_.resize(signatureBytes_);
+    if (operation_ == core::BenchmarkOperation::Verify && inputMode_ == InputMode::Prehashed) {
         createPrerequisiteSignature();
+    }
+    if (operation_ == core::BenchmarkOperation::Verify && inputMode_ == InputMode::Message) {
+        createPrerequisiteMessageSignature();
     }
 }
 
@@ -124,9 +148,38 @@ void EcdsaAdapter::createPrerequisiteSignature()
     }
 }
 
+void EcdsaAdapter::createPrerequisiteMessageSignature()
+{
+    openssl::EvpMdCtxPtr prerequisiteContext(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+    if (!prerequisiteContext) {
+        openssl::throwOpenSslError("EVP_MD_CTX_new(ECDSA message prerequisite)");
+    }
+    EVP_PKEY_CTX* borrowedContext = nullptr;
+    openssl::checkOpenSslReturn(
+        EVP_DigestSignInit(
+            prerequisiteContext.get(), &borrowedContext, digest_.get(), nullptr, signingKey_.get()),
+        "EVP_DigestSignInit(ECDSA message prerequisite)");
+    openssl::checkOpenSslReturn(
+        EVP_DigestSignUpdate(prerequisiteContext.get(), message_.data(), message_.size()),
+        "EVP_DigestSignUpdate(ECDSA message prerequisite)");
+    actualSignatureLength_ = signature_.size();
+    openssl::checkOpenSslReturn(
+        EVP_DigestSignFinal(
+            prerequisiteContext.get(), signature_.data(), &actualSignatureLength_),
+        "EVP_DigestSignFinal(ECDSA message prerequisite)");
+    if (actualSignatureLength_ == 0 || actualSignatureLength_ > signature_.size()) {
+        throw std::runtime_error("ECDSA message prerequisite signature length is invalid");
+    }
+}
+
 void EcdsaAdapter::executeIteration()
 {
-    if (!context_) {
+    if (operation_ == core::BenchmarkOperation::KeyGen && !context_) {
+        throw std::logic_error("EcdsaAdapter is not prepared");
+    }
+    if (operation_ != core::BenchmarkOperation::KeyGen &&
+        ((inputMode_ == InputMode::Prehashed && !context_) ||
+         (inputMode_ == InputMode::Message && !messageContext_))) {
         throw std::logic_error("EcdsaAdapter is not prepared");
     }
     switch (operation_) {
@@ -146,6 +199,25 @@ void EcdsaAdapter::executeKeyGeneration()
 
 void EcdsaAdapter::executeSign()
 {
+    if (inputMode_ == InputMode::Message) {
+        openssl::checkOpenSslReturn(EVP_MD_CTX_reset(messageContext_.get()), "EVP_MD_CTX_reset(ECDSA message)");
+        EVP_PKEY_CTX* borrowedContext = nullptr;
+        openssl::checkOpenSslReturn(
+            EVP_DigestSignInit(
+                messageContext_.get(), &borrowedContext, digest_.get(), nullptr, signingKey_.get()),
+            "EVP_DigestSignInit(ECDSA message)");
+        openssl::checkOpenSslReturn(
+            EVP_DigestSignUpdate(messageContext_.get(), message_.data(), message_.size()),
+            "EVP_DigestSignUpdate(ECDSA message)");
+        actualSignatureLength_ = signature_.size();
+        openssl::checkOpenSslReturn(
+            EVP_DigestSignFinal(messageContext_.get(), signature_.data(), &actualSignatureLength_),
+            "EVP_DigestSignFinal(ECDSA message)");
+        if (actualSignatureLength_ == 0 || actualSignatureLength_ > signature_.size()) {
+            throw std::runtime_error("ECDSA message signature length is invalid");
+        }
+        return;
+    }
     actualSignatureLength_ = signature_.size();
     openssl::checkOpenSslReturn(EVP_PKEY_sign_init(context_.get()), "EVP_PKEY_sign_init(ECDSA)");
     openssl::checkOpenSslReturn(
@@ -163,6 +235,26 @@ void EcdsaAdapter::executeSign()
 
 void EcdsaAdapter::executeVerify()
 {
+    if (inputMode_ == InputMode::Message) {
+        openssl::checkOpenSslReturn(EVP_MD_CTX_reset(messageContext_.get()), "EVP_MD_CTX_reset(ECDSA message)");
+        EVP_PKEY_CTX* borrowedContext = nullptr;
+        openssl::checkOpenSslReturn(
+            EVP_DigestVerifyInit(
+                messageContext_.get(), &borrowedContext, digest_.get(), nullptr, signingKey_.get()),
+            "EVP_DigestVerifyInit(ECDSA message)");
+        openssl::checkOpenSslReturn(
+            EVP_DigestVerifyUpdate(messageContext_.get(), message_.data(), message_.size()),
+            "EVP_DigestVerifyUpdate(ECDSA message)");
+        const int result = EVP_DigestVerifyFinal(
+            messageContext_.get(), signature_.data(), actualSignatureLength_);
+        if (result == 1) {
+            return;
+        }
+        if (result == 0) {
+            throw std::runtime_error("ECDSA message verification failed for a valid prerequisite signature");
+        }
+        openssl::throwOpenSslError("EVP_DigestVerifyFinal(ECDSA message)");
+    }
     openssl::checkOpenSslReturn(EVP_PKEY_verify_init(context_.get()), "EVP_PKEY_verify_init(ECDSA)");
     openssl::checkOpenSslReturn(
         EVP_PKEY_CTX_set_signature_md(context_.get(), digest_.get()),
@@ -181,6 +273,11 @@ void EcdsaAdapter::executeVerify()
 std::span<const unsigned char> EcdsaAdapter::digestForTesting() const noexcept
 {
     return digestBytes_;
+}
+
+std::span<const unsigned char> EcdsaAdapter::messageForTesting() const noexcept
+{
+    return message_;
 }
 
 std::span<const unsigned char> EcdsaAdapter::signatureForTesting() const noexcept

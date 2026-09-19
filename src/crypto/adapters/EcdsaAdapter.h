@@ -19,13 +19,14 @@ public:
 
     EcdsaAdapter(core::EcKeyGenParameters parameters, core::BenchmarkOperation operation);
     EcdsaAdapter(core::EcdsaParameters parameters, core::BenchmarkOperation operation, InputMode inputMode,
-                 core::ByteCount signatureBytes);
+                 core::ByteCount signatureBytes, core::WorkloadBytes messageSize = 0);
 
     void prepareSeries() override;
     void prepareRun() override;
     void executeIteration() override;
 
     std::span<const unsigned char> digestForTesting() const noexcept;
+    std::span<const unsigned char> messageForTesting() const noexcept;
     std::span<const unsigned char> signatureForTesting() const noexcept;
     EVP_PKEY* currentKeyForTesting() const noexcept;
     EVP_PKEY* signingKeyForTesting() const noexcept;
@@ -36,6 +37,7 @@ private:
     void prepareKeyGeneration();
     void prepareSignature();
     void createPrerequisiteSignature();
+    void createPrerequisiteMessageSignature();
     void executeKeyGeneration();
     void executeSign();
     void executeVerify();
@@ -44,11 +46,14 @@ private:
     core::BenchmarkOperation operation_;
     InputMode inputMode_;
     core::ByteCount signatureBytes_ = 0;
+    core::WorkloadBytes messageSize_ = 0;
     openssl::EvpMdPtr digest_{nullptr, &EVP_MD_free};
+    openssl::EvpMdCtxPtr messageContext_{nullptr, &EVP_MD_CTX_free};
     openssl::EvpPkeyCtxPtr context_{nullptr, &EVP_PKEY_CTX_free};
     openssl::EvpPkeyPtr currentKey_{nullptr, &EVP_PKEY_free};
     openssl::EvpPkeyPtr signingKey_{nullptr, &EVP_PKEY_free};
     std::vector<unsigned char> digestBytes_;
+    std::vector<unsigned char> message_;
     std::vector<unsigned char> signature_;
     std::size_t actualSignatureLength_ = 0;
 };

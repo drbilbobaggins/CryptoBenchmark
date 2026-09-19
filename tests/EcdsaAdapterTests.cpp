@@ -132,6 +132,26 @@ void directVerify(
         "direct ECDSA verification failed");
 }
 
+int directMessageVerify(
+    EVP_PKEY* key,
+    SignatureDigest digest,
+    std::span<const unsigned char> message,
+    std::span<const unsigned char> signature)
+{
+    require(key != nullptr, "ECDSA message key was null");
+    auto md = fetchDigest(digest);
+    crypto::openssl::EvpMdCtxPtr context(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+    require(context != nullptr, "could not create direct ECDSA message verify context");
+    EVP_PKEY_CTX* borrowedContext = nullptr;
+    require(
+        EVP_DigestVerifyInit(context.get(), &borrowedContext, md.get(), nullptr, key) == 1,
+        "direct ECDSA message verify init failed");
+    require(
+        EVP_DigestVerifyUpdate(context.get(), message.data(), message.size()) == 1,
+        "direct ECDSA message verify update failed");
+    return EVP_DigestVerifyFinal(context.get(), signature.data(), signature.size());
+}
+
 std::vector<unsigned char> directSign(EVP_PKEY* key, SignatureDigest digest, std::span<const unsigned char> digestBytes)
 {
     auto md = fetchDigest(digest);
@@ -234,7 +254,125 @@ void testRepeatedSignAndVerify()
     verify.executeIteration();
 }
 
-void testFactoryCreatesAllM077Paths()
+void testProductionMessageSignCorrectness()
+{
+    for (const auto& testCase : ecdsaCases) {
+        auto owner = createAdapter(
+            testCase.profile, BenchmarkOperation::Sign,
+            SignatureConfig{core::MessageInput{32}});
+        auto& adapter = asEcdsa(*owner);
+        adapter.prepareSeries();
+        require(adapter.messageForTesting().size() == 32, "ECDSA message size mismatch");
+        adapter.executeIteration();
+        requireSignatureBounds(adapter, testCase.signatureCapacity);
+        require(
+            directMessageVerify(
+                adapter.signingKeyForTesting(), testCase.digest,
+                adapter.messageForTesting(), adapter.signatureForTesting()) == 1,
+            "independent ECDSA Message Sign verification failed");
+    }
+}
+
+void testProductionMessageVerifyCorrectness()
+{
+    for (const auto& testCase : ecdsaCases) {
+        auto owner = createAdapter(
+            testCase.profile, BenchmarkOperation::Verify,
+            SignatureConfig{core::MessageInput{32}});
+        auto& adapter = asEcdsa(*owner);
+        adapter.prepareSeries();
+        adapter.executeIteration();
+        requireSignatureBounds(adapter, testCase.signatureCapacity);
+    }
+}
+
+void testMessageSizesAndPattern()
+{
+    constexpr std::array messageSizes{
+        std::size_t{1}, std::size_t{32}, std::size_t{1024},
+        std::size_t{16 * 1024}, std::size_t{1024 * 1024}, std::size_t{16 * 1024 * 1024}};
+    for (const auto messageSize : messageSizes) {
+        auto owner = createAdapter(
+            AlgorithmProfileId::EcdsaP256Sha256, BenchmarkOperation::Sign,
+            SignatureConfig{core::MessageInput{messageSize}});
+        auto& adapter = asEcdsa(*owner);
+        adapter.prepareSeries();
+        require(adapter.messageForTesting().size() == messageSize, "configured ECDSA message size mismatch");
+        for (std::size_t index = 0; index < messageSize; ++index) {
+            require(
+                adapter.messageForTesting()[index] == static_cast<unsigned char>('a' + (index % 3)),
+                "ECDSA message pattern mismatch");
+        }
+        adapter.executeIteration();
+        requireSignatureBounds(adapter, 72);
+        require(
+            directMessageVerify(
+                adapter.signingKeyForTesting(), SignatureDigest::Sha256,
+                adapter.messageForTesting(), adapter.signatureForTesting()) == 1,
+            "sized ECDSA Message Sign verification failed");
+    }
+}
+
+void testRepeatedMessageSignAndVerify()
+{
+    auto signOwner = createAdapter(
+        AlgorithmProfileId::EcdsaP256Sha256, BenchmarkOperation::Sign,
+        SignatureConfig{core::MessageInput{32}});
+    auto& sign = asEcdsa(*signOwner);
+    sign.prepareSeries();
+    sign.executeIteration();
+    requireSignatureBounds(sign, 72);
+    require(
+        directMessageVerify(
+            sign.signingKeyForTesting(), SignatureDigest::Sha256,
+            sign.messageForTesting(), sign.signatureForTesting()) == 1,
+        "first repeated ECDSA Message Sign failed");
+    sign.executeIteration();
+    requireSignatureBounds(sign, 72);
+    require(
+        directMessageVerify(
+            sign.signingKeyForTesting(), SignatureDigest::Sha256,
+            sign.messageForTesting(), sign.signatureForTesting()) == 1,
+        "second repeated ECDSA Message Sign failed");
+
+    auto verifyOwner = createAdapter(
+        AlgorithmProfileId::EcdsaP256Sha256, BenchmarkOperation::Verify,
+        SignatureConfig{core::MessageInput{32}});
+    auto& verify = asEcdsa(*verifyOwner);
+    verify.prepareSeries();
+    verify.executeIteration();
+    verify.executeIteration();
+}
+
+void testMessageTamperNegatives()
+{
+    auto owner = createAdapter(
+        AlgorithmProfileId::EcdsaP256Sha256, BenchmarkOperation::Sign,
+        SignatureConfig{core::MessageInput{32}});
+    auto& adapter = asEcdsa(*owner);
+    adapter.prepareSeries();
+    adapter.executeIteration();
+
+    auto wrongMessage = std::vector<unsigned char>(
+        adapter.messageForTesting().begin(), adapter.messageForTesting().end());
+    wrongMessage[0] ^= 0x01U;
+    require(
+        directMessageVerify(
+            adapter.signingKeyForTesting(), SignatureDigest::Sha256,
+            wrongMessage, adapter.signatureForTesting()) == 0,
+        "altered ECDSA message unexpectedly verified");
+
+    auto tamperedSignature = std::vector<unsigned char>(
+        adapter.signatureForTesting().begin(), adapter.signatureForTesting().end());
+    tamperedSignature.back() ^= 0x01U;
+    require(
+        directMessageVerify(
+            adapter.signingKeyForTesting(), SignatureDigest::Sha256,
+            adapter.messageForTesting(), tamperedSignature) == 0,
+        "tampered ECDSA signature unexpectedly verified");
+}
+
+void testFactoryCreatesAllM078Paths()
 {
     for (const auto& [profile, curve] : keyGenCases) {
         auto adapter = createAdapter(profile, BenchmarkOperation::KeyGen, SignatureConfig{core::NoSignatureInput{}});
@@ -247,21 +385,12 @@ void testFactoryCreatesAllM077Paths()
             auto adapter = createAdapter(testCase.profile, operation, SignatureConfig{core::PrehashedInput{}});
             adapter->prepareSeries();
             adapter->executeIteration();
+            auto messageAdapter = createAdapter(
+                testCase.profile, operation, SignatureConfig{core::MessageInput{32}});
+            messageAdapter->prepareSeries();
+            messageAdapter->executeIteration();
         }
     }
-}
-
-void testMessageModeRemainsUnsupported()
-{
-    bool rejected = false;
-    try {
-        static_cast<void>(createAdapter(
-            AlgorithmProfileId::EcdsaP256Sha256, BenchmarkOperation::Sign,
-            SignatureConfig{core::MessageInput{1}}));
-    } catch (const std::invalid_argument&) {
-        rejected = true;
-    }
-    require(rejected, "ECDSA Message mode was not rejected before M07.8");
 }
 
 void testFactoryRejectsWrongVariants()
@@ -302,8 +431,12 @@ int main()
             std::pair{"production Prehashed Sign correctness", &testProductionSignCorrectness},
             std::pair{"production Prehashed Verify correctness", &testProductionVerifyCorrectness},
             std::pair{"repeated ECDSA Sign and Verify", &testRepeatedSignAndVerify},
-            std::pair{"all M07.7 factory paths", &testFactoryCreatesAllM077Paths},
-            std::pair{"Message mode remains unsupported", &testMessageModeRemainsUnsupported},
+            std::pair{"production Message Sign correctness", &testProductionMessageSignCorrectness},
+            std::pair{"production Message Verify correctness", &testProductionMessageVerifyCorrectness},
+            std::pair{"Message sizes and pattern", &testMessageSizesAndPattern},
+            std::pair{"repeated ECDSA Message Sign and Verify", &testRepeatedMessageSignAndVerify},
+            std::pair{"Message tamper negatives", &testMessageTamperNegatives},
+            std::pair{"all M07.8 factory paths", &testFactoryCreatesAllM078Paths},
             std::pair{"factory rejects wrong variants", &testFactoryRejectsWrongVariants}};
         for (const auto& [name, test] : tests) {
             test();
