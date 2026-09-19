@@ -5,7 +5,9 @@
 
 #include "adapters/AeadAdapter.h"
 #include "adapters/DigestAdapter.h"
+#include "adapters/EcdhAdapter.h"
 #include "adapters/XofAdapter.h"
+#include "adapters/XdhAdapter.h"
 
 namespace cryptobench::crypto {
 
@@ -49,13 +51,39 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
 
         return std::make_unique<XofAdapter>(*xofParameters, hashConfig->inputSize);
     }
+    case core::ExecutionStrategyId::Ecdh: {
+        const auto* ecdhParameters = std::get_if<core::EcdhParameters>(&profile.parameters);
+        if (ecdhParameters == nullptr) {
+            throw std::logic_error("Ecdh strategy requires EcdhParameters");
+        }
+        const auto* keyEstablishmentConfig =
+            std::get_if<core::KeyEstablishmentConfig>(&validatedConfig.parameters);
+        if (keyEstablishmentConfig == nullptr) {
+            throw std::logic_error("Ecdh strategy requires KeyEstablishmentConfig");
+        }
+        const auto& characteristics = std::get<core::KeyEstablishmentCharacteristics>(profile.characteristics);
+        return std::make_unique<EcdhAdapter>(
+            *ecdhParameters, operation, characteristics.sharedSecretBytes);
+    }
+    case core::ExecutionStrategyId::Xdh: {
+        const auto* xdhParameters = std::get_if<core::XdhParameters>(&profile.parameters);
+        if (xdhParameters == nullptr) {
+            throw std::logic_error("Xdh strategy requires XdhParameters");
+        }
+        const auto* keyEstablishmentConfig =
+            std::get_if<core::KeyEstablishmentConfig>(&validatedConfig.parameters);
+        if (keyEstablishmentConfig == nullptr) {
+            throw std::logic_error("Xdh strategy requires KeyEstablishmentConfig");
+        }
+        const auto& characteristics = std::get<core::KeyEstablishmentCharacteristics>(profile.characteristics);
+        return std::make_unique<XdhAdapter>(
+            *xdhParameters, operation, characteristics.sharedSecretBytes);
+    }
     case core::ExecutionStrategyId::RsaPssSignature:
     case core::ExecutionStrategyId::EcdsaSignature:
     case core::ExecutionStrategyId::EdDsaSignature:
     case core::ExecutionStrategyId::MlDsaSignature:
     case core::ExecutionStrategyId::SlhDsaSignature:
-    case core::ExecutionStrategyId::Ecdh:
-    case core::ExecutionStrategyId::Xdh:
     case core::ExecutionStrategyId::MlKem:
         throw std::invalid_argument("AdapterFactory execution strategy is unsupported");
     case core::ExecutionStrategyId::Aead: {
