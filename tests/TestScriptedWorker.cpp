@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -152,6 +153,7 @@ int main(int argc, char* argv[])
 
         FrameParser parser;
         sendFrame(socket, ipc::MessageType::WorkerReady, encodeWorkerReady({kProtocolVersion}));
+        signalMarker(QByteArray("pid ") + QByteArray::number(GetCurrentProcessId()));
         const auto request = receiveFrame(socket, parser);
         if (request.messageType != MessageType::BenchmarkRequest) {
             return 4;
@@ -197,6 +199,15 @@ int main(int argc, char* argv[])
                           encodeWorkerOutcome({WorkerOutcomeStatus::Completed, std::nullopt}));
             }
             waitForCancellation(socket);
+            return 0;
+        }
+
+        if (scenario == QStringLiteral("completed")) {
+            for (std::uint32_t runIndex = 0; runIndex < config.runs; ++runIndex) {
+                completeRun(socket, parser, runIndex, config.runs);
+            }
+            sendFrame(socket, MessageType::WorkerOutcome,
+                      encodeWorkerOutcome({WorkerOutcomeStatus::Completed, std::nullopt}));
             return 0;
         }
 

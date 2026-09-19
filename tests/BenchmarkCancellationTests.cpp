@@ -11,9 +11,12 @@
 #include <cstdlib>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <variant>
+#include <vector>
 
 using namespace cryptobench;
 
@@ -32,6 +35,17 @@ core::BenchmarkConfig configFor(std::uint32_t runs)
         2,
         runs,
         core::HashConfig{8}
+    };
+}
+
+core::BenchmarkConfig matrixConfig(std::size_t index)
+{
+    return {
+        core::AlgorithmProfileId::Sha256,
+        core::BenchmarkOperation::Hash,
+        2 + static_cast<std::uint64_t>(index % 2),
+        1 + static_cast<std::uint32_t>(index % 2),
+        core::HashConfig{8 + static_cast<std::uint64_t>(index)}
     };
 }
 
@@ -93,6 +107,177 @@ void waitForMarker(
         if ((*result)->error) message += "; error=" + (*result)->error->technicalMessage;
     }
     throw std::runtime_error(message);
+}
+
+struct ReuseSessionPlan {
+    const char* scenario;
+    core::BenchmarkStatus expectedStatus;
+    core::BenchmarkConfig config;
+    bool cancelOnProgress = false;
+};
+
+struct ReuseSessionObservation {
+    core::BenchmarkResult result;
+    bool controllerWasIdle = false;
+    std::uint32_t workerPid = 0;
+};
+
+std::uint32_t readWorkerPid(const QString& path)
+{
+    QFile signalFile(path);
+    require(signalFile.open(QIODevice::ReadOnly), "worker PID marker file was not created");
+    for (const auto& line : signalFile.readAll().split('\n')) {
+        if (line.startsWith("pid ")) {
+            bool ok = false;
+            const auto pid = line.mid(4).toUInt(&ok);
+            require(ok && pid != 0, "worker PID marker was invalid");
+            return pid;
+        }
+    }
+    throw std::runtime_error("worker PID marker was missing");
+}
+
+void requireSameConfig(const core::BenchmarkConfig& actual, const core::BenchmarkConfig& expected)
+{
+    const auto* actualHash = std::get_if<core::HashConfig>(&actual.parameters);
+    const auto* expectedHash = std::get_if<core::HashConfig>(&expected.parameters);
+    require(actual.profile == expected.profile && actual.operation == expected.operation &&
+                actual.iterationsPerRun == expected.iterationsPerRun && actual.runs == expected.runs &&
+                actualHash != nullptr && expectedHash != nullptr &&
+                actualHash->inputSize == expectedHash->inputSize,
+            "reuse result did not preserve the current session configuration");
+}
+
+void requireReuseResult(
+    const ReuseSessionObservation& observation,
+    const ReuseSessionPlan& plan)
+{
+    require(observation.controllerWasIdle, "controller was busy while terminal result was emitted");
+    require(observation.result.status == plan.expectedStatus,
+            "reuse result status did not match the current session scenario");
+    requireSameConfig(observation.result.config, plan.config);
+
+    if (plan.expectedStatus == core::BenchmarkStatus::Completed) {
+        require(observation.result.statistics.has_value() && !observation.result.error.has_value() &&
+                    observation.result.runs.size() == plan.config.runs,
+                "Completed reuse result violated its invariants");
+        for (std::size_t index = 0; index < observation.result.runs.size(); ++index) {
+            require(observation.result.runs[index].runIndex == index,
+                    "Completed reuse runs were not a sequential prefix");
+        }
+    } else if (plan.expectedStatus == core::BenchmarkStatus::Cancelled) {
+        require(!observation.result.statistics.has_value() && !observation.result.error.has_value() &&
+                    observation.result.runs.empty(),
+                "Cancelled reuse result contained official partial data");
+    } else {
+        require(observation.result.statistics.has_value() == false && observation.result.error.has_value() &&
+                    observation.result.runs.empty(),
+                "Failed reuse result violated its invariants");
+    }
+}
+
+std::vector<ReuseSessionObservation> runReuseSequence(
+    const std::vector<ReuseSessionPlan>& plans)
+{
+    require(!plans.empty(), "reuse sequence must contain at least one session");
+    application::BenchmarkController controller;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    std::vector<ReuseSessionObservation> observations;
+    std::vector<QString> signalPaths;
+    signalPaths.reserve(plans.size());
+    for (const auto& plan : plans) signalPaths.push_back(signalFilePath());
+    std::size_t current = 0;
+    bool cancelRequested = false;
+
+    const auto prepareCurrentSession = [&] {
+        QFile::remove(signalPaths[current]);
+        beginScenario(plans[current].scenario);
+        require(qputenv("CRYPTOBENCH_TEST_WORKER_SIGNAL_FILE",
+                        signalPaths[current].toLocal8Bit()),
+                "failed to configure reuse session signal file");
+        cancelRequested = false;
+    };
+
+    QObject::connect(&controller, &application::BenchmarkController::progressChanged,
+                     [&](const core::ProgressInfo&) {
+                         if (plans[current].cancelOnProgress && !cancelRequested) {
+                             cancelRequested = true;
+                             controller.requestCancel();
+                         }
+                     });
+    QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
+                     [&](const core::BenchmarkResult& result) {
+                         observations.push_back({result, !controller.isBusy(), 0});
+                         if (++current == plans.size()) {
+                             loop.quit();
+                             return;
+                         }
+                         prepareCurrentSession();
+                         controller.start(plans[current].config);
+                     });
+
+    prepareCurrentSession();
+    controller.start(plans.front().config);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timeout.start(15'000);
+    loop.exec();
+    require(observations.size() == plans.size(), "reuse sequence did not finish every session exactly once");
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+    require(observations.size() == plans.size() && !controller.isBusy(),
+            "reuse sequence produced a late terminal callback or remained busy");
+
+    std::set<std::uint32_t> workerPids;
+    for (std::size_t index = 0; index < plans.size(); ++index) {
+        observations[index].workerPid = readWorkerPid(signalPaths[index]);
+        require(workerPids.insert(observations[index].workerPid).second,
+                "sequential sessions reused a worker process");
+        requireReuseResult(observations[index], plans[index]);
+    }
+    endScenario();
+    return observations;
+}
+
+void testSequentialReuseTransitionMatrix()
+{
+    struct Transition {
+        const char* previous;
+        const char* next;
+        core::BenchmarkStatus previousStatus;
+        core::BenchmarkStatus nextStatus;
+    };
+    const std::vector<Transition> transitions = {
+        {"completed", "completed", core::BenchmarkStatus::Completed, core::BenchmarkStatus::Completed},
+        {"completed", "wait-before-measurement", core::BenchmarkStatus::Completed, core::BenchmarkStatus::Cancelled},
+        {"completed", "failed-disconnect-immediately", core::BenchmarkStatus::Completed, core::BenchmarkStatus::Failed},
+        {"wait-before-measurement", "completed", core::BenchmarkStatus::Cancelled, core::BenchmarkStatus::Completed},
+        {"wait-before-measurement", "wait-before-measurement", core::BenchmarkStatus::Cancelled, core::BenchmarkStatus::Cancelled},
+        {"wait-before-measurement", "failed-disconnect-immediately", core::BenchmarkStatus::Cancelled, core::BenchmarkStatus::Failed},
+        {"failed-disconnect-immediately", "completed", core::BenchmarkStatus::Failed, core::BenchmarkStatus::Completed},
+        {"failed-disconnect-immediately", "wait-before-measurement", core::BenchmarkStatus::Failed, core::BenchmarkStatus::Cancelled},
+        {"failed-disconnect-immediately", "failed-disconnect-immediately", core::BenchmarkStatus::Failed, core::BenchmarkStatus::Failed}
+    };
+
+    for (std::size_t index = 0; index < transitions.size(); ++index) {
+        const auto& transition = transitions[index];
+        runReuseSequence({
+            {transition.previous, transition.previousStatus, matrixConfig(index * 2),
+             transition.previousStatus == core::BenchmarkStatus::Cancelled},
+            {transition.next, transition.nextStatus, matrixConfig(index * 2 + 1),
+             transition.nextStatus == core::BenchmarkStatus::Cancelled}
+        });
+    }
+}
+
+void testMixedSequentialReuseChain()
+{
+    runReuseSequence({
+        {"completed", core::BenchmarkStatus::Completed, matrixConfig(30)},
+        {"wait-before-measurement", core::BenchmarkStatus::Cancelled, matrixConfig(31), true},
+        {"failed-disconnect-immediately", core::BenchmarkStatus::Failed, matrixConfig(32)},
+        {"completed", core::BenchmarkStatus::Completed, matrixConfig(33)}
+    });
 }
 
 void testIdleCancellationIsHarmless()
@@ -500,6 +685,8 @@ int main(int argc, char* argv[])
         testFinalRunWithoutOutcomeFailsAndReusesController();
         testCompletedOutcomeWithoutExitFails();
         testParentDetectedFailureScenarios();
+        testSequentialReuseTransitionMatrix();
+        testMixedSequentialReuseChain();
         endScenario();
         std::cout << "Benchmark cancellation tests passed\n";
         return 0;
