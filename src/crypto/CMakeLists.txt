@@ -4,6 +4,7 @@ add_library(cryptobench_crypto STATIC
     adapters/AeadAdapter.cpp
     adapters/DigestAdapter.cpp
     adapters/EdDsaAdapter.cpp
+    adapters/MlDsaAdapter.cpp
     adapters/EcdhAdapter.cpp
     adapters/EcdsaAdapter.cpp
     adapters/MlKemAdapter.cpp
