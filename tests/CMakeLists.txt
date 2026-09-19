@@ -129,6 +129,22 @@ target_include_directories(CryptoBenchmarkMlKemTests
 
 add_test(NAME CryptoBenchmarkMlKemTests COMMAND CryptoBenchmarkMlKemTests)
 
+add_executable(CryptoBenchmarkRsaPssTests
+	RsaPssAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkRsaPssTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkRsaPssTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkRsaPssTests COMMAND CryptoBenchmarkRsaPssTests)
+
 add_executable(CryptoBenchmarkIpcTests
 	IpcCodecTests.cpp
 )

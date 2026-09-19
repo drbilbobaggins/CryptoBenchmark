@@ -7,6 +7,7 @@
 #include "adapters/DigestAdapter.h"
 #include "adapters/EcdhAdapter.h"
 #include "adapters/MlKemAdapter.h"
+#include "adapters/RsaPssAdapter.h"
 #include "adapters/XofAdapter.h"
 #include "adapters/XdhAdapter.h"
 
@@ -95,7 +96,42 @@ std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
             *mlKemParameters, operation, characteristics.ciphertextBytes.value(),
             characteristics.sharedSecretBytes);
     }
-    case core::ExecutionStrategyId::RsaPssSignature:
+    case core::ExecutionStrategyId::RsaPssSignature: {
+        const auto* signatureConfig = std::get_if<core::SignatureConfig>(&validatedConfig.parameters);
+        if (signatureConfig == nullptr) {
+            throw std::logic_error("RSA-PSS strategy requires SignatureConfig");
+        }
+        const auto& characteristics = std::get<core::SignatureCharacteristics>(profile.characteristics);
+        if (!characteristics.signatureSize) {
+            throw std::logic_error("RSA-PSS profile requires signature-size characteristics");
+        }
+
+        if (const auto* keyGenParameters = std::get_if<core::RsaKeyGenParameters>(&profile.parameters)) {
+            if (operation != core::BenchmarkOperation::KeyGen ||
+                !std::holds_alternative<core::NoSignatureInput>(signatureConfig->input)) {
+                throw std::logic_error("RSA KeyGen requires KeyGen and NoSignatureInput");
+            }
+            return std::make_unique<RsaPssAdapter>(
+                *keyGenParameters, operation, characteristics.signatureSize->bytes);
+        }
+
+        const auto* pssParameters = std::get_if<core::RsaPssParameters>(&profile.parameters);
+        if (pssParameters == nullptr) {
+            throw std::logic_error("RSA-PSS strategy requires RSA parameters");
+        }
+        if (operation != core::BenchmarkOperation::Sign && operation != core::BenchmarkOperation::Verify) {
+            throw std::logic_error("RSA-PSS parameters require Sign or Verify");
+        }
+        if (std::holds_alternative<core::MessageInput>(signatureConfig->input)) {
+            throw std::invalid_argument("RSA-PSS Message input is not implemented until M07.6");
+        }
+        if (!std::holds_alternative<core::PrehashedInput>(signatureConfig->input)) {
+            throw std::logic_error("RSA-PSS Sign and Verify require PrehashedInput in M07.5");
+        }
+        return std::make_unique<RsaPssAdapter>(
+            *pssParameters, operation, RsaPssAdapter::InputMode::Prehashed,
+            characteristics.signatureSize->bytes);
+    }
     case core::ExecutionStrategyId::EcdsaSignature:
     case core::ExecutionStrategyId::EdDsaSignature:
     case core::ExecutionStrategyId::MlDsaSignature:
