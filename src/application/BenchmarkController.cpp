@@ -110,6 +110,7 @@ void BenchmarkController::start(const core::BenchmarkConfig& config)
     failureErrorAuthoritative_ = false;
     failureDrainActive_ = false;
     failureIpcDisconnected_ = false;
+    failureKillRequested_ = false;
     terminalResultEmitted_ = false;
     processExited_ = false;
     sessionActive_ = true;
@@ -270,11 +271,7 @@ void BenchmarkController::onWorkerRunMeasurement(const core::WorkerRunMeasuremen
             technicalTimer_.stop();
         } else {
             state_ = State::WaitingForWorkerOutcome;
-            if (processExited_) {
-                armTimeout();
-            } else {
-                technicalTimer_.stop();
-            }
+            armTimeout();
         }
     } catch (const std::exception& error) {
         enterFailure(parentError(core::ErrorCode::InternalError,
@@ -404,8 +401,9 @@ void BenchmarkController::onTimeout()
     if (state_ == State::Aborting) {
         if (processExited_) {
             finalizeFailure();
-        } else {
+        } else if (!failureKillRequested_) {
             workerProcess_.kill();
+            failureKillRequested_ = true;
             armTimeout();
         }
         return;
@@ -456,7 +454,10 @@ void BenchmarkController::enterFailure(core::ErrorInfo error, FailureOrigin orig
         return;
     }
 
-    if (!failureErrorAuthoritative_) workerProcess_.kill();
+    if (!failureErrorAuthoritative_) {
+        workerProcess_.kill();
+        failureKillRequested_ = true;
+    }
     armTimeout();
 }
 

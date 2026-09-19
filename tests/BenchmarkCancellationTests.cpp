@@ -39,7 +39,7 @@ void waitForResult(QEventLoop& loop, QTimer& timeout, std::optional<core::Benchm
 {
     if (result.has_value()) return;
     QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-    timeout.start(10'000);
+    timeout.start(25'000);
     loop.exec();
     require(result.has_value(), "cancellation test timed out without a result");
 }
@@ -385,6 +385,72 @@ void testWorkerFailureDiscardsPendingMemory()
     endScenario();
 }
 
+void testFinalRunWithoutOutcomeFailsAndReusesController()
+{
+    beginScenario("final-run-no-outcome");
+    application::BenchmarkController controller;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    std::optional<core::BenchmarkResult> firstResult;
+    std::optional<core::BenchmarkResult> secondResult;
+    int resultCount = 0;
+    bool firstSession = true;
+
+    QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
+                     [&](const core::BenchmarkResult& result) {
+                         ++resultCount;
+                         if (firstSession) {
+                             firstSession = false;
+                             firstResult = result;
+                             controller.start(configFor(2));
+                         } else {
+                             secondResult = result;
+                             loop.quit();
+                         }
+                     });
+
+    controller.start(configFor(2));
+    waitForResult(loop, timeout, firstResult);
+    require(resultCount == 2, "final-run timeout reuse did not produce two terminal results");
+    requireFailedResult(*firstResult, 2);
+    requireFailedResult(*secondResult, 2);
+    require(firstResult->error->code == core::ErrorCode::WorkerCommunicationFailed &&
+                firstResult->error->stage == core::FailureStage::WorkerCommunication,
+            "final-run timeout used the wrong canonical error classification");
+    require(!controller.isBusy(), "final-run timeout left the controller busy");
+    endScenario();
+}
+
+void testCompletedOutcomeWithoutExitFails()
+{
+    beginScenario("completed-no-exit");
+    application::BenchmarkController controller;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    std::optional<core::BenchmarkResult> result;
+    int resultCount = 0;
+
+    QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
+                     [&](const core::BenchmarkResult& value) {
+                         ++resultCount;
+                         result = value;
+                         loop.quit();
+                     });
+
+    controller.start(configFor(2));
+    waitForResult(loop, timeout, result);
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+    require(resultCount == 1, "completed-without-exit timeout produced duplicate results");
+    requireFailedResult(*result, 2);
+    require(result->error->code == core::ErrorCode::WorkerCommunicationFailed &&
+                result->error->stage == core::FailureStage::WorkerCommunication,
+            "completed-without-exit timeout used the wrong canonical error classification");
+    require(!controller.isBusy(), "completed-without-exit timeout left the controller busy");
+    endScenario();
+}
+
 void testParentDetectedFailureScenarios()
 {
     for (const auto scenario : {"crash-during-measurement", "actual-crash-during-measurement",
@@ -431,6 +497,8 @@ int main(int argc, char* argv[])
         testWorkerFailureDuringMeasurement();
         testWorkerFailureSurvivesImmediateDisconnect();
         testWorkerFailureDiscardsPendingMemory();
+        testFinalRunWithoutOutcomeFailsAndReusesController();
+        testCompletedOutcomeWithoutExitFails();
         testParentDetectedFailureScenarios();
         endScenario();
         std::cout << "Benchmark cancellation tests passed\n";

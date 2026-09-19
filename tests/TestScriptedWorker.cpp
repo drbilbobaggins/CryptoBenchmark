@@ -100,6 +100,21 @@ void sendFailureOutcome(QLocalSocket& socket, std::uint32_t runIndex, const char
               }));
 }
 
+void completeRun(
+    QLocalSocket& socket,
+    FrameParser& parser,
+    std::uint32_t runIndex,
+    std::uint32_t totalRuns)
+{
+    sendProgressAndMeasurementReady(socket, runIndex, totalRuns);
+    receiveExpected(socket, parser, MessageType::StartMeasurement);
+    signalMeasurementStarted(runIndex);
+    sendFrame(socket, MessageType::MeasurementFinished, encodeRunIndexPayload(runIndex));
+    receiveExpected(socket, parser, MessageType::MemoryWindowClosed);
+    sendFrame(socket, MessageType::WorkerRunMeasurement,
+              encodeWorkerRunMeasurement({runIndex, 1'000, 1'000}));
+}
+
 QString argumentValue(int argc, char* argv[], int index)
 {
     return index < argc && argv[index] != nullptr
@@ -170,6 +185,19 @@ int main(int argc, char* argv[])
             receiveExpected(socket, parser, MessageType::MemoryWindowClosed);
             sendFailureOutcome(socket, 0, "scripted pending-memory failure");
             return 9;
+        }
+
+        if (scenario == QStringLiteral("final-run-no-outcome") ||
+            scenario == QStringLiteral("completed-no-exit")) {
+            for (std::uint32_t runIndex = 0; runIndex < config.runs; ++runIndex) {
+                completeRun(socket, parser, runIndex, config.runs);
+            }
+            if (scenario == QStringLiteral("completed-no-exit")) {
+                sendFrame(socket, MessageType::WorkerOutcome,
+                          encodeWorkerOutcome({WorkerOutcomeStatus::Completed, std::nullopt}));
+            }
+            waitForCancellation(socket);
+            return 0;
         }
 
         if (scenario == QStringLiteral("crash-during-measurement")) {

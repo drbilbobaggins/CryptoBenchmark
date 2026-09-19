@@ -83,6 +83,7 @@ private:
     bool failureErrorAuthoritative_ = false;
     bool failureDrainActive_ = false;
     bool failureIpcDisconnected_ = false;
+    bool failureKillRequested_ = false;
 
     ipc::ParentIpcChannel ipcChannel_;
     platform::windows::WindowsWorkerProcess workerProcess_;
