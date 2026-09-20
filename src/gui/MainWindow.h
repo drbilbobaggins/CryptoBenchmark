@@ -2,7 +2,11 @@
 
 #include <QMainWindow>
 
+#include <optional>
+
 #include <cryptobench/core/AlgorithmProfileId.h>
+#include <cryptobench/core/BenchmarkConfig.h>
+#include <cryptobench/core/ConfigValidation.h>
 #include <cryptobench/core/DomainTypes.h>
 
 QT_BEGIN_NAMESPACE
@@ -23,6 +27,9 @@ private:
     void populateCategories();
     void populateProfiles(cryptobench::core::PrimitiveCategory category, bool preserveOperation);
     void populateOperations(const cryptobench::core::AlgorithmProfileId* profileId, bool preserveOperation);
+    void updateInputControls();
+    std::optional<cryptobench::core::BenchmarkConfig> buildBenchmarkConfig(
+        cryptobench::core::ValidationResult& validation) const;
 
     Ui::MainWindow* ui;
 };
