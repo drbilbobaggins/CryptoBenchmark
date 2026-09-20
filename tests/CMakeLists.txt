@@ -45,6 +45,23 @@ add_dependencies(CryptoBenchmarkBenchmarkControllerTests CryptoBenchmarkWorker)
 
 add_test(NAME CryptoBenchmarkBenchmarkControllerTests COMMAND CryptoBenchmarkBenchmarkControllerTests)
 
+add_executable(CryptoBenchmarkBackendHashXofIntegrationTests
+	BackendHashXofIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendHashXofIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendHashXofIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendHashXofIntegrationTests
+	COMMAND CryptoBenchmarkBackendHashXofIntegrationTests
+)
+
 add_executable(CryptoBenchmarkCancellationTests
 	BenchmarkCancellationTests.cpp
 )
