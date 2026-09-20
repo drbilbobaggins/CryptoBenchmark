@@ -116,6 +116,9 @@ inline void assertCompletedResult(
         require(expectedAead != nullptr &&
                     resultAead->plaintextSize == expectedAead->plaintextSize,
                 "completed result did not preserve the AEAD plaintext size");
+    } else if (std::get_if<core::KeyEstablishmentConfig>(&result.config.parameters) != nullptr) {
+        require(std::get_if<core::KeyEstablishmentConfig>(&expectedConfig.parameters) != nullptr,
+                "completed result did not preserve the key-establishment configuration type");
     } else {
         require(false, "completed result has the wrong workload configuration type");
     }
