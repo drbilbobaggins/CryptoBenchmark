@@ -113,6 +113,23 @@ add_test(NAME CryptoBenchmarkBackendClassicSignatureIntegrationTests
 	COMMAND CryptoBenchmarkBackendClassicSignatureIntegrationTests
 )
 
+add_executable(CryptoBenchmarkBackendModernSignatureIntegrationTests
+	BackendModernSignatureIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendModernSignatureIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendModernSignatureIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendModernSignatureIntegrationTests
+	COMMAND CryptoBenchmarkBackendModernSignatureIntegrationTests
+)
+
 add_executable(CryptoBenchmarkCancellationTests
 	BenchmarkCancellationTests.cpp
 )
