@@ -45,6 +45,140 @@ add_dependencies(CryptoBenchmarkBenchmarkControllerTests CryptoBenchmarkWorker)
 
 add_test(NAME CryptoBenchmarkBenchmarkControllerTests COMMAND CryptoBenchmarkBenchmarkControllerTests)
 
+add_executable(CryptoBenchmarkBackendHashXofIntegrationTests
+	BackendHashXofIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendHashXofIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendHashXofIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendHashXofIntegrationTests
+	COMMAND CryptoBenchmarkBackendHashXofIntegrationTests
+)
+
+add_executable(CryptoBenchmarkBackendAeadIntegrationTests
+	BackendAeadIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendAeadIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendAeadIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendAeadIntegrationTests
+	COMMAND CryptoBenchmarkBackendAeadIntegrationTests
+)
+
+add_executable(CryptoBenchmarkBackendLifecycleIntegrationTests
+	BackendLifecycleIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendLifecycleIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendLifecycleIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendLifecycleIntegrationTests
+	COMMAND CryptoBenchmarkBackendLifecycleIntegrationTests
+)
+
+add_executable(CryptoBenchmarkBackendKeyEstablishmentIntegrationTests
+	BackendKeyEstablishmentIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendKeyEstablishmentIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendKeyEstablishmentIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendKeyEstablishmentIntegrationTests
+	COMMAND CryptoBenchmarkBackendKeyEstablishmentIntegrationTests
+)
+
+add_executable(CryptoBenchmarkBackendClassicSignatureIntegrationTests
+	BackendClassicSignatureIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendClassicSignatureIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendClassicSignatureIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendClassicSignatureIntegrationTests
+	COMMAND CryptoBenchmarkBackendClassicSignatureIntegrationTests
+)
+
+add_executable(CryptoBenchmarkBackendModernSignatureIntegrationTests
+	BackendModernSignatureIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendModernSignatureIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendModernSignatureIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendModernSignatureIntegrationTests
+	COMMAND CryptoBenchmarkBackendModernSignatureIntegrationTests
+)
+
+add_executable(CryptoBenchmarkBackendSlhDsaIntegrationTests
+	BackendSlhDsaIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendSlhDsaIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendSlhDsaIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendSlhDsaFastIntegrationTests
+	COMMAND CryptoBenchmarkBackendSlhDsaIntegrationTests --fast
+)
+
+set_tests_properties(CryptoBenchmarkBackendSlhDsaFastIntegrationTests
+	PROPERTIES
+		TIMEOUT 120
+)
+
+add_test(NAME CryptoBenchmarkBackendSlhDsaSlowIntegrationTests
+	COMMAND CryptoBenchmarkBackendSlhDsaIntegrationTests --slow
+)
+
+set_tests_properties(CryptoBenchmarkBackendSlhDsaSlowIntegrationTests
+	PROPERTIES
+		LABELS slow
+		TIMEOUT 150
+)
+
 add_executable(CryptoBenchmarkCancellationTests
 	BenchmarkCancellationTests.cpp
 )
