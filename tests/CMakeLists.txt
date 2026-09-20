@@ -130,6 +130,38 @@ add_test(NAME CryptoBenchmarkBackendModernSignatureIntegrationTests
 	COMMAND CryptoBenchmarkBackendModernSignatureIntegrationTests
 )
 
+add_executable(CryptoBenchmarkBackendSlhDsaIntegrationTests
+	BackendSlhDsaIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendSlhDsaIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendSlhDsaIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendSlhDsaFastIntegrationTests
+	COMMAND CryptoBenchmarkBackendSlhDsaIntegrationTests --fast
+)
+
+set_tests_properties(CryptoBenchmarkBackendSlhDsaFastIntegrationTests
+	PROPERTIES
+		TIMEOUT 120
+)
+
+add_test(NAME CryptoBenchmarkBackendSlhDsaSlowIntegrationTests
+	COMMAND CryptoBenchmarkBackendSlhDsaIntegrationTests --slow
+)
+
+set_tests_properties(CryptoBenchmarkBackendSlhDsaSlowIntegrationTests
+	PROPERTIES
+		LABELS slow
+		TIMEOUT 150
+)
+
 add_executable(CryptoBenchmarkCancellationTests
 	BenchmarkCancellationTests.cpp
 )
