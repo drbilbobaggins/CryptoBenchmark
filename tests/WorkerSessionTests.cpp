@@ -267,43 +267,6 @@ void testFrameErrorRemainsWorkerCommunicationFailure()
     server.close();
 }
 
-void testUnsupportedStrategyIsReportedByWorker()
-{
-    QLocalServer server;
-    server.setSocketOptions(QLocalServer::UserAccessOption);
-    const auto name = endpoint();
-    require(server.listen(name), "test server listen failed");
-
-    const core::BenchmarkConfig config{
-        core::AlgorithmProfileId::Aes128Gcm,
-        core::BenchmarkOperation::Encrypt,
-        1,
-        1,
-        core::AeadConfig{1}
-    };
-
-    auto future = std::async(std::launch::async, [&] {
-        return worker::runWorkerSession(name);
-    });
-    auto socket = acceptConnection(server);
-    FrameReader reader;
-    receiveReady(*socket, reader);
-    sendRequest(*socket, config);
-
-    const auto outcomeFrame = receiveFrame(*socket, reader);
-    require(outcomeFrame.messageType == ipc::MessageType::WorkerOutcome,
-            "unsupported strategy did not produce a WorkerOutcome frame");
-    const auto outcome = ipc::decodeWorkerOutcome(outcomeFrame.payload);
-    require(outcome.status == ipc::WorkerOutcomeStatus::Failed && outcome.error,
-            "unsupported strategy did not produce failed outcome");
-    require(outcome.error->code == core::ErrorCode::UnknownExecutionStrategy,
-            "unsupported strategy error code mismatch");
-    require(outcome.error->stage == core::FailureStage::TaskCreation,
-            "unsupported strategy failure stage mismatch");
-    require(future.get() != 0, "unsupported strategy returned success");
-    server.close();
-}
-
 } // namespace
 
 int main(int argc, char* argv[])
@@ -314,7 +277,6 @@ int main(int argc, char* argv[])
         testInvalidConfigIsReportedByWorker();
         testMalformedRequestIsReportedAsDeserializationFailure();
         testFrameErrorRemainsWorkerCommunicationFailure();
-        testUnsupportedStrategyIsReportedByWorker();
         std::cout << "WorkerSessionTests passed\n";
         return 0;
     } catch (const std::exception& error) {

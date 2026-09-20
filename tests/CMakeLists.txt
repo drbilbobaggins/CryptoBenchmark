@@ -81,6 +81,150 @@ target_include_directories(CryptoBenchmarkCryptoTests
 
 add_test(NAME CryptoBenchmarkCryptoTests COMMAND CryptoBenchmarkCryptoTests)
 
+add_executable(CryptoBenchmarkAeadTests
+	AeadAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkAeadTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkAeadTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkAeadTests COMMAND CryptoBenchmarkAeadTests)
+
+add_executable(CryptoBenchmarkEcdhXdhTests
+	EcdhXdhAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkEcdhXdhTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkEcdhXdhTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkEcdhXdhTests COMMAND CryptoBenchmarkEcdhXdhTests)
+
+add_executable(CryptoBenchmarkEcdsaTests
+	EcdsaAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkEcdsaTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkEcdsaTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkEcdsaTests COMMAND CryptoBenchmarkEcdsaTests)
+
+add_executable(CryptoBenchmarkEdDsaTests
+	EdDsaAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkEdDsaTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkEdDsaTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkEdDsaTests COMMAND CryptoBenchmarkEdDsaTests)
+
+add_executable(CryptoBenchmarkMlDsaTests
+	MlDsaAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkMlDsaTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkMlDsaTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkMlDsaTests COMMAND CryptoBenchmarkMlDsaTests)
+
+add_executable(CryptoBenchmarkSlhDsaTests
+	SlhDsaAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkSlhDsaTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkSlhDsaTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkSlhDsaTests COMMAND CryptoBenchmarkSlhDsaTests)
+
+add_executable(CryptoBenchmarkMlKemTests
+	MlKemAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkMlKemTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkMlKemTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkMlKemTests COMMAND CryptoBenchmarkMlKemTests)
+
+add_executable(CryptoBenchmarkRsaPssTests
+	RsaPssAdapterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkRsaPssTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkRsaPssTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkRsaPssTests COMMAND CryptoBenchmarkRsaPssTests)
+
+add_executable(CryptoBenchmarkAdapterClosureTests
+	AdapterClosureTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkAdapterClosureTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+target_include_directories(CryptoBenchmarkAdapterClosureTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/crypto
+)
+
+add_test(NAME CryptoBenchmarkAdapterClosureTests COMMAND CryptoBenchmarkAdapterClosureTests)
+
 add_executable(CryptoBenchmarkIpcTests
 	IpcCodecTests.cpp
 )
