@@ -119,6 +119,21 @@ inline void assertCompletedResult(
     } else if (std::get_if<core::KeyEstablishmentConfig>(&result.config.parameters) != nullptr) {
         require(std::get_if<core::KeyEstablishmentConfig>(&expectedConfig.parameters) != nullptr,
                 "completed result did not preserve the key-establishment configuration type");
+    } else if (const auto* resultSignature =
+                   std::get_if<core::SignatureConfig>(&result.config.parameters)) {
+        const auto* expectedSignature =
+            std::get_if<core::SignatureConfig>(&expectedConfig.parameters);
+        require(expectedSignature != nullptr,
+                "completed result did not preserve the signature configuration type");
+        require(resultSignature->input.index() == expectedSignature->input.index(),
+                "completed result did not preserve the signature input type");
+        if (const auto* resultMessage = std::get_if<core::MessageInput>(&resultSignature->input)) {
+            const auto* expectedMessage =
+                std::get_if<core::MessageInput>(&expectedSignature->input);
+            require(expectedMessage != nullptr &&
+                        resultMessage->messageSize == expectedMessage->messageSize,
+                    "completed result did not preserve the signature message size");
+        }
     } else {
         require(false, "completed result has the wrong workload configuration type");
     }
