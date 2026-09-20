@@ -102,14 +102,23 @@ inline void assertCompletedResult(
     require(!result.error.has_value(), "successful result contains an error");
     require(result.statistics.has_value(), "completed result has no statistics");
 
-    const auto* resultHash = std::get_if<core::HashConfig>(&result.config.parameters);
-    const auto* expectedHash = std::get_if<core::HashConfig>(&expectedConfig.parameters);
     require(result.config.profile == expectedConfig.profile &&
                 result.config.operation == expectedConfig.operation &&
                 result.config.iterationsPerRun == expectedConfig.iterationsPerRun &&
-                result.config.runs == expectedConfig.runs && resultHash != nullptr &&
-                expectedHash != nullptr && resultHash->inputSize == expectedHash->inputSize,
+                result.config.runs == expectedConfig.runs,
             "completed result did not preserve the supplied config");
+    if (const auto* resultHash = std::get_if<core::HashConfig>(&result.config.parameters)) {
+        const auto* expectedHash = std::get_if<core::HashConfig>(&expectedConfig.parameters);
+        require(expectedHash != nullptr && resultHash->inputSize == expectedHash->inputSize,
+                "completed result did not preserve the hash input size");
+    } else if (const auto* resultAead = std::get_if<core::AeadConfig>(&result.config.parameters)) {
+        const auto* expectedAead = std::get_if<core::AeadConfig>(&expectedConfig.parameters);
+        require(expectedAead != nullptr &&
+                    resultAead->plaintextSize == expectedAead->plaintextSize,
+                "completed result did not preserve the AEAD plaintext size");
+    } else {
+        require(false, "completed result has the wrong workload configuration type");
+    }
 
     require(result.runs.size() == expectedConfig.runs, "completed result has the wrong run count");
     for (std::uint32_t index = 0; index < result.runs.size(); ++index) {
