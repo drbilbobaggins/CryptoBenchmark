@@ -2,6 +2,9 @@
 
 #include <QMainWindow>
 
+#include <cryptobench/core/AlgorithmProfileId.h>
+#include <cryptobench/core/DomainTypes.h>
+
 QT_BEGIN_NAMESPACE
 namespace Ui {
 class MainWindow;
@@ -17,5 +20,9 @@ public:
     ~MainWindow() override;
 
 private:
+    void populateCategories();
+    void populateProfiles(cryptobench::core::PrimitiveCategory category, bool preserveOperation);
+    void populateOperations(const cryptobench::core::AlgorithmProfileId* profileId, bool preserveOperation);
+
     Ui::MainWindow* ui;
 };
