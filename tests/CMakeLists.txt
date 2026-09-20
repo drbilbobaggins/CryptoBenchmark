@@ -79,6 +79,23 @@ add_test(NAME CryptoBenchmarkBackendAeadIntegrationTests
 	COMMAND CryptoBenchmarkBackendAeadIntegrationTests
 )
 
+add_executable(CryptoBenchmarkBackendLifecycleIntegrationTests
+	BackendLifecycleIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBackendLifecycleIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBackendLifecycleIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBackendLifecycleIntegrationTests
+	COMMAND CryptoBenchmarkBackendLifecycleIntegrationTests
+)
+
 add_executable(CryptoBenchmarkBackendKeyEstablishmentIntegrationTests
 	BackendKeyEstablishmentIntegrationTests.cpp
 )
