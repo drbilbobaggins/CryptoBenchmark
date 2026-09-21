@@ -491,3 +491,33 @@ target_link_libraries(CryptoBenchmarkTestScriptedWorker
 add_dependencies(CryptoBenchmarkWindowsWorkerProcessTests CryptoBenchmarkTestScriptedWorker)
 
 add_test(NAME CryptoBenchmarkWindowsWorkerProcessTests COMMAND CryptoBenchmarkWindowsWorkerProcessTests)
+
+add_executable(CryptoBenchmarkGuiTests
+	MainWindowGuiTests.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/MainWindow.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/MainWindow.h
+	${CMAKE_SOURCE_DIR}/src/gui/MainWindow.ui
+)
+
+set_target_properties(CryptoBenchmarkGuiTests
+	PROPERTIES
+		AUTOMOC ON
+		AUTOUIC ON
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkGuiTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Widgets
+)
+
+add_dependencies(CryptoBenchmarkGuiTests CryptoBenchmarkTestScriptedWorker)
+
+add_test(NAME CryptoBenchmarkGuiTests COMMAND CryptoBenchmarkGuiTests)
+
+set_tests_properties(CryptoBenchmarkGuiTests
+	PROPERTIES
+	ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+	TIMEOUT 120
+)
