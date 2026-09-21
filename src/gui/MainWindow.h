@@ -36,6 +36,7 @@ private:
     void setConfigurationEnabled(bool enabled);
     void updateRunAvailability();
     void startBenchmark();
+    void requestCancel();
     void onProgressChanged(const cryptobench::core::ProgressInfo& progress);
     void onBenchmarkFinished(const cryptobench::core::BenchmarkResult& result);
     std::optional<cryptobench::core::BenchmarkConfig> buildBenchmarkConfig(
@@ -44,4 +45,5 @@ private:
 
     Ui::MainWindow* ui;
     std::unique_ptr<cryptobench::application::BenchmarkController> controller_;
+    bool cancelRequested_ = false;
 };

@@ -193,6 +193,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(controller_.get(), &cryptobench::application::BenchmarkController::benchmarkFinished,
             this, &MainWindow::onBenchmarkFinished);
     connect(ui->runButton, &QPushButton::clicked, this, &MainWindow::startBenchmark);
+    connect(ui->cancelButton, &QPushButton::clicked, this, &MainWindow::requestCancel);
 
     connect(ui->categoryComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
         const auto category = static_cast<PrimitiveCategory>(ui->categoryComboBox->currentData().toInt());
@@ -453,16 +454,32 @@ void MainWindow::startBenchmark()
         controller_->start(*config);
     } catch (const std::exception& error) {
         setConfigurationEnabled(true);
+        ui->cancelButton->setEnabled(false);
         ui->statusLabel->setText(QStringLiteral("Benchmark failed to start: %1")
             .arg(QString::fromUtf8(error.what())));
         updateRunAvailability();
         return;
     }
 
-    if (!controller_->isBusy()) {
+    if (controller_->isBusy()) {
+        ui->cancelButton->setEnabled(true);
+    } else {
         setConfigurationEnabled(true);
+        ui->cancelButton->setEnabled(false);
         updateRunAvailability();
     }
+}
+
+void MainWindow::requestCancel()
+{
+    if (!controller_->isBusy() || cancelRequested_) return;
+
+    cancelRequested_ = true;
+    setConfigurationEnabled(false);
+    ui->runButton->setEnabled(false);
+    ui->cancelButton->setEnabled(false);
+    ui->statusLabel->setText(QStringLiteral("Cancelling..."));
+    controller_->requestCancel();
 }
 
 void MainWindow::onProgressChanged(const cryptobench::core::ProgressInfo& progress)
@@ -472,18 +489,25 @@ void MainWindow::onProgressChanged(const cryptobench::core::ProgressInfo& progre
 
 void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& result)
 {
+    cancelRequested_ = false;
     setConfigurationEnabled(true);
+    ui->cancelButton->setEnabled(false);
     switch (result.status) {
         case cryptobench::core::BenchmarkStatus::Completed:
             ui->statusLabel->setText(QStringLiteral("Completed"));
             displayCompletedResults(ui, result);
             break;
         case cryptobench::core::BenchmarkStatus::Cancelled:
-            ui->statusLabel->setText(QStringLiteral("Cancelled"));
+            ui->statusLabel->setText(QStringLiteral("Benchmark cancelled"));
             clearDisplayedResults(ui);
             break;
         case cryptobench::core::BenchmarkStatus::Failed:
-            ui->statusLabel->setText(QStringLiteral("Failed"));
+            if (result.error && !result.error->technicalMessage.empty()) {
+                ui->statusLabel->setText(QStringLiteral("Benchmark failed: %1")
+                    .arg(QString::fromStdString(result.error->technicalMessage)));
+            } else {
+                ui->statusLabel->setText(QStringLiteral("Benchmark failed"));
+            }
             clearDisplayedResults(ui);
             break;
     }
