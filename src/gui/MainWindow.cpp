@@ -90,6 +90,82 @@ QString phaseLabel(const cryptobench::core::ProgressInfo& progress)
     return label;
 }
 
+QString formatStatistic(double value, double divisor)
+{
+    QString formatted = QString::number(value / divisor, 'f', 3);
+    while (formatted.endsWith(QLatin1Char('0'))) {
+        formatted.chop(1);
+    }
+    if (formatted.endsWith(QLatin1Char('.'))) {
+        formatted.chop(1);
+    }
+    return formatted;
+}
+
+struct DisplayUnit {
+    QString suffix;
+    double divisor;
+};
+
+DisplayUnit timeUnit(double mean)
+{
+    if (mean < 1'000.0) return {QStringLiteral("ns"), 1.0};
+    if (mean < 1'000'000.0) return {QStringLiteral("µs"), 1'000.0};
+    return {QStringLiteral("ms"), 1'000'000.0};
+}
+
+DisplayUnit memoryUnit(double mean)
+{
+    if (mean < 1'024.0) return {QStringLiteral("B"), 1.0};
+    if (mean < 1'048'576.0) return {QStringLiteral("KiB"), 1'024.0};
+    return {QStringLiteral("MiB"), 1'048'576.0};
+}
+
+void setStatisticRow(
+    QTableWidget* table,
+    int row,
+    const QString& label,
+    const cryptobench::core::Statistics<double>& statistics,
+    const DisplayUnit& unit)
+{
+    table->setItem(row, 0, new QTableWidgetItem(label + QStringLiteral(" (") + unit.suffix + QLatin1Char(')')));
+    table->setItem(row, 1, new QTableWidgetItem(formatStatistic(statistics.mean, unit.divisor)));
+    table->setItem(row, 2, new QTableWidgetItem(formatStatistic(statistics.median, unit.divisor)));
+    table->setItem(row, 3, new QTableWidgetItem(formatStatistic(statistics.min, unit.divisor)));
+    table->setItem(row, 4, new QTableWidgetItem(formatStatistic(statistics.max, unit.divisor)));
+    table->setItem(row, 5, new QTableWidgetItem(formatStatistic(statistics.stddev, unit.divisor)));
+}
+
+void clearDisplayedResults(Ui::MainWindow* ui)
+{
+    ui->resultsTable->setRowCount(0);
+    ui->resultsPlaceholderLabel->setVisible(true);
+}
+
+void displayCompletedResults(Ui::MainWindow* ui, const cryptobench::core::BenchmarkResult& result)
+{
+    if (!result.statistics) {
+        clearDisplayedResults(ui);
+        ui->statusLabel->setText(QStringLiteral(
+            "Completed; result statistics are unavailable."));
+        return;
+    }
+
+    const auto& statistics = *result.statistics;
+    const auto elapsedUnit = timeUnit(statistics.elapsedNanosecondsPerOperation.mean);
+    const auto cpuUnit = timeUnit(statistics.cpuNanosecondsPerOperation.mean);
+    const auto memoryDisplayUnit = memoryUnit(statistics.peakDeltaBytes.mean);
+
+    ui->resultsTable->setRowCount(3);
+    setStatisticRow(ui->resultsTable, 0, QStringLiteral("Wall-clock / operation"),
+                    statistics.elapsedNanosecondsPerOperation, elapsedUnit);
+    setStatisticRow(ui->resultsTable, 1, QStringLiteral("Process CPU time / operation"),
+                    statistics.cpuNanosecondsPerOperation, cpuUnit);
+    setStatisticRow(ui->resultsTable, 2, QStringLiteral("Peak PrivateUsage delta"),
+                    statistics.peakDeltaBytes, memoryDisplayUnit);
+    ui->resultsPlaceholderLabel->setVisible(false);
+}
+
 constexpr std::array<BenchmarkOperation, 10> kOperations = {
     BenchmarkOperation::KeyGen,
     BenchmarkOperation::Sign,
@@ -367,7 +443,7 @@ void MainWindow::startBenchmark()
         return;
     }
 
-    ui->resultsTable->setRowCount(0);
+    clearDisplayedResults(ui);
     ui->resultsPlaceholderLabel->setText(QStringLiteral("No benchmark results available."));
     setConfigurationEnabled(false);
     ui->runButton->setEnabled(false);
@@ -400,12 +476,15 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
     switch (result.status) {
         case cryptobench::core::BenchmarkStatus::Completed:
             ui->statusLabel->setText(QStringLiteral("Completed"));
+            displayCompletedResults(ui, result);
             break;
         case cryptobench::core::BenchmarkStatus::Cancelled:
             ui->statusLabel->setText(QStringLiteral("Cancelled"));
+            clearDisplayedResults(ui);
             break;
         case cryptobench::core::BenchmarkStatus::Failed:
             ui->statusLabel->setText(QStringLiteral("Failed"));
+            clearDisplayedResults(ui);
             break;
     }
     updateRunAvailability();
