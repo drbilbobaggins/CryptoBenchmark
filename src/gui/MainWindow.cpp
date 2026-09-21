@@ -2,7 +2,9 @@
 
 #include "ui_MainWindow.h"
 
+#include <QMessageBox>
 #include <QSignalBlocker>
+#include <QTimer>
 
 #include <array>
 #include <exception>
@@ -490,7 +492,10 @@ void MainWindow::onProgressChanged(const cryptobench::core::ProgressInfo& progre
 void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& result)
 {
     cancelRequested_ = false;
-    setConfigurationEnabled(true);
+    const bool closeAfterTerminal = closeAfterTerminal_;
+    if (!closeAfterTerminal) {
+        setConfigurationEnabled(true);
+    }
     ui->cancelButton->setEnabled(false);
     switch (result.status) {
         case cryptobench::core::BenchmarkStatus::Completed:
@@ -511,19 +516,51 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
             clearDisplayedResults(ui);
             break;
     }
+
+    if (closeAfterTerminal) {
+        setConfigurationEnabled(false);
+        ui->runButton->setEnabled(false);
+        ui->cancelButton->setEnabled(false);
+        QTimer::singleShot(0, this, [this]() {
+            if (!controller_->isBusy()) {
+                closeAfterTerminal_ = false;
+                close();
+            }
+        });
+        return;
+    }
+
     updateRunAvailability();
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (controller_->isBusy()) {
-        ui->statusLabel->setText(QStringLiteral(
-            "Benchmark is running; wait for completion before closing."));
+    if (!controller_->isBusy()) {
+        event->accept();
+        return;
+    }
+
+    const auto decision = QMessageBox::question(
+        this,
+        QStringLiteral("Benchmark running"),
+        QStringLiteral("Benchmark is running. Cancel and exit?"),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (decision != QMessageBox::Yes) {
         event->ignore();
         return;
     }
 
-    event->accept();
+    event->ignore();
+    if (!controller_->isBusy()) {
+        event->accept();
+        return;
+    }
+
+    closeAfterTerminal_ = true;
+    if (!cancelRequested_) {
+        requestCancel();
+    }
 }
 
 std::optional<cryptobench::core::BenchmarkConfig> MainWindow::buildBenchmarkConfig(

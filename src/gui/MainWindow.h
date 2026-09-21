@@ -46,4 +46,5 @@ private:
     Ui::MainWindow* ui;
     std::unique_ptr<cryptobench::application::BenchmarkController> controller_;
     bool cancelRequested_ = false;
+    bool closeAfterTerminal_ = false;
 };
