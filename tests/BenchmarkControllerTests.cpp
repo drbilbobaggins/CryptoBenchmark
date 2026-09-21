@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 using namespace cryptobench;
 
@@ -61,13 +62,21 @@ void testSuccessfulSession()
     std::optional<core::BenchmarkResult> result;
     std::size_t finishCount = 0;
     bool progressObserved = false;
+    bool terminal = false;
+    std::size_t progressAfterTerminal = 0;
+    std::vector<core::ProgressInfo> progress;
 
     QObject::connect(&controller, &application::BenchmarkController::progressChanged,
-                     [&](const core::ProgressInfo&) { progressObserved = true; });
+                     [&](const core::ProgressInfo& value) {
+                         progressObserved = true;
+                         if (terminal) ++progressAfterTerminal;
+                         progress.push_back(value);
+                     });
     QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
                      [&](const core::BenchmarkResult& value) {
                          ++finishCount;
                          result = value;
+                         terminal = true;
                          loop.quit();
                      });
     QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
@@ -90,6 +99,32 @@ void testSuccessfulSession()
     test_support::assertCompletedResult(*result, config, startedAt,
                                         std::chrono::system_clock::now());
     require(progressObserved, "no progress was forwarded");
+    QCoreApplication::processEvents();
+    require(progressAfterTerminal == 0, "Measuring progress arrived after terminal result");
+
+    std::vector<std::uint32_t> measuredRuns;
+    std::optional<std::size_t> finalizingIndex;
+    std::optional<std::size_t> lastMeasuringIndex;
+    for (std::size_t index = 0; index < progress.size(); ++index) {
+        const auto& value = progress[index];
+        require(value.totalRuns == config.runs, "progress total does not match configured runs");
+        if (value.phase == core::BenchmarkPhase::Measuring) {
+            require(value.runIndex.has_value(), "Measuring progress has no run index");
+            measuredRuns.push_back(*value.runIndex);
+            require(index > 0 && progress[index - 1].phase == core::BenchmarkPhase::Warmup,
+                    "Measuring progress was not preceded by warm-up");
+            require(progress[index - 1].runIndex == value.runIndex,
+                    "Measuring progress did not follow the matching warm-up run");
+            lastMeasuringIndex = index;
+        } else if (value.phase == core::BenchmarkPhase::Finalizing) {
+            finalizingIndex = index;
+        }
+    }
+    require(measuredRuns == std::vector<std::uint32_t>{0, 1},
+            "unexpected Measuring progress sequence");
+        require(finalizingIndex.has_value() && lastMeasuringIndex.has_value() &&
+            *finalizingIndex > *lastMeasuringIndex,
+            "Finalizing progress was not emitted after measured runs");
 
     const auto hashCharacteristics = std::get_if<core::HashCharacteristics>(&result->characteristics);
     require(hashCharacteristics != nullptr && hashCharacteristics->outputBytes == 32,

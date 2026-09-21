@@ -5,6 +5,8 @@
 #include <QSignalBlocker>
 
 #include <array>
+#include <exception>
+#include <utility>
 #include <variant>
 
 #include <cryptobench/core/AlgorithmRegistry.h>
@@ -62,6 +64,32 @@ QString operationLabel(BenchmarkOperation operation)
     return {};
 }
 
+QString phaseLabel(const cryptobench::core::ProgressInfo& progress)
+{
+    QString label;
+    switch (progress.phase) {
+        case cryptobench::core::BenchmarkPhase::Preparing:
+            label = QStringLiteral("Preparing");
+            break;
+        case cryptobench::core::BenchmarkPhase::Warmup:
+            label = QStringLiteral("Warm-up");
+            break;
+        case cryptobench::core::BenchmarkPhase::Measuring:
+            label = QStringLiteral("Measuring");
+            break;
+        case cryptobench::core::BenchmarkPhase::Finalizing:
+            label = QStringLiteral("Finalizing");
+            break;
+    }
+
+    if (progress.runIndex) {
+        label += QStringLiteral("; Run %1 / %2")
+            .arg(static_cast<qulonglong>(*progress.runIndex) + 1)
+            .arg(progress.totalRuns);
+    }
+    return label;
+}
+
 constexpr std::array<BenchmarkOperation, 10> kOperations = {
     BenchmarkOperation::KeyGen,
     BenchmarkOperation::Sign,
@@ -80,8 +108,15 @@ constexpr std::array<BenchmarkOperation, 10> kOperations = {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
+    , controller_(std::make_unique<cryptobench::application::BenchmarkController>())
 {
     ui->setupUi(this);
+
+    connect(controller_.get(), &cryptobench::application::BenchmarkController::progressChanged,
+            this, &MainWindow::onProgressChanged);
+    connect(controller_.get(), &cryptobench::application::BenchmarkController::benchmarkFinished,
+            this, &MainWindow::onBenchmarkFinished);
+    connect(ui->runButton, &QPushButton::clicked, this, &MainWindow::startBenchmark);
 
     connect(ui->categoryComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
         const auto category = static_cast<PrimitiveCategory>(ui->categoryComboBox->currentData().toInt());
@@ -283,14 +318,109 @@ void MainWindow::updateInputControls()
     cryptobench::core::ValidationResult validation;
     const auto config = buildBenchmarkConfig(validation);
     if (config.has_value()) {
-        ui->statusLabel->setText(QStringLiteral(
-            "Configuration valid; benchmark execution is not connected yet."));
+        if (!controller_->isBusy()) {
+            ui->statusLabel->setText(QStringLiteral("Configuration valid; ready to run."));
+        }
     } else if (!validation.errors.empty()) {
-        ui->statusLabel->setText(QStringLiteral("Configuration invalid: %1")
-            .arg(QString::fromStdString(validation.errors.front().technicalMessage)));
-    } else {
+        if (!controller_->isBusy()) {
+            ui->statusLabel->setText(QStringLiteral("Configuration invalid: %1")
+                .arg(QString::fromStdString(validation.errors.front().technicalMessage)));
+        }
+    } else if (!controller_->isBusy()) {
         ui->statusLabel->setText(QStringLiteral("Select a valid benchmark configuration."));
     }
+    updateRunAvailability();
+}
+
+void MainWindow::setConfigurationEnabled(bool enabled)
+{
+    ui->categoryComboBox->setEnabled(enabled);
+    ui->profileComboBox->setEnabled(enabled && ui->profileComboBox->count() > 0);
+    ui->operationComboBox->setEnabled(enabled && ui->operationComboBox->count() > 0);
+    ui->signatureInputModeComboBox->setEnabled(
+        enabled && ui->signatureInputModeComboBox->isVisible() &&
+        ui->signatureInputModeComboBox->count() > 0);
+    ui->workloadSizeSpinBox->setEnabled(enabled && ui->workloadSizeSpinBox->isVisible());
+    ui->iterationsSpinBox->setEnabled(enabled);
+    ui->runsSpinBox->setEnabled(enabled);
+}
+
+void MainWindow::updateRunAvailability()
+{
+    if (controller_->isBusy()) {
+        ui->runButton->setEnabled(false);
+        return;
+    }
+
+    cryptobench::core::ValidationResult validation;
+    ui->runButton->setEnabled(buildBenchmarkConfig(validation).has_value());
+}
+
+void MainWindow::startBenchmark()
+{
+    if (controller_->isBusy()) return;
+
+    cryptobench::core::ValidationResult validation;
+    const auto config = buildBenchmarkConfig(validation);
+    if (!config) {
+        updateInputControls();
+        return;
+    }
+
+    ui->resultsTable->setRowCount(0);
+    ui->resultsPlaceholderLabel->setText(QStringLiteral("No benchmark results available."));
+    setConfigurationEnabled(false);
+    ui->runButton->setEnabled(false);
+    ui->statusLabel->setText(QStringLiteral("Preparing"));
+
+    try {
+        controller_->start(*config);
+    } catch (const std::exception& error) {
+        setConfigurationEnabled(true);
+        ui->statusLabel->setText(QStringLiteral("Benchmark failed to start: %1")
+            .arg(QString::fromUtf8(error.what())));
+        updateRunAvailability();
+        return;
+    }
+
+    if (!controller_->isBusy()) {
+        setConfigurationEnabled(true);
+        updateRunAvailability();
+    }
+}
+
+void MainWindow::onProgressChanged(const cryptobench::core::ProgressInfo& progress)
+{
+    ui->statusLabel->setText(phaseLabel(progress));
+}
+
+void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& result)
+{
+    setConfigurationEnabled(true);
+    switch (result.status) {
+        case cryptobench::core::BenchmarkStatus::Completed:
+            ui->statusLabel->setText(QStringLiteral("Completed"));
+            break;
+        case cryptobench::core::BenchmarkStatus::Cancelled:
+            ui->statusLabel->setText(QStringLiteral("Cancelled"));
+            break;
+        case cryptobench::core::BenchmarkStatus::Failed:
+            ui->statusLabel->setText(QStringLiteral("Failed"));
+            break;
+    }
+    updateRunAvailability();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    if (controller_->isBusy()) {
+        ui->statusLabel->setText(QStringLiteral(
+            "Benchmark is running; wait for completion before closing."));
+        event->ignore();
+        return;
+    }
+
+    event->accept();
 }
 
 std::optional<cryptobench::core::BenchmarkConfig> MainWindow::buildBenchmarkConfig(

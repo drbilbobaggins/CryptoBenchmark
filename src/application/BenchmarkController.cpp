@@ -203,6 +203,8 @@ void BenchmarkController::onMeasurementReady(std::uint32_t runIndex)
         return;
     }
 
+    emit progressChanged({core::BenchmarkPhase::Measuring, runIndex, config_->runs});
+
     try {
         memorySampler_.start(static_cast<std::uint32_t>(processId), runIndex);
         state_ = State::Measuring;
