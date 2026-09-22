@@ -30,6 +30,17 @@ target_link_libraries(CryptoBenchmarkEnvironmentInfoTests
 
 add_test(NAME CryptoBenchmarkEnvironmentInfoTests COMMAND CryptoBenchmarkEnvironmentInfoTests)
 
+add_executable(CryptoBenchmarkResultDocumentTests
+	ResultDocumentTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkResultDocumentTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkResultDocumentTests COMMAND CryptoBenchmarkResultDocumentTests)
+
 add_executable(CryptoBenchmarkBenchmarkControllerTests
 	BenchmarkControllerTests.cpp
 )

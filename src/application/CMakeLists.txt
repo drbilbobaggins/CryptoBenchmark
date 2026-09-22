@@ -39,6 +39,8 @@ add_library(cryptobench_application STATIC
     BenchmarkController.cpp
     include/cryptobench/application/BenchmarkController.h
     EnvironmentInfoProvider.cpp
+    ResultDocument.cpp
+    include/cryptobench/application/ResultDocument.h
 )
 
 set_target_properties(cryptobench_application PROPERTIES AUTOMOC ON)
