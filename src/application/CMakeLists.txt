@@ -38,6 +38,8 @@ add_library(cryptobench_application STATIC
     application.cpp
     BenchmarkController.cpp
     include/cryptobench/application/BenchmarkController.h
+    BenchmarkConfigJson.cpp
+    include/cryptobench/application/BenchmarkConfigJson.h
     EnvironmentInfoProvider.cpp
     ResultDocument.cpp
     include/cryptobench/application/ResultDocument.h
