@@ -49,6 +49,8 @@ add_library(cryptobench_application STATIC
     include/cryptobench/application/JsonResultExportService.h
     SingleResultDocumentService.cpp
     include/cryptobench/application/SingleResultDocumentService.h
+    AtomicFileWriter.cpp
+    include/cryptobench/application/AtomicFileWriter.h
 )
 
 set_target_properties(cryptobench_application PROPERTIES AUTOMOC ON)
