@@ -103,6 +103,12 @@ void requireNoNullOptionals(const QJsonObject& value)
     }
 }
 
+BatchError sampleBatchError(std::optional<std::uint32_t> entryIndex = std::uint32_t{5})
+{
+    return {BatchErrorCode::OutputWriteFailed, BatchErrorStage::SnapshotPersistence, entryIndex,
+            "mentési hiba: árvíztűrő tükörfúrógép"};
+}
+
 void testSingleCompletedDocument()
 {
     const ResultDocument document{
@@ -193,6 +199,78 @@ void testBatchStatuses()
     }
 }
 
+void testFailedBatchErrorWithEntryError()
+{
+    const ResultDocument document{
+        ResultMode::Batch,
+        ResultDocumentStatus::Failed,
+        {entry(5, ExportEntryStatus::Failed, std::nullopt, sampleEnvironment(), std::nullopt, sampleError())},
+        sampleBatchError()
+    };
+
+    const auto root = parseObject(JsonResultExportService{}.serialize(document));
+    requireKeys(root, {"format", "schemaVersion", "mode", "status", "entries", "batchError"});
+    const auto batchError = root.value("batchError").toObject();
+    requireKeys(batchError, {"code", "stage", "entryIndex", "technicalMessage"});
+    requireString(batchError, "code", "outputWriteFailed");
+    requireString(batchError, "stage", "snapshotPersistence");
+    requireNumber(batchError, "entryIndex", 5.0);
+    require(batchError.value("technicalMessage").toString() == QString::fromUtf8("mentési hiba: árvíztűrő tükörfúrógép"),
+            "batch error UTF-8 message mismatch");
+    require(root.value("entries").toArray().at(0).toObject().contains("error"),
+            "entry-level error was not preserved separately");
+    require(root.value("entries").toArray().at(0).toObject().value("error").toObject().contains("runIndex"),
+            "entry-level run index was not preserved");
+}
+
+void testFailedBatchErrorWithoutEntryIndex()
+{
+    const ResultDocument document{
+        ResultMode::Batch, ResultDocumentStatus::Failed, {}, sampleBatchError(std::nullopt)
+    };
+    const auto batchError = parseObject(JsonResultExportService{}.serialize(document)).value("batchError").toObject();
+    requireKeys(batchError, {"code", "stage", "technicalMessage"});
+    require(!batchError.contains("entryIndex"), "absent batch entry index was emitted");
+    require(batchError.value("entryIndex").isUndefined(), "absent batch entry index was not undefined");
+}
+
+void testBatchErrorAbsentFromNormalDocuments()
+{
+    const auto service = JsonResultExportService{};
+    const auto single = parseObject(service.serialize(ResultDocument{
+        ResultMode::Single, ResultDocumentStatus::Completed, {}, std::nullopt
+    }));
+    requireKeys(single, {"format", "schemaVersion", "mode", "status", "entries"});
+    require(!single.contains("batchError"), "single document unexpectedly contains batch error");
+
+    for (const auto status : {ResultDocumentStatus::InProgress, ResultDocumentStatus::Completed,
+                              ResultDocumentStatus::CompletedWithFailures, ResultDocumentStatus::Cancelled}) {
+        const auto root = parseObject(service.serialize(ResultDocument{ResultMode::Batch, status, {}, std::nullopt}));
+        require(!root.contains("batchError"), "normal batch document unexpectedly contains batch error");
+    }
+}
+
+void testBatchErrorModeAndStatusAreValidated()
+{
+    const auto service = JsonResultExportService{};
+    const BatchError error = sampleBatchError();
+    for (const auto document : {
+             ResultDocument{ResultMode::Single, ResultDocumentStatus::Completed, {}, error},
+             ResultDocument{ResultMode::Single, ResultDocumentStatus::Failed, {}, error},
+             ResultDocument{ResultMode::Batch, ResultDocumentStatus::InProgress, {}, error},
+             ResultDocument{ResultMode::Batch, ResultDocumentStatus::Completed, {}, error},
+             ResultDocument{ResultMode::Batch, ResultDocumentStatus::CompletedWithFailures, {}, error},
+             ResultDocument{ResultMode::Batch, ResultDocumentStatus::Cancelled, {}, error}}) {
+        bool rejected = false;
+        try {
+            static_cast<void>(service.serialize(document));
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "invalid batch error placement was accepted");
+    }
+}
+
 } // namespace
 } // namespace cryptobench::tests
 
@@ -205,6 +283,14 @@ int main()
         std::cout << "PASS entry matrices and order\n";
         cryptobench::tests::testBatchStatuses();
         std::cout << "PASS batch statuses\n";
+        cryptobench::tests::testFailedBatchErrorWithEntryError();
+        std::cout << "PASS failed batch error with entry error\n";
+        cryptobench::tests::testFailedBatchErrorWithoutEntryIndex();
+        std::cout << "PASS failed batch error without entry index\n";
+        cryptobench::tests::testBatchErrorAbsentFromNormalDocuments();
+        std::cout << "PASS normal documents omit batch error\n";
+        cryptobench::tests::testBatchErrorModeAndStatusAreValidated();
+        std::cout << "PASS batch error placement validation\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL JsonResultExportService: " << error.what() << '\n';

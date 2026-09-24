@@ -34,9 +34,30 @@ enum class ExportEntryStatus {
     Cancelled
 };
 
+enum class BatchErrorCode {
+    OutputInitializationFailed,
+    OutputWriteFailed,
+    InternalError
+};
+
+enum class BatchErrorStage {
+    OutputInitialization,
+    SnapshotPersistence,
+    Orchestration
+};
+
 std::string_view toStableString(ResultMode mode);
 std::string_view toStableString(ResultDocumentStatus status);
 std::string_view toStableString(ExportEntryStatus status);
+std::string_view toStableString(BatchErrorCode code);
+std::string_view toStableString(BatchErrorStage stage);
+
+struct BatchError {
+    BatchErrorCode code;
+    BatchErrorStage stage;
+    std::optional<std::uint32_t> entryIndex;
+    std::string technicalMessage;
+};
 
 struct ExportEntry {
     std::uint32_t entryIndex;
@@ -53,6 +74,7 @@ struct ResultDocument {
     ResultMode mode;
     ResultDocumentStatus status;
     std::vector<ExportEntry> entries;
+    std::optional<BatchError> batchError = std::nullopt;
 };
 
 } // namespace cryptobench::application

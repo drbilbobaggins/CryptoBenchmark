@@ -47,4 +47,30 @@ std::string_view toStableString(ExportEntryStatus status)
     throw std::invalid_argument("unsupported export entry status");
 }
 
+std::string_view toStableString(BatchErrorCode code)
+{
+    switch (code) {
+    case BatchErrorCode::OutputInitializationFailed:
+        return "outputInitializationFailed";
+    case BatchErrorCode::OutputWriteFailed:
+        return "outputWriteFailed";
+    case BatchErrorCode::InternalError:
+        return "internalError";
+    }
+    throw std::invalid_argument("unsupported batch error code");
+}
+
+std::string_view toStableString(BatchErrorStage stage)
+{
+    switch (stage) {
+    case BatchErrorStage::OutputInitialization:
+        return "outputInitialization";
+    case BatchErrorStage::SnapshotPersistence:
+        return "snapshotPersistence";
+    case BatchErrorStage::Orchestration:
+        return "orchestration";
+    }
+    throw std::invalid_argument("unsupported batch error stage");
+}
+
 } // namespace cryptobench::application

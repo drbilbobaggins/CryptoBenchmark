@@ -74,6 +74,20 @@ void testEntryStatusStrings()
     require(toStableString(ExportEntryStatus::Cancelled) == "cancelled", "cancelled entry string mismatch");
 }
 
+void testBatchErrorStrings()
+{
+    require(toStableString(BatchErrorCode::OutputInitializationFailed) == "outputInitializationFailed",
+            "output initialization error string mismatch");
+    require(toStableString(BatchErrorCode::OutputWriteFailed) == "outputWriteFailed",
+            "output write error string mismatch");
+    require(toStableString(BatchErrorCode::InternalError) == "internalError", "internal error string mismatch");
+    require(toStableString(BatchErrorStage::OutputInitialization) == "outputInitialization",
+            "output initialization stage string mismatch");
+    require(toStableString(BatchErrorStage::SnapshotPersistence) == "snapshotPersistence",
+            "snapshot persistence stage string mismatch");
+    require(toStableString(BatchErrorStage::Orchestration) == "orchestration", "orchestration stage string mismatch");
+}
+
 template <typename Enum>
 void requireUnsupportedValueRejected(Enum value, std::string_view message)
 {
@@ -91,6 +105,8 @@ void testUnsupportedValuesRejected()
     requireUnsupportedValueRejected(static_cast<ResultMode>(99), "unsupported result mode was accepted");
     requireUnsupportedValueRejected(static_cast<ResultDocumentStatus>(99), "unsupported document status was accepted");
     requireUnsupportedValueRejected(static_cast<ExportEntryStatus>(99), "unsupported entry status was accepted");
+    requireUnsupportedValueRejected(static_cast<BatchErrorCode>(99), "unsupported batch error code was accepted");
+    requireUnsupportedValueRejected(static_cast<BatchErrorStage>(99), "unsupported batch error stage was accepted");
 }
 
 void testExportEntryPreservesCanonicalValues()
@@ -151,6 +167,21 @@ void testDocumentPreservesModeStatusAndOrdering()
             "document entry statuses mismatch");
     require(document.entries[1].error.has_value() && !document.entries[1].statistics.has_value(),
             "failed entry optional fields mismatch");
+    require(!document.batchError.has_value(), "batch error was not absent by default");
+}
+
+void testBatchErrorPreservesTypedValues()
+{
+    const BatchError error{
+        BatchErrorCode::OutputWriteFailed, BatchErrorStage::SnapshotPersistence, std::uint32_t{7}, "write failed"
+    };
+    const ResultDocument document{ResultMode::Batch, ResultDocumentStatus::Failed, {}, error};
+
+    require(document.batchError.has_value(), "batch error was not preserved");
+    require(document.batchError->code == BatchErrorCode::OutputWriteFailed, "batch error code mismatch");
+    require(document.batchError->stage == BatchErrorStage::SnapshotPersistence, "batch error stage mismatch");
+    require(document.batchError->entryIndex == 7, "batch error entry index mismatch");
+    require(document.batchError->technicalMessage == "write failed", "batch error message mismatch");
 }
 
 } // namespace
@@ -165,6 +196,8 @@ int main()
         std::cout << "PASS document status strings\n";
         cryptobench::tests::testEntryStatusStrings();
         std::cout << "PASS entry status strings\n";
+        cryptobench::tests::testBatchErrorStrings();
+        std::cout << "PASS batch error strings\n";
         cryptobench::tests::testUnsupportedValuesRejected();
         std::cout << "PASS unsupported values rejected\n";
         cryptobench::tests::testExportEntryPreservesCanonicalValues();
@@ -173,6 +206,8 @@ int main()
         std::cout << "PASS optional fields\n";
         cryptobench::tests::testDocumentPreservesModeStatusAndOrdering();
         std::cout << "PASS result document ordering\n";
+        cryptobench::tests::testBatchErrorPreservesTypedValues();
+        std::cout << "PASS batch error typed values\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL ResultDocument: " << error.what() << '\n';
