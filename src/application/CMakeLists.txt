@@ -40,6 +40,8 @@ add_library(cryptobench_application STATIC
     include/cryptobench/application/BenchmarkController.h
     BenchmarkConfigJson.cpp
     include/cryptobench/application/BenchmarkConfigJson.h
+    BatchTypes.cpp
+    include/cryptobench/application/BatchTypes.h
     EnvironmentInfoProvider.cpp
     ResultJsonMapping.cpp
     include/cryptobench/application/ResultJsonMapping.h
