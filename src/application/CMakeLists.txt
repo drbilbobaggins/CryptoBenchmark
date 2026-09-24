@@ -38,7 +38,19 @@ add_library(cryptobench_application STATIC
     application.cpp
     BenchmarkController.cpp
     include/cryptobench/application/BenchmarkController.h
+    BenchmarkConfigJson.cpp
+    include/cryptobench/application/BenchmarkConfigJson.h
     EnvironmentInfoProvider.cpp
+    ResultJsonMapping.cpp
+    include/cryptobench/application/ResultJsonMapping.h
+    ResultDocument.cpp
+    include/cryptobench/application/ResultDocument.h
+    JsonResultExportService.cpp
+    include/cryptobench/application/JsonResultExportService.h
+    SingleResultDocumentService.cpp
+    include/cryptobench/application/SingleResultDocumentService.h
+    AtomicFileWriter.cpp
+    include/cryptobench/application/AtomicFileWriter.h
 )
 
 set_target_properties(cryptobench_application PROPERTIES AUTOMOC ON)

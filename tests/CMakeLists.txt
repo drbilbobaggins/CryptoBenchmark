@@ -30,6 +30,96 @@ target_link_libraries(CryptoBenchmarkEnvironmentInfoTests
 
 add_test(NAME CryptoBenchmarkEnvironmentInfoTests COMMAND CryptoBenchmarkEnvironmentInfoTests)
 
+add_executable(CryptoBenchmarkResultDocumentTests
+	ResultDocumentTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkResultDocumentTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkResultDocumentTests COMMAND CryptoBenchmarkResultDocumentTests)
+
+add_executable(CryptoBenchmarkBenchmarkConfigJsonTests
+	BenchmarkConfigJsonTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBenchmarkConfigJsonTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBenchmarkConfigJsonTests COMMAND CryptoBenchmarkBenchmarkConfigJsonTests)
+
+add_executable(CryptoBenchmarkResultJsonMappingTests
+	ResultJsonMappingTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkResultJsonMappingTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkResultJsonMappingTests COMMAND CryptoBenchmarkResultJsonMappingTests)
+
+add_executable(CryptoBenchmarkJsonResultExportServiceTests
+	JsonResultExportServiceTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkJsonResultExportServiceTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkJsonResultExportServiceTests COMMAND CryptoBenchmarkJsonResultExportServiceTests)
+
+add_executable(CryptoBenchmarkSingleResultDocumentServiceTests
+	SingleResultDocumentServiceTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkSingleResultDocumentServiceTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkSingleResultDocumentServiceTests COMMAND CryptoBenchmarkSingleResultDocumentServiceTests)
+
+add_executable(CryptoBenchmarkAtomicFileWriterTests
+	AtomicFileWriterTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkAtomicFileWriterTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkAtomicFileWriterTests COMMAND CryptoBenchmarkAtomicFileWriterTests)
+
+add_executable(CryptoBenchmarkAtomicFileWriterFailureTests
+	AtomicFileWriterFailureTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkAtomicFileWriterFailureTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkAtomicFileWriterFailureTests COMMAND CryptoBenchmarkAtomicFileWriterFailureTests)
+
+add_executable(CryptoBenchmarkSingleResultPersistenceIntegrationTests
+	SingleResultPersistenceIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkSingleResultPersistenceIntegrationTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkSingleResultPersistenceIntegrationTests
+	COMMAND CryptoBenchmarkSingleResultPersistenceIntegrationTests
+)
+
 add_executable(CryptoBenchmarkBenchmarkControllerTests
 	BenchmarkControllerTests.cpp
 )
