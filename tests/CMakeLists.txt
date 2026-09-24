@@ -96,6 +96,17 @@ target_link_libraries(CryptoBenchmarkAtomicFileWriterTests
 
 add_test(NAME CryptoBenchmarkAtomicFileWriterTests COMMAND CryptoBenchmarkAtomicFileWriterTests)
 
+add_executable(CryptoBenchmarkAtomicFileWriterFailureTests
+	AtomicFileWriterFailureTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkAtomicFileWriterFailureTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkAtomicFileWriterFailureTests COMMAND CryptoBenchmarkAtomicFileWriterFailureTests)
+
 add_executable(CryptoBenchmarkSingleResultPersistenceIntegrationTests
 	SingleResultPersistenceIntegrationTests.cpp
 )
