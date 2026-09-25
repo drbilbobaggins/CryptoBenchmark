@@ -15,8 +15,9 @@ public:
     {
     }
 
-    std::optional<BatchInputIssue> parse()
+    std::optional<BatchInputIssue> parse(std::vector<JsonNumberToken>* numberTokens = nullptr)
     {
+        numberTokens_ = numberTokens;
         skipWhitespace();
         if (!parseValue({})) {
             return issue_;
@@ -55,7 +56,7 @@ private:
             return consumeLiteral("null");
         }
         if (bytes_[position_] == '-' || (bytes_[position_] >= '0' && bytes_[position_] <= '9')) {
-            return parseNumber();
+            return parseNumber(path);
         }
         return invalid("expected JSON value");
     }
@@ -269,8 +270,9 @@ private:
         return value;
     }
 
-    bool parseNumber()
+    bool parseNumber(const QString& path)
     {
+        const auto numberStart = position_;
         if (consume('-') && position_ >= bytes_.size()) {
             return invalid("truncated JSON number");
         }
@@ -305,6 +307,10 @@ private:
             while (position_ < bytes_.size() && bytes_[position_] >= '0' && bytes_[position_] <= '9') {
                 ++position_;
             }
+        }
+        if (numberTokens_ != nullptr) {
+            numberTokens_->push_back(
+                {path.toStdString(), bytes_.mid(numberStart, position_ - numberStart), numberStart, position_});
         }
         return true;
     }
@@ -399,6 +405,7 @@ private:
     qsizetype position_ = 0;
     int depth_ = 0;
     std::optional<BatchInputIssue> issue_;
+    std::vector<JsonNumberToken>* numberTokens_ = nullptr;
 };
 
 } // namespace
@@ -406,6 +413,15 @@ private:
 std::optional<BatchInputIssue> strictJsonPreflight(const QByteArray& utf8Bytes)
 {
     return JsonPreflightParser(utf8Bytes).parse();
+}
+
+JsonNumberTokenResult inspectJsonNumberTokens(const QByteArray& utf8Bytes)
+{
+    std::vector<JsonNumberToken> numberTokens;
+    if (const auto issue = JsonPreflightParser(utf8Bytes).parse(&numberTokens); issue.has_value()) {
+        return *issue;
+    }
+    return numberTokens;
 }
 
 } // namespace cryptobench::application

@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <variant>
 
 namespace cryptobench::tests {
 namespace {
@@ -107,6 +108,28 @@ void testDeepInputGuard()
     requireIssue(deeplyNested, BatchInputIssueCode::InvalidJson);
 }
 
+void testNumberTokenInspection()
+{
+    const auto result = inspectJsonNumberTokens(
+        "{\"schemaVersion\":1.0000000000000001,\"entries\":[{\"runs\":1e2,\"parameters\":{\"value\":1.5,\"large\":1e309}}]}");
+    require(std::holds_alternative<std::vector<JsonNumberToken>>(result), "number inspection rejected valid JSON");
+    const auto& tokens = std::get<std::vector<JsonNumberToken>>(result);
+    require(tokens.size() == 4, "number inspection returned an unexpected token count");
+    require(tokens[0].path == "/schemaVersion" && tokens[0].lexeme == "1.0000000000000001",
+            "schemaVersion number lexeme was not preserved");
+    require(tokens[1].path == "/entries/0/runs" && tokens[1].lexeme == "1e2",
+            "nested number path or lexeme was not preserved");
+        require(tokens[2].path == "/entries/0/parameters/value" && tokens[2].lexeme == "1.5",
+            "parameter number path or lexeme was not preserved");
+        require(tokens[3].path == "/entries/0/parameters/large" && tokens[3].lexeme == "1e309",
+            "large exponent number path or lexeme was not preserved");
+        require(tokens[3].startOffset < tokens[3].endOffset
+            && tokens[3].endOffset - tokens[3].startOffset == tokens[3].lexeme.size(),
+            "number token byte offsets were not preserved");
+    require(!strictJsonPreflight("1.5").has_value(), "fractional JSON number became invalid syntax");
+        require(!strictJsonPreflight("1e309").has_value(), "large exponent became invalid JSON syntax");
+}
+
 } // namespace
 } // namespace cryptobench::tests
 
@@ -121,6 +144,8 @@ int main()
         std::cout << "PASS invalid syntax\n";
         cryptobench::tests::testDeepInputGuard();
         std::cout << "PASS nesting guard\n";
+        cryptobench::tests::testNumberTokenInspection();
+        std::cout << "PASS number token inspection\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL StrictJsonPreflight: " << error.what() << '\n';
