@@ -52,6 +52,94 @@ target_link_libraries(CryptoBenchmarkBenchmarkConfigJsonTests
 
 add_test(NAME CryptoBenchmarkBenchmarkConfigJsonTests COMMAND CryptoBenchmarkBenchmarkConfigJsonTests)
 
+add_executable(CryptoBenchmarkBatchTypesTests
+	BatchTypesTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchTypesTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBatchTypesTests COMMAND CryptoBenchmarkBatchTypesTests)
+
+add_executable(CryptoBenchmarkBatchInputFileTests
+	BatchInputFileTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchInputFileTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBatchInputFileTests COMMAND CryptoBenchmarkBatchInputFileTests)
+
+add_executable(CryptoBenchmarkStrictJsonPreflightTests
+	StrictJsonPreflightTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkStrictJsonPreflightTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkStrictJsonPreflightTests COMMAND CryptoBenchmarkStrictJsonPreflightTests)
+
+add_executable(CryptoBenchmarkBatchInputSchemaTests
+	BatchInputSchemaTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchInputSchemaTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBatchInputSchemaTests COMMAND CryptoBenchmarkBatchInputSchemaTests)
+
+add_executable(CryptoBenchmarkBatchPrimitiveParametersTests
+	BatchPrimitiveParametersTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchPrimitiveParametersTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBatchPrimitiveParametersTests COMMAND CryptoBenchmarkBatchPrimitiveParametersTests)
+
+add_executable(CryptoBenchmarkBatchInputParserTests
+	BatchInputParserTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchInputParserTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBatchInputParserTests COMMAND CryptoBenchmarkBatchInputParserTests)
+
+add_executable(CryptoBenchmarkBatchInputCanonicalCoverageTests
+	BatchInputCanonicalCoverageTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchInputCanonicalCoverageTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBatchInputCanonicalCoverageTests COMMAND CryptoBenchmarkBatchInputCanonicalCoverageTests)
+
+add_executable(CryptoBenchmarkBatchInputErrorConformanceTests
+	BatchInputErrorConformanceTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchInputErrorConformanceTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBatchInputErrorConformanceTests COMMAND CryptoBenchmarkBatchInputErrorConformanceTests)
+
 add_executable(CryptoBenchmarkResultJsonMappingTests
 	ResultJsonMappingTests.cpp
 )

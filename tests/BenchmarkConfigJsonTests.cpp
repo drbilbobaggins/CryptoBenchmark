@@ -73,6 +73,18 @@ void testOperationStrings()
 
     for (const auto& [operation, name] : expected) {
         require(toStableOperationString(operation) == name, "operation string mismatch");
+        const auto parsed = parseStableOperationString(name);
+        require(parsed.has_value() && *parsed == operation, "operation string did not round-trip");
+    }
+}
+
+void testOperationStringRejections()
+{
+    const std::array invalidValues{
+        std::string_view{}, std::string_view("Sign"), std::string_view("sign-extra"),
+        std::string_view("pre-sign"), std::string_view("unknown")};
+    for (const auto value : invalidValues) {
+        require(!parseStableOperationString(value).has_value(), "invalid operation string was accepted");
     }
 }
 
@@ -164,6 +176,8 @@ int main()
     try {
         cryptobench::tests::testOperationStrings();
         std::cout << "PASS operation strings\n";
+        cryptobench::tests::testOperationStringRejections();
+        std::cout << "PASS operation string rejection\n";
         cryptobench::tests::testUnsupportedOperationRejected();
         std::cout << "PASS unsupported operation rejection\n";
         cryptobench::tests::testCommonFieldsAndCanonicalProfile();

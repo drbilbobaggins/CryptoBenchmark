@@ -40,6 +40,20 @@ add_library(cryptobench_application STATIC
     include/cryptobench/application/BenchmarkController.h
     BenchmarkConfigJson.cpp
     include/cryptobench/application/BenchmarkConfigJson.h
+    BatchTypes.cpp
+    include/cryptobench/application/BatchTypes.h
+    BatchInputFile.cpp
+    include/cryptobench/application/BatchInputFile.h
+    BatchInputParser.cpp
+    include/cryptobench/application/BatchInputParser.h
+    StrictJsonPreflight.cpp
+    include/cryptobench/application/StrictJsonPreflight.h
+    BatchInputSchema.cpp
+    include/cryptobench/application/BatchInputSchema.h
+    BatchPrimitiveParameters.cpp
+    include/cryptobench/application/BatchPrimitiveParameters.h
+    BatchJsonInteger.cpp
+    BatchJsonInteger.h
     EnvironmentInfoProvider.cpp
     ResultJsonMapping.cpp
     include/cryptobench/application/ResultJsonMapping.h
