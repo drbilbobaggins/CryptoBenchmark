@@ -48,6 +48,8 @@ add_library(cryptobench_application STATIC
     include/cryptobench/application/StrictJsonPreflight.h
     BatchInputSchema.cpp
     include/cryptobench/application/BatchInputSchema.h
+    BatchPrimitiveParameters.cpp
+    include/cryptobench/application/BatchPrimitiveParameters.h
     EnvironmentInfoProvider.cpp
     ResultJsonMapping.cpp
     include/cryptobench/application/ResultJsonMapping.h

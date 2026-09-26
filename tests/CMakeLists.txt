@@ -96,6 +96,17 @@ target_link_libraries(CryptoBenchmarkBatchInputSchemaTests
 
 add_test(NAME CryptoBenchmarkBatchInputSchemaTests COMMAND CryptoBenchmarkBatchInputSchemaTests)
 
+add_executable(CryptoBenchmarkBatchPrimitiveParametersTests
+	BatchPrimitiveParametersTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchPrimitiveParametersTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBatchPrimitiveParametersTests COMMAND CryptoBenchmarkBatchPrimitiveParametersTests)
+
 add_executable(CryptoBenchmarkResultJsonMappingTests
 	ResultJsonMappingTests.cpp
 )
