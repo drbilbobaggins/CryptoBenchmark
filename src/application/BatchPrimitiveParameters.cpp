@@ -1,10 +1,11 @@
 #include <cryptobench/application/BatchPrimitiveParameters.h>
 
+#include "BatchJsonInteger.h"
+
 #include <QJsonValue>
 
 #include <cstdint>
 #include <initializer_list>
-#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -78,153 +79,6 @@ const JsonNumberToken* findNumberToken(
     return nullptr;
 }
 
-bool parseExponent(std::string_view lexeme, std::size_t start, bool& negative, std::int64_t& value)
-{
-    negative = false;
-    value = 0;
-    if (start >= lexeme.size()) {
-        return false;
-    }
-    if (lexeme[start] == '+' || lexeme[start] == '-') {
-        negative = lexeme[start] == '-';
-        ++start;
-    }
-    if (start == lexeme.size()) {
-        return false;
-    }
-    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
-    for (; start < lexeme.size(); ++start) {
-        if (lexeme[start] < '0' || lexeme[start] > '9') {
-            return false;
-        }
-        const auto digit = static_cast<std::int64_t>(lexeme[start] - '0');
-        if (value > (maximum - digit) / 10) {
-            value = maximum;
-        } else if (value != maximum) {
-            value = value * 10 + digit;
-        }
-    }
-    return true;
-}
-
-bool addSigned(std::int64_t left, bool rightNegative, std::int64_t right, std::int64_t& result)
-{
-    if (rightNegative) {
-        if (right > 0 && left < std::numeric_limits<std::int64_t>::min() + right) {
-            return false;
-        }
-        result = left - right;
-        return true;
-    }
-    if (left > std::numeric_limits<std::int64_t>::max() - right) {
-        return false;
-    }
-    result = left + right;
-    return true;
-}
-
-std::optional<core::WorkloadBytes> exactWorkloadValue(std::string_view lexeme)
-{
-    if (lexeme.empty()) {
-        return std::nullopt;
-    }
-    std::size_t position = 0;
-    const bool negative = lexeme[position] == '-';
-    if (negative) {
-        ++position;
-    }
-    if (position == lexeme.size()) {
-        return std::nullopt;
-    }
-
-    std::string digits;
-    std::size_t fractionalDigits = 0;
-    bool afterDecimal = false;
-    while (position < lexeme.size() && lexeme[position] != 'e' && lexeme[position] != 'E') {
-        const auto character = lexeme[position++];
-        if (character == '.') {
-            afterDecimal = true;
-            continue;
-        }
-        if (character < '0' || character > '9') {
-            return std::nullopt;
-        }
-        digits.push_back(character);
-        if (afterDecimal) {
-            ++fractionalDigits;
-        }
-    }
-    if (digits.empty()) {
-        return std::nullopt;
-    }
-
-    bool exponentNegative = false;
-    std::int64_t exponent = 0;
-    if (position < lexeme.size() && !parseExponent(lexeme, position + 1, exponentNegative, exponent)) {
-        return std::nullopt;
-    }
-    std::size_t firstSignificantDigit = 0;
-    while (firstSignificantDigit < digits.size() && digits[firstSignificantDigit] == '0') {
-        ++firstSignificantDigit;
-    }
-    if (firstSignificantDigit == digits.size()) {
-        return 0;
-    }
-
-    if (fractionalDigits > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) {
-        return std::nullopt;
-    }
-    std::int64_t decimalShift = 0;
-    if (!addSigned(exponentNegative ? 0 : exponent, exponentNegative, exponentNegative ? exponent : 0,
-                   decimalShift)) {
-        return std::nullopt;
-    }
-    std::size_t trailingZeros = 0;
-    if (decimalShift < static_cast<std::int64_t>(fractionalDigits)) {
-        const auto fractionCount = static_cast<std::int64_t>(fractionalDigits);
-        if (decimalShift < 0 && -decimalShift > std::numeric_limits<std::int64_t>::max() - fractionCount) {
-            return std::nullopt;
-        }
-        const auto fractionalCount = static_cast<std::size_t>(fractionCount - decimalShift);
-        if (fractionalCount > digits.size()) {
-            return std::nullopt;
-        }
-        const auto significantEnd = digits.size() - fractionalCount;
-        for (std::size_t index = significantEnd; index < digits.size(); ++index) {
-            if (digits[index] != '0') {
-                return std::nullopt;
-            }
-        }
-        digits.resize(significantEnd);
-    } else {
-        trailingZeros = static_cast<std::size_t>(decimalShift - static_cast<std::int64_t>(fractionalDigits));
-        if (trailingZeros > 20) {
-            return std::nullopt;
-        }
-    }
-
-    std::uint64_t value = 0;
-    const auto significantEnd = digits.size();
-    for (std::size_t index = firstSignificantDigit; index < significantEnd; ++index) {
-        const auto digit = digits[index];
-        const auto next = static_cast<std::uint64_t>(digit - '0');
-        if (value > (std::numeric_limits<std::uint64_t>::max() - next) / 10) {
-            return std::nullopt;
-        }
-        value = value * 10 + next;
-    }
-    for (std::size_t index = 0; index < trailingZeros; ++index) {
-        if (value > std::numeric_limits<std::uint64_t>::max() / 10) {
-            return std::nullopt;
-        }
-        value *= 10;
-    }
-    if (negative && value != 0) {
-        return std::nullopt;
-    }
-    return value;
-}
-
 std::optional<core::WorkloadBytes> workloadValue(
     const QJsonObject& parameters,
     std::string_view key,
@@ -245,7 +99,7 @@ std::optional<core::WorkloadBytes> workloadValue(
                                    "original numeric token metadata is missing"));
         return std::nullopt;
     }
-    const auto converted = exactWorkloadValue(token->lexeme.toStdString());
+    const auto converted = detail::parseExactUnsignedJsonInteger(token->lexeme.toStdString());
     if (!converted.has_value()) {
         issues.push_back(makeIssue(BatchInputIssueCode::InvalidValue, path,
                                    "primitive workload parameter is not an exact unsigned integer"));

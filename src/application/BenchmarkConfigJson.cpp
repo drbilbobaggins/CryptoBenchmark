@@ -1,5 +1,6 @@
 #include <cryptobench/application/BenchmarkConfigJson.h>
 
+#include <array>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -87,6 +88,29 @@ std::string_view toStableOperationString(core::BenchmarkOperation operation)
         return "xof";
     }
     throw std::invalid_argument("unsupported benchmark operation");
+}
+
+std::optional<core::BenchmarkOperation> parseStableOperationString(std::string_view text)
+{
+    constexpr std::array operations{
+        core::BenchmarkOperation::KeyGen,
+        core::BenchmarkOperation::Sign,
+        core::BenchmarkOperation::Verify,
+        core::BenchmarkOperation::Derive,
+        core::BenchmarkOperation::Encapsulate,
+        core::BenchmarkOperation::Decapsulate,
+        core::BenchmarkOperation::Encrypt,
+        core::BenchmarkOperation::Decrypt,
+        core::BenchmarkOperation::Hash,
+        core::BenchmarkOperation::Xof
+    };
+
+    for (const auto operation : operations) {
+        if (toStableOperationString(operation) == text) {
+            return operation;
+        }
+    }
+    return std::nullopt;
 }
 
 QJsonObject benchmarkConfigToJson(const core::BenchmarkConfig& config)
