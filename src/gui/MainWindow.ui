@@ -176,6 +176,16 @@
          </property>
         </widget>
        </item>
+        <item>
+         <widget class="QPushButton" name="exportJsonButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="text">
+           <string>Export JSON...</string>
+          </property>
+         </widget>
+        </item>
        <item>
         <spacer name="actionsSpacer">
          <property name="orientation">

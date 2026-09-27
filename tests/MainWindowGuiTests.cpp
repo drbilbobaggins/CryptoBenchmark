@@ -3,12 +3,16 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QEventLoop>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTimer>
+#include <QTemporaryDir>
 
 #include <cryptobench/core/AlgorithmProfileId.h>
 #include <cryptobench/core/DomainTypes.h>
@@ -148,6 +152,8 @@ void testIdleAndConfiguration()
             "Run was not enabled for a valid zero-byte Hash configuration");
     require(!widget<QPushButton>(window, "cancelButton")->isEnabled(),
             "Cancel was enabled while idle");
+    require(!widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+            "Export JSON was enabled before a Completed result");
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0,
             "initial results table was not empty");
 
@@ -207,6 +213,8 @@ void testCompletedAndReplacement()
             "Running state did not lock configuration and enable Cancel");
     waitForCompleted(window);
     require(!cancel->isEnabled(), "Cancel remained enabled after completion");
+    require(widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+            "Completed result did not enable Export JSON");
     require(widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
             "configuration was not restored after completion");
     requireCompletedTable(window);
@@ -214,7 +222,8 @@ void testCompletedAndReplacement()
     widget<QSpinBox>(window, "workloadSizeSpinBox")->setValue(16);
     run->click();
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
-                widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible(),
+                widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible() &&
+                !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "old result was not cleared at new Run start");
     waitForCompleted(window);
     requireCompletedTable(window);
@@ -237,7 +246,8 @@ void testCancelAndReuse()
             "Cancel did not enter the Cancelling presentation state");
     waitUntil([&] { return status(window) == QStringLiteral("Benchmark cancelled"); }, 10'000);
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
-                widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
+                widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
+                !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Cancelled result did not restore an empty idle GUI");
 
     setScenario("completed");
@@ -260,13 +270,90 @@ void testFailedAndReuse()
             "Failed result did not expose the scripted worker technical message");
     require(!widget<QPushButton>(window, "cancelButton")->isEnabled() &&
                 widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
-                widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
+                widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
+                !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Failed result did not restore the idle empty GUI");
 
     setScenario("completed");
     run->click();
     waitForCompleted(window);
     requireCompletedTable(window);
+    clearScenario();
+}
+
+QByteArray readFile(const QString& path)
+{
+    QFile file(path);
+    require(file.open(QIODevice::ReadOnly), "could not read export target");
+    return file.readAll();
+}
+
+void writeFile(const QString& path, const QByteArray& bytes)
+{
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "could not create export target");
+    require(file.write(bytes) == bytes.size(), "could not write export target");
+}
+
+void testSingleJsonExport()
+{
+    setScenario("completed");
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary export directory was not created");
+    MainWindow window;
+    window.show();
+    configureHash(window);
+
+    QString target;
+    bool overwrite = false;
+    QString messageTitle;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseSaveTarget = [&](QWidget*) { return target; };
+    callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
+    callbacks.reportMessage = [&](QWidget*, const QString& title, const QString&) { messageTitle = title; };
+    window.setDialogCallbacks(std::move(callbacks));
+
+    widget<QPushButton>(window, "runButton")->click();
+    waitForCompleted(window);
+    auto* exportButton = widget<QPushButton>(window, "exportJsonButton");
+    require(exportButton->isEnabled(), "Completed result did not remain exportable");
+
+    target = directory.filePath("single-result.json");
+    exportButton->click();
+    const auto firstPayload = readFile(target);
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(firstPayload, &parseError);
+    require(parseError.error == QJsonParseError::NoError && document.isObject(),
+            "successful export was not canonical JSON");
+    require(document.object().value("mode") == QStringLiteral("single") &&
+                document.object().value("status") == QStringLiteral("completed"),
+            "successful export had incorrect document status");
+    require(messageTitle == QStringLiteral("Export complete"),
+            "successful export did not report completion");
+
+    const QByteArray original = "existing target";
+    writeFile(target, original);
+    overwrite = false;
+    exportButton->click();
+    require(readFile(target) == original, "declined overwrite changed the target");
+
+    overwrite = true;
+    exportButton->click();
+    require(readFile(target) == firstPayload, "approved overwrite did not replace the target");
+
+    const auto parentFile = directory.filePath("not-a-directory");
+    writeFile(parentFile, "parent");
+    target = parentFile + "/result.json";
+    exportButton->click();
+    require(status(window) == QStringLiteral("Completed"),
+            "export failure changed the visible Completed status");
+    require(exportButton->isEnabled(), "export failure discarded the retained result");
+    require(messageTitle == QStringLiteral("Export failed"), "export failure was not reported");
+
+    target = directory.filePath("retry-result.json");
+    exportButton->click();
+    require(readFile(target) == firstPayload, "retry export did not persist the retained result");
+    require(exportButton->isEnabled(), "successful export discarded the retained result");
     clearScenario();
 }
 
@@ -384,6 +471,8 @@ int main(int argc, char* argv[])
         testCancelAndReuse();
         std::cout << "CASE failed/reuse\n";
         testFailedAndReuse();
+        std::cout << "CASE single-json-export\n";
+        testSingleJsonExport();
         std::cout << "CASE busy-close-no\n";
         testBusyCloseNo();
         std::cout << "CASE busy-close-yes\n";

@@ -2,6 +2,8 @@
 
 #include "ui_MainWindow.h"
 
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QSignalBlocker>
 #include <QTimer>
@@ -15,6 +17,9 @@
 #include <cryptobench/core/ConfigValidator.h>
 #include <cryptobench/core/InputCapability.h>
 #include <cryptobench/core/ConfigValidation.h>
+#include <cryptobench/application/AtomicFileWriter.h>
+#include <cryptobench/application/JsonResultExportService.h>
+#include <cryptobench/application/SingleResultDocumentService.h>
 
 namespace {
 
@@ -196,6 +201,7 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::onBenchmarkFinished);
     connect(ui->runButton, &QPushButton::clicked, this, &MainWindow::startBenchmark);
     connect(ui->cancelButton, &QPushButton::clicked, this, &MainWindow::requestCancel);
+    connect(ui->exportJsonButton, &QPushButton::clicked, this, &MainWindow::exportSingleResult);
 
     connect(ui->categoryComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
         const auto category = static_cast<PrimitiveCategory>(ui->categoryComboBox->currentData().toInt());
@@ -240,11 +246,17 @@ MainWindow::MainWindow(QWidget* parent)
     ui->runsSpinBox->setValue(3);
     ui->runsSpinBox->setEnabled(true);
     populateCategories();
+    applyPresentationState();
 }
 
 MainWindow::~MainWindow()
 {
     delete ui;
+}
+
+void MainWindow::setDialogCallbacks(DialogCallbacks callbacks)
+{
+    dialogCallbacks_ = std::move(callbacks);
 }
 
 void MainWindow::populateCategories()
@@ -426,18 +438,26 @@ void MainWindow::setConfigurationEnabled(bool enabled)
 
 void MainWindow::updateRunAvailability()
 {
-    if (controller_->isBusy()) {
-        ui->runButton->setEnabled(false);
-        return;
-    }
-
     cryptobench::core::ValidationResult validation;
-    ui->runButton->setEnabled(buildBenchmarkConfig(validation).has_value());
+    ui->runButton->setEnabled(
+        presentationState_ == PresentationState::Idle &&
+        buildBenchmarkConfig(validation).has_value());
+}
+
+void MainWindow::applyPresentationState()
+{
+    const bool idle = presentationState_ == PresentationState::Idle;
+    const bool singleRunning = presentationState_ == PresentationState::SingleRunning;
+
+    setConfigurationEnabled(idle);
+    ui->cancelButton->setEnabled(singleRunning);
+    ui->exportJsonButton->setEnabled(idle && exportableSingleResult_.has_value());
+    updateRunAvailability();
 }
 
 void MainWindow::startBenchmark()
 {
-    if (controller_->isBusy()) return;
+    if (presentationState_ != PresentationState::Idle || controller_->isBusy()) return;
 
     cryptobench::core::ValidationResult validation;
     const auto config = buildBenchmarkConfig(validation);
@@ -446,40 +466,36 @@ void MainWindow::startBenchmark()
         return;
     }
 
+    exportableSingleResult_.reset();
     clearDisplayedResults(ui);
     ui->resultsPlaceholderLabel->setText(QStringLiteral("No benchmark results available."));
-    setConfigurationEnabled(false);
-    ui->runButton->setEnabled(false);
+    presentationState_ = PresentationState::SingleRunning;
+    applyPresentationState();
     ui->statusLabel->setText(QStringLiteral("Preparing"));
 
     try {
         controller_->start(*config);
     } catch (const std::exception& error) {
-        setConfigurationEnabled(true);
-        ui->cancelButton->setEnabled(false);
+        presentationState_ = PresentationState::Idle;
         ui->statusLabel->setText(QStringLiteral("Benchmark failed to start: %1")
             .arg(QString::fromUtf8(error.what())));
-        updateRunAvailability();
+        applyPresentationState();
         return;
     }
 
-    if (controller_->isBusy()) {
-        ui->cancelButton->setEnabled(true);
-    } else {
-        setConfigurationEnabled(true);
-        ui->cancelButton->setEnabled(false);
-        updateRunAvailability();
+    if (!controller_->isBusy()) {
+        presentationState_ = PresentationState::Idle;
+        applyPresentationState();
     }
 }
 
 void MainWindow::requestCancel()
 {
-    if (!controller_->isBusy() || cancelRequested_) return;
+    if (presentationState_ != PresentationState::SingleRunning || cancelRequested_) return;
 
     cancelRequested_ = true;
-    setConfigurationEnabled(false);
-    ui->runButton->setEnabled(false);
-    ui->cancelButton->setEnabled(false);
+    presentationState_ = PresentationState::SingleCancelling;
+    applyPresentationState();
     ui->statusLabel->setText(QStringLiteral("Cancelling..."));
     controller_->requestCancel();
 }
@@ -499,14 +515,17 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
     ui->cancelButton->setEnabled(false);
     switch (result.status) {
         case cryptobench::core::BenchmarkStatus::Completed:
+            exportableSingleResult_ = result;
             ui->statusLabel->setText(QStringLiteral("Completed"));
             displayCompletedResults(ui, result);
             break;
         case cryptobench::core::BenchmarkStatus::Cancelled:
+            exportableSingleResult_.reset();
             ui->statusLabel->setText(QStringLiteral("Benchmark cancelled"));
             clearDisplayedResults(ui);
             break;
         case cryptobench::core::BenchmarkStatus::Failed:
+            exportableSingleResult_.reset();
             if (result.error && !result.error->technicalMessage.empty()) {
                 ui->statusLabel->setText(QStringLiteral("Benchmark failed: %1")
                     .arg(QString::fromStdString(result.error->technicalMessage)));
@@ -518,9 +537,12 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
     }
 
     if (closeAfterTerminal) {
+        presentationState_ = PresentationState::Idle;
+        applyPresentationState();
         setConfigurationEnabled(false);
         ui->runButton->setEnabled(false);
         ui->cancelButton->setEnabled(false);
+        ui->exportJsonButton->setEnabled(false);
         QTimer::singleShot(0, this, [this]() {
             if (!controller_->isBusy()) {
                 closeAfterTerminal_ = false;
@@ -530,12 +552,71 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
         return;
     }
 
-    updateRunAvailability();
+    presentationState_ = PresentationState::Idle;
+    applyPresentationState();
+}
+
+void MainWindow::exportSingleResult()
+{
+    if (presentationState_ != PresentationState::Idle || !exportableSingleResult_.has_value()) return;
+
+    const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
+        ? dialogCallbacks_.chooseSaveTarget
+        : [this](QWidget*) {
+              return QFileDialog::getSaveFileName(
+                  this, QStringLiteral("Export JSON"), {}, QStringLiteral("JSON files (*.json);;All files (*)"));
+          };
+    const QString target = chooseSaveTarget(this);
+    if (target.isEmpty()) return;
+
+    if (QFileInfo::exists(target)) {
+        const auto confirmOverwrite = dialogCallbacks_.confirmOverwrite
+            ? dialogCallbacks_.confirmOverwrite
+            : [this](QWidget*, const QString& path) {
+                  return QMessageBox::question(
+                             this, QStringLiteral("Replace existing file"),
+                             QStringLiteral("The target already exists. Replace it?\n%1").arg(path),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                      == QMessageBox::Yes;
+              };
+        if (!confirmOverwrite(this, target)) return;
+    }
+
+    try {
+        const auto document = cryptobench::application::SingleResultDocumentService{}.create(
+            *exportableSingleResult_);
+        const auto json = cryptobench::application::JsonResultExportService{}.serialize(document);
+        const auto writeResult = cryptobench::application::AtomicFileWriter{}.writeAtomically(target, json);
+        if (!writeResult.success) {
+            if (dialogCallbacks_.reportMessage) {
+                dialogCallbacks_.reportMessage(this, QStringLiteral("Export failed"), writeResult.technicalMessage);
+            } else {
+                QMessageBox::warning(this, QStringLiteral("Export failed"), writeResult.technicalMessage);
+            }
+            return;
+        }
+    } catch (const std::exception& error) {
+        const QString message = QString::fromUtf8(error.what());
+        if (dialogCallbacks_.reportMessage) {
+            dialogCallbacks_.reportMessage(this, QStringLiteral("Export failed"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("Export failed"), message);
+        }
+        return;
+    }
+
+    if (dialogCallbacks_.reportMessage) {
+        dialogCallbacks_.reportMessage(this, QStringLiteral("Export complete"),
+                                       QStringLiteral("JSON was exported successfully."));
+    } else {
+        QMessageBox::information(this, QStringLiteral("Export complete"),
+                                 QStringLiteral("JSON was exported successfully."));
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (!controller_->isBusy()) {
+    if (presentationState_ == PresentationState::Idle && !controller_->isBusy()) {
         event->accept();
         return;
     }
