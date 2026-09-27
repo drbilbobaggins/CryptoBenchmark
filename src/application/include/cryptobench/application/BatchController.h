@@ -33,6 +33,8 @@ public:
     ~BatchController() override = default;
 
     void start(const BatchDefinition& definition, const QString& outputTarget);
+    void requestCancel();
+    WriteResult saveAs(const QString& newTarget);
     bool isBusy() const noexcept;
     const BatchExecutionState& state() const noexcept;
     BatchProgress progress() const;
@@ -47,14 +49,24 @@ private:
         InitializingOutput,
         ReadyToAdvance,
         RunningEntry,
+        CancellingEntry,
+        DrainingFatalEntry,
         PersistingSnapshot,
         Terminal
     };
 
+    enum class PersistenceIntent {
+        Initial,
+        EntryCheckpoint,
+        NaturalFinal,
+        CancelledFinal
+    };
+
     void advance();
+    void finalizePendingFatal();
     void onExecutorProgress(const core::ProgressInfo& progress);
     void onExecutorFinished(const core::BenchmarkResult& result);
-    void persistSnapshot(bool initialSnapshot);
+    void persistSnapshot(PersistenceIntent intent);
     void failBatch(BatchErrorCode code, BatchErrorStage stage, std::string message);
     void finishTerminal();
     void emitProgress();
@@ -74,6 +86,8 @@ private:
     std::optional<std::size_t> nextPosition_;
     std::optional<std::size_t> activePosition_;
     std::optional<core::ProgressInfo> currentProgress_;
+    PersistenceIntent persistenceIntent_ = PersistenceIntent::Initial;
+    std::optional<BatchError> pendingFatalError_;
     bool requiredSnapshotCommitted_ = false;
     bool terminalEmitted_ = false;
 };

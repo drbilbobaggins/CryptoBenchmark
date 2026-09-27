@@ -40,6 +40,52 @@ bool BatchController::isBusy() const noexcept
     return state_ != State::Idle && state_ != State::Terminal;
 }
 
+void BatchController::requestCancel()
+{
+    if (!isBusy() || batchState_.cancelRequested) return;
+
+    batchState_.cancelRequested = true;
+    if (state_ == State::RunningEntry) {
+        state_ = State::CancellingEntry;
+        emitProgress();
+        try {
+            executor_->requestCancel();
+        } catch (const std::exception& error) {
+            failBatch(BatchErrorCode::InternalError, BatchErrorStage::Orchestration,
+                      error.what());
+        }
+        return;
+    }
+
+    if (state_ == State::ReadyToAdvance) {
+        batchState_.status = BatchStatus::Cancelled;
+        state_ = State::PersistingSnapshot;
+        persistenceIntent_ = PersistenceIntent::CancelledFinal;
+        emitProgress();
+        persistSnapshot(PersistenceIntent::CancelledFinal);
+        return;
+    }
+
+    emitProgress();
+}
+
+WriteResult BatchController::saveAs(const QString& newTarget)
+{
+    if (state_ != State::Terminal || batchState_.status != BatchStatus::Failed) {
+        throw std::logic_error("Save As requires a terminal failed batch");
+    }
+    if (newTarget.isEmpty()) throw std::invalid_argument("Save As target is empty");
+
+    try {
+        const auto document = documentService_.create(batchState_);
+        const auto payload = serializer_(document);
+        return persister_ ? persister_(newTarget, payload)
+                          : fileWriter_.writeAtomically(newTarget, payload);
+    } catch (const std::exception& error) {
+        return {false, QString::fromUtf8(error.what())};
+    }
+}
+
 const BatchExecutionState& BatchController::state() const noexcept
 {
     return batchState_;
@@ -67,13 +113,13 @@ void BatchController::start(const BatchDefinition& definition, const QString& ou
     terminalEmitted_ = false;
     state_ = State::InitializingOutput;
     emitProgress();
-    persistSnapshot(true);
+    persistSnapshot(PersistenceIntent::Initial);
 }
 
 void BatchController::advance()
 {
     if (state_ != State::ReadyToAdvance || batchState_.status != BatchStatus::InProgress ||
-        activePosition_.has_value() || !requiredSnapshotCommitted_) {
+        batchState_.cancelRequested || activePosition_.has_value() || !requiredSnapshotCommitted_) {
         return;
     }
 
@@ -118,7 +164,27 @@ void BatchController::onExecutorProgress(const core::ProgressInfo& progress)
 
 void BatchController::onExecutorFinished(const core::BenchmarkResult& result)
 {
-    if (state_ != State::RunningEntry || !activePosition_.has_value()) return;
+    if (state_ == State::DrainingFatalEntry) {
+        if (activePosition_.has_value()) {
+            auto& entry = batchState_.entries[*activePosition_];
+            entry.result = result;
+            switch (result.status) {
+            case core::BenchmarkStatus::Completed:
+                entry.status = BatchEntryStatus::Completed;
+                break;
+            case core::BenchmarkStatus::Failed:
+                entry.status = BatchEntryStatus::Failed;
+                break;
+            case core::BenchmarkStatus::Cancelled:
+                entry.status = BatchEntryStatus::Cancelled;
+                break;
+            }
+        }
+        finalizePendingFatal();
+        return;
+    }
+    if ((state_ != State::RunningEntry && state_ != State::CancellingEntry) ||
+        !activePosition_.has_value()) return;
 
     const auto position = *activePosition_;
     auto& entry = batchState_.entries[position];
@@ -132,26 +198,43 @@ void BatchController::onExecutorFinished(const core::BenchmarkResult& result)
         break;
     case core::BenchmarkStatus::Cancelled:
         entry.status = BatchEntryStatus::Cancelled;
-        failBatch(BatchErrorCode::InternalError, BatchErrorStage::Orchestration,
-                  "unexpected cancelled benchmark result in M12-B");
         break;
-    }
-
-    if (result.status == core::BenchmarkStatus::Cancelled) return;
-
-    if (const auto finalStatus = naturalFinalStatus(); finalStatus.has_value()) {
-        batchState_.status = *finalStatus;
     }
 
     activePosition_.reset();
     currentProgress_.reset();
+
+    if (result.status == core::BenchmarkStatus::Cancelled && !batchState_.cancelRequested) {
+        failBatch(BatchErrorCode::InternalError, BatchErrorStage::Orchestration,
+                  "unexpected cancelled benchmark result in M12-B");
+        return;
+    }
+
+    if (batchState_.cancelRequested) {
+        batchState_.status = BatchStatus::Cancelled;
+        state_ = State::PersistingSnapshot;
+        persistenceIntent_ = PersistenceIntent::CancelledFinal;
+        emitProgress();
+        persistSnapshot(PersistenceIntent::CancelledFinal);
+        return;
+    }
+
+    const auto finalStatus = naturalFinalStatus();
+    if (finalStatus.has_value()) {
+        batchState_.status = *finalStatus;
+    }
+
     state_ = State::PersistingSnapshot;
+    persistenceIntent_ = finalStatus.has_value()
+        ? PersistenceIntent::NaturalFinal
+        : PersistenceIntent::EntryCheckpoint;
     emitProgress();
-    persistSnapshot(false);
+    persistSnapshot(persistenceIntent_);
 }
 
-void BatchController::persistSnapshot(bool initialSnapshot)
+void BatchController::persistSnapshot(PersistenceIntent intent)
 {
+    persistenceIntent_ = intent;
     QByteArray payload;
     try {
         const auto document = documentService_.create(batchState_);
@@ -167,32 +250,44 @@ void BatchController::persistSnapshot(bool initialSnapshot)
             : fileWriter_.writeAtomically(batchState_.outputTarget, payload);
         if (!result.success) {
             failBatch(
-                initialSnapshot ? BatchErrorCode::OutputInitializationFailed
-                                : BatchErrorCode::OutputWriteFailed,
-                initialSnapshot ? BatchErrorStage::OutputInitialization
-                                : BatchErrorStage::SnapshotPersistence,
+                intent == PersistenceIntent::Initial
+                    ? BatchErrorCode::OutputInitializationFailed
+                    : BatchErrorCode::OutputWriteFailed,
+                intent == PersistenceIntent::Initial
+                    ? BatchErrorStage::OutputInitialization
+                    : BatchErrorStage::SnapshotPersistence,
                 result.technicalMessage.toStdString());
             return;
         }
     } catch (const std::exception& error) {
         failBatch(
-            initialSnapshot ? BatchErrorCode::OutputInitializationFailed
-                            : BatchErrorCode::OutputWriteFailed,
-            initialSnapshot ? BatchErrorStage::OutputInitialization
-                            : BatchErrorStage::SnapshotPersistence,
+            intent == PersistenceIntent::Initial
+                ? BatchErrorCode::OutputInitializationFailed
+                : BatchErrorCode::OutputWriteFailed,
+            intent == PersistenceIntent::Initial
+                ? BatchErrorStage::OutputInitialization
+                : BatchErrorStage::SnapshotPersistence,
             error.what());
         return;
     }
 
     requiredSnapshotCommitted_ = true;
-    if (initialSnapshot) {
+    if (batchState_.cancelRequested && intent != PersistenceIntent::CancelledFinal) {
+        batchState_.status = BatchStatus::Cancelled;
+        state_ = State::PersistingSnapshot;
+        persistSnapshot(PersistenceIntent::CancelledFinal);
+        return;
+    }
+
+    if (intent == PersistenceIntent::Initial) {
         state_ = State::ReadyToAdvance;
         emitProgress();
         QMetaObject::invokeMethod(this, &BatchController::advance, Qt::QueuedConnection);
         return;
     }
 
-    if (batchState_.status != BatchStatus::InProgress) {
+    if (intent == PersistenceIntent::CancelledFinal ||
+        batchState_.status != BatchStatus::InProgress) {
         state_ = State::Terminal;
         emitProgress();
         finishTerminal();
@@ -207,15 +302,44 @@ void BatchController::persistSnapshot(bool initialSnapshot)
 void BatchController::failBatch(BatchErrorCode code, BatchErrorStage stage, std::string message)
 {
     if (state_ == State::Terminal) return;
+
+    const BatchError error{code, stage, batchState_.currentEntryIndex, std::move(message)};
+    if (activePosition_.has_value() && executor_->isBusy()) {
+        pendingFatalError_ = error;
+        batchState_.cancelRequested = true;
+        state_ = State::DrainingFatalEntry;
+        emitProgress();
+        try {
+            executor_->requestCancel();
+        } catch (const std::exception& drainError) {
+            pendingFatalError_ = BatchError{
+                BatchErrorCode::InternalError,
+                BatchErrorStage::Orchestration,
+                batchState_.currentEntryIndex,
+                drainError.what()};
+            if (!executor_->isBusy()) finalizePendingFatal();
+        }
+        return;
+    }
+
     activePosition_.reset();
     requiredSnapshotCommitted_ = false;
     batchState_.status = BatchStatus::Failed;
-    batchState_.batchError = BatchError{
-        code,
-        stage,
-        batchState_.currentEntryIndex,
-        std::move(message)
-    };
+    batchState_.batchError = error;
+    state_ = State::Terminal;
+    emitProgress();
+    finishTerminal();
+}
+
+void BatchController::finalizePendingFatal()
+{
+    if (!pendingFatalError_ || executor_->isBusy()) return;
+    activePosition_.reset();
+    currentProgress_.reset();
+    requiredSnapshotCommitted_ = false;
+    batchState_.status = BatchStatus::Failed;
+    batchState_.batchError = *pendingFatalError_;
+    pendingFatalError_.reset();
     state_ = State::Terminal;
     emitProgress();
     finishTerminal();
