@@ -35,7 +35,7 @@ core::ErrorInfo parentError(
 } // namespace
 
 BenchmarkController::BenchmarkController(QObject* parent)
-    : QObject(parent)
+    : BenchmarkSessionExecutor(parent)
 {
     technicalTimer_.setSingleShot(true);
     connect(&technicalTimer_, &QTimer::timeout, this, &BenchmarkController::onTimeout);

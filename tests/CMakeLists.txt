@@ -63,6 +63,62 @@ target_link_libraries(CryptoBenchmarkBatchTypesTests
 
 add_test(NAME CryptoBenchmarkBatchTypesTests COMMAND CryptoBenchmarkBatchTypesTests)
 
+add_executable(CryptoBenchmarkBenchmarkSessionExecutorTests
+	BenchmarkSessionExecutorTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBenchmarkSessionExecutorTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkBenchmarkSessionExecutorTests
+	COMMAND CryptoBenchmarkBenchmarkSessionExecutorTests
+)
+
+add_executable(CryptoBenchmarkBatchExecutionStateTests
+	BatchExecutionStateTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchExecutionStateTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkBatchExecutionStateTests
+	COMMAND CryptoBenchmarkBatchExecutionStateTests
+)
+
+add_executable(CryptoBenchmarkBatchResultDocumentServiceTests
+	BatchResultDocumentServiceTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchResultDocumentServiceTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkBatchResultDocumentServiceTests
+	COMMAND CryptoBenchmarkBatchResultDocumentServiceTests
+)
+
+add_executable(CryptoBenchmarkBatchControllerTests
+	BatchControllerTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchControllerTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkBatchControllerTests
+	COMMAND CryptoBenchmarkBatchControllerTests
+)
+
 add_executable(CryptoBenchmarkBatchInputFileTests
 	BatchInputFileTests.cpp
 )
@@ -323,6 +379,28 @@ add_dependencies(CryptoBenchmarkBackendModernSignatureIntegrationTests CryptoBen
 
 add_test(NAME CryptoBenchmarkBackendModernSignatureIntegrationTests
 	COMMAND CryptoBenchmarkBackendModernSignatureIntegrationTests
+)
+
+add_executable(CryptoBenchmarkBatchControllerIntegrationTests
+	BatchControllerIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchControllerIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBatchControllerIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBatchControllerIntegrationTests
+	COMMAND CryptoBenchmarkBatchControllerIntegrationTests
+)
+
+set_tests_properties(CryptoBenchmarkBatchControllerIntegrationTests
+	PROPERTIES
+		TIMEOUT 120
 )
 
 add_executable(CryptoBenchmarkBackendSlhDsaIntegrationTests
