@@ -36,6 +36,8 @@ configure_file(
 
 add_library(cryptobench_application STATIC
     application.cpp
+    BatchController.cpp
+    include/cryptobench/application/BatchController.h
     BatchResultDocumentService.cpp
     include/cryptobench/application/BatchResultDocumentService.h
     BenchmarkController.cpp

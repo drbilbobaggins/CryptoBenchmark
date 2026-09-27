@@ -105,6 +105,20 @@ add_test(NAME CryptoBenchmarkBatchResultDocumentServiceTests
 	COMMAND CryptoBenchmarkBatchResultDocumentServiceTests
 )
 
+add_executable(CryptoBenchmarkBatchControllerTests
+	BatchControllerTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchControllerTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkBatchControllerTests
+	COMMAND CryptoBenchmarkBatchControllerTests
+)
+
 add_executable(CryptoBenchmarkBatchInputFileTests
 	BatchInputFileTests.cpp
 )
