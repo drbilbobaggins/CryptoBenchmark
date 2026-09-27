@@ -381,6 +381,28 @@ add_test(NAME CryptoBenchmarkBackendModernSignatureIntegrationTests
 	COMMAND CryptoBenchmarkBackendModernSignatureIntegrationTests
 )
 
+add_executable(CryptoBenchmarkBatchControllerIntegrationTests
+	BatchControllerIntegrationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchControllerIntegrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkBatchControllerIntegrationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkBatchControllerIntegrationTests
+	COMMAND CryptoBenchmarkBatchControllerIntegrationTests
+)
+
+set_tests_properties(CryptoBenchmarkBatchControllerIntegrationTests
+	PROPERTIES
+		TIMEOUT 120
+)
+
 add_executable(CryptoBenchmarkBackendSlhDsaIntegrationTests
 	BackendSlhDsaIntegrationTests.cpp
 )
