@@ -63,6 +63,48 @@ target_link_libraries(CryptoBenchmarkBatchTypesTests
 
 add_test(NAME CryptoBenchmarkBatchTypesTests COMMAND CryptoBenchmarkBatchTypesTests)
 
+add_executable(CryptoBenchmarkBenchmarkSessionExecutorTests
+	BenchmarkSessionExecutorTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBenchmarkSessionExecutorTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkBenchmarkSessionExecutorTests
+	COMMAND CryptoBenchmarkBenchmarkSessionExecutorTests
+)
+
+add_executable(CryptoBenchmarkBatchExecutionStateTests
+	BatchExecutionStateTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchExecutionStateTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkBatchExecutionStateTests
+	COMMAND CryptoBenchmarkBatchExecutionStateTests
+)
+
+add_executable(CryptoBenchmarkBatchResultDocumentServiceTests
+	BatchResultDocumentServiceTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchResultDocumentServiceTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkBatchResultDocumentServiceTests
+	COMMAND CryptoBenchmarkBatchResultDocumentServiceTests
+)
+
 add_executable(CryptoBenchmarkBatchInputFileTests
 	BatchInputFileTests.cpp
 )

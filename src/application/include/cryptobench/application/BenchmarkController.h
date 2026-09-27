@@ -7,6 +7,7 @@
 #include <QObject>
 #include <QTimer>
 
+#include <cryptobench/application/BenchmarkSessionExecutor.h>
 #include <cryptobench/core/BenchmarkConfig.h>
 #include <cryptobench/core/BenchmarkResult.h>
 #include <cryptobench/core/ProgressInfo.h>
@@ -17,20 +18,16 @@
 
 namespace cryptobench::application {
 
-class BenchmarkController final : public QObject {
+class BenchmarkController final : public BenchmarkSessionExecutor {
     Q_OBJECT
 
 public:
     explicit BenchmarkController(QObject* parent = nullptr);
     ~BenchmarkController() override;
 
-    void start(const core::BenchmarkConfig& config);
-    void requestCancel();
-    bool isBusy() const noexcept;
-
-signals:
-    void progressChanged(const cryptobench::core::ProgressInfo& progress);
-    void benchmarkFinished(const cryptobench::core::BenchmarkResult& result);
+    void start(const core::BenchmarkConfig& config) override;
+    void requestCancel() override;
+    bool isBusy() const noexcept override;
 
 private:
     enum class State {
