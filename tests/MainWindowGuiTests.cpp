@@ -472,6 +472,141 @@ void answerMessageBox(QMessageBox::StandardButton answer)
     throw std::runtime_error("close confirmation dialog was not found");
 }
 
+QByteArray multiEntryBatchFixture()
+{
+    return R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[{"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}},{"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":16}}]})";
+}
+
+void testBatchRunAndCancel()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary batch execution directory was not created");
+    const auto inputPath = directory.filePath("multi-entry-batch.json");
+    const auto outputPath = directory.filePath("batch-result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("completed");
+    MainWindow window;
+    window.show();
+    QString selectedInput = inputPath;
+    QString selectedOutput = outputPath;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    window.setDialogCallbacks(std::move(callbacks));
+
+    auto* inputBrowse = widget<QPushButton>(window, "batchInputBrowseButton");
+    auto* outputBrowse = widget<QPushButton>(window, "batchOutputBrowseButton");
+    auto* run = widget<QPushButton>(window, "batchRunButton");
+    auto* cancel = widget<QPushButton>(window, "batchCancelButton");
+    inputBrowse->click();
+    require(!run->isEnabled(), "valid batch without an output target enabled Run Batch");
+    outputBrowse->click();
+    require(run->isEnabled(), "valid batch and accepted output target did not enable Run Batch");
+
+    const auto invalidPath = directory.filePath("invalid-batch.json");
+    writeFile(invalidPath, invalidBatchFixture());
+    selectedInput = invalidPath;
+    inputBrowse->click();
+    require(!run->isEnabled(), "replacing valid input with invalid input left Run Batch enabled");
+    selectedInput = inputPath;
+    inputBrowse->click();
+    require(run->isEnabled(), "selecting a valid input again did not restore Run Batch eligibility");
+
+    run->click();
+    require(!run->isEnabled() && cancel->isEnabled() &&
+        !inputBrowse->isEnabled() && !outputBrowse->isEnabled() &&
+        !widget<QPushButton>(window, "runButton")->isEnabled() &&
+        !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+        "BatchRunning did not enforce mutual exclusion and control locking");
+    waitUntil([&] {
+        const auto currentStatus = widget<QLabel>(window, "batchStatusLabel")->text();
+        return currentStatus == QStringLiteral("Completed") ||
+               currentStatus.startsWith(QStringLiteral("Failed"));
+    }, 30'000);
+    require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed"),
+            "Batch completion did not reach the Completed terminal status");
+    require(!cancel->isEnabled() && run->isEnabled() && inputBrowse->isEnabled() &&
+        outputBrowse->isEnabled(),
+        "completed Batch did not return to Idle presentation");
+    require(widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("2 / 2"),
+            "terminal Batch did not retain the controller-supplied current entry");
+    require(widget<QLabel>(window, "batchCompletedCountLabel")->text() == QStringLiteral("2") &&
+        widget<QLabel>(window, "batchFailedCountLabel")->text() == QStringLiteral("0") &&
+        widget<QLabel>(window, "batchCancelledCountLabel")->text() == QStringLiteral("0") &&
+        widget<QLabel>(window, "batchNotStartedCountLabel")->text() == QStringLiteral("0"),
+        "Batch terminal counters did not reflect controller progress");
+    const auto payload = readFile(outputPath);
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(payload, &parseError);
+    require(parseError.error == QJsonParseError::NoError && document.isObject() &&
+        document.object().value("mode") == QStringLiteral("batch"),
+        "BatchController did not produce a batch result document");
+    clearScenario();
+
+    setScenario("wait-before-measurement");
+    const auto cancelInputPath = directory.filePath("cancel-batch.json");
+    const auto cancelOutputPath = directory.filePath("cancel-result.json");
+    writeFile(cancelInputPath, multiEntryBatchFixture());
+    MainWindow cancelWindow;
+    cancelWindow.show();
+    selectedInput = cancelInputPath;
+    selectedOutput = cancelOutputPath;
+    MainWindow::DialogCallbacks cancelCallbacks;
+    cancelCallbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    cancelCallbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    cancelWindow.setDialogCallbacks(std::move(cancelCallbacks));
+    widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->click();
+    widget<QPushButton>(cancelWindow, "batchOutputBrowseButton")->click();
+    auto* batchCancel = widget<QPushButton>(cancelWindow, "batchCancelButton");
+    widget<QPushButton>(cancelWindow, "batchRunButton")->click();
+    require(batchCancel->isEnabled(), "Batch Run did not enter BatchRunning presentation");
+    waitUntil([&] {
+        return widget<QLabel>(cancelWindow, "batchCurrentEntryLabel")->text() == QStringLiteral("1 / 2") &&
+               widget<QLabel>(cancelWindow, "batchCurrentBenchmarkLabel")->text() != QStringLiteral("-") &&
+               widget<QLabel>(cancelWindow, "batchCurrentProgressLabel")->text() != QStringLiteral("-");
+    }, 10'000);
+    require(!cancelWindow.close() && cancelWindow.isVisible(),
+        "active Batch close attempt was not rejected by the M13-C boundary");
+    batchCancel->click();
+    require(widget<QLabel>(cancelWindow, "batchStatusLabel")->text() == QStringLiteral("Cancelling...") &&
+                !batchCancel->isEnabled(),
+        "Batch Cancel did not enter BatchCancelling presentation");
+    waitUntil([&] {
+        const auto currentStatus = widget<QLabel>(cancelWindow, "batchStatusLabel")->text();
+        return currentStatus == QStringLiteral("Cancelled") ||
+               currentStatus.startsWith(QStringLiteral("Failed"));
+    }, 15'000);
+    require(widget<QLabel>(cancelWindow, "batchStatusLabel")->text() == QStringLiteral("Cancelled"),
+            "Batch cancellation did not reach the Cancelled terminal status");
+    require(widget<QPushButton>(cancelWindow, "batchRunButton")->isEnabled() &&
+        widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->isEnabled(),
+        "cancelled Batch did not return to Idle presentation");
+    clearScenario();
+
+    setScenario("failed-immediately");
+    const auto failureOutputPath = directory.filePath("failure-result.json");
+    MainWindow failureWindow;
+    failureWindow.show();
+    selectedInput = inputPath;
+    selectedOutput = failureOutputPath;
+    MainWindow::DialogCallbacks failureCallbacks;
+    failureCallbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    failureCallbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    failureWindow.setDialogCallbacks(std::move(failureCallbacks));
+    widget<QPushButton>(failureWindow, "batchInputBrowseButton")->click();
+    widget<QPushButton>(failureWindow, "batchOutputBrowseButton")->click();
+    widget<QPushButton>(failureWindow, "batchRunButton")->click();
+    waitUntil([&] {
+        return widget<QLabel>(failureWindow, "batchStatusLabel")->text() ==
+               QStringLiteral("Completed with failures");
+    }, 30'000);
+    require(widget<QLabel>(failureWindow, "batchFailedCountLabel")->text() == QStringLiteral("2") &&
+                widget<QLabel>(failureWindow, "batchCompletedCountLabel")->text() == QStringLiteral("0"),
+            "CompletedWithFailures did not display controller-supplied failed/completed counters");
+    clearScenario();
+}
+
 void testBusyCloseNo()
 {
     setScenario("wait-before-measurement");
@@ -576,6 +711,8 @@ int main(int argc, char* argv[])
         testSingleJsonExport();
         std::cout << "CASE batch-gui\n";
         testBatchGui();
+        std::cout << "CASE batch-run-cancel\n";
+        testBatchRunAndCancel();
         std::cout << "CASE busy-close-no\n";
         testBusyCloseNo();
         std::cout << "CASE busy-close-yes\n";

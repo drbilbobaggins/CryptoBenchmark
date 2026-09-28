@@ -194,16 +194,23 @@ constexpr std::array<BenchmarkOperation, 10> kOperations = {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
-    , controller_(std::make_unique<cryptobench::application::BenchmarkController>())
+    , singleController_(std::make_unique<cryptobench::application::BenchmarkController>())
+    , batchController_(std::make_unique<cryptobench::application::BatchController>())
 {
     ui->setupUi(this);
 
-    connect(controller_.get(), &cryptobench::application::BenchmarkController::progressChanged,
+    connect(singleController_.get(), &cryptobench::application::BenchmarkController::progressChanged,
             this, &MainWindow::onProgressChanged);
-    connect(controller_.get(), &cryptobench::application::BenchmarkController::benchmarkFinished,
+    connect(singleController_.get(), &cryptobench::application::BenchmarkController::benchmarkFinished,
             this, &MainWindow::onBenchmarkFinished);
+    connect(batchController_.get(), &cryptobench::application::BatchController::progressChanged,
+            this, &MainWindow::onBatchProgressChanged);
+    connect(batchController_.get(), &cryptobench::application::BatchController::batchFinished,
+            this, &MainWindow::onBatchFinished);
     connect(ui->runButton, &QPushButton::clicked, this, &MainWindow::startBenchmark);
     connect(ui->cancelButton, &QPushButton::clicked, this, &MainWindow::requestCancel);
+    connect(ui->batchRunButton, &QPushButton::clicked, this, &MainWindow::startBatch);
+    connect(ui->batchCancelButton, &QPushButton::clicked, this, &MainWindow::requestBatchCancel);
     connect(ui->exportJsonButton, &QPushButton::clicked, this, &MainWindow::exportSingleResult);
     connect(ui->batchInputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchInput);
     connect(ui->batchOutputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchOutput);
@@ -415,15 +422,15 @@ void MainWindow::updateInputControls()
     cryptobench::core::ValidationResult validation;
     const auto config = buildBenchmarkConfig(validation);
     if (config.has_value()) {
-        if (!controller_->isBusy()) {
+        if (!singleController_->isBusy() && presentationState_ == PresentationState::Idle) {
             ui->statusLabel->setText(QStringLiteral("Configuration valid; ready to run."));
         }
     } else if (!validation.errors.empty()) {
-        if (!controller_->isBusy()) {
+        if (!singleController_->isBusy() && presentationState_ == PresentationState::Idle) {
             ui->statusLabel->setText(QStringLiteral("Configuration invalid: %1")
                 .arg(QString::fromStdString(validation.errors.front().technicalMessage)));
         }
-    } else if (!controller_->isBusy()) {
+    } else if (!singleController_->isBusy() && presentationState_ == PresentationState::Idle) {
         ui->statusLabel->setText(QStringLiteral("Select a valid benchmark configuration."));
     }
     updateRunAvailability();
@@ -465,12 +472,14 @@ void MainWindow::applyPresentationState()
 void MainWindow::updateBatchPresentation()
 {
     const bool idle = presentationState_ == PresentationState::Idle;
+    const bool batchRunning = presentationState_ == PresentationState::BatchRunning;
     ui->batchInputPathLineEdit->setEnabled(idle);
     ui->batchInputBrowseButton->setEnabled(idle);
-    ui->batchOutputPathLineEdit->setEnabled(false);
+    ui->batchOutputPathLineEdit->setEnabled(idle);
     ui->batchOutputBrowseButton->setEnabled(idle);
-    ui->batchRunButton->setEnabled(false);
-    ui->batchCancelButton->setEnabled(false);
+    ui->batchRunButton->setEnabled(
+        idle && batchDefinition_.has_value() && !batchOutputTarget_.isEmpty());
+    ui->batchCancelButton->setEnabled(batchRunning);
 }
 
 void MainWindow::displayBatchIssues(
@@ -503,6 +512,7 @@ void MainWindow::browseBatchInput()
         ui->batchValidationSummaryLabel->setText(
             QStringLiteral("Valid batch - %1 entries").arg(batchDefinition_->entries().size()));
         displayBatchIssues({});
+        updateBatchPresentation();
         return;
     }
 
@@ -510,6 +520,7 @@ void MainWindow::browseBatchInput()
     ui->batchInputPathLineEdit->setText(target);
     ui->batchValidationSummaryLabel->setText(QStringLiteral("Invalid batch"));
     displayBatchIssues(result.issues);
+    updateBatchPresentation();
 }
 
 void MainWindow::browseBatchOutput()
@@ -538,11 +549,13 @@ void MainWindow::browseBatchOutput()
 
     batchOutputTarget_ = target;
     ui->batchOutputPathLineEdit->setText(batchOutputTarget_);
+    updateBatchPresentation();
 }
 
 void MainWindow::startBenchmark()
 {
-    if (presentationState_ != PresentationState::Idle || controller_->isBusy()) return;
+    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
+        batchController_->isBusy()) return;
 
     cryptobench::core::ValidationResult validation;
     const auto config = buildBenchmarkConfig(validation);
@@ -559,7 +572,7 @@ void MainWindow::startBenchmark()
     ui->statusLabel->setText(QStringLiteral("Preparing"));
 
     try {
-        controller_->start(*config);
+        singleController_->start(*config);
     } catch (const std::exception& error) {
         presentationState_ = PresentationState::Idle;
         ui->statusLabel->setText(QStringLiteral("Benchmark failed to start: %1")
@@ -568,8 +581,36 @@ void MainWindow::startBenchmark()
         return;
     }
 
-    if (!controller_->isBusy()) {
+    if (!singleController_->isBusy()) {
         presentationState_ = PresentationState::Idle;
+        applyPresentationState();
+    }
+}
+
+void MainWindow::startBatch()
+{
+    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
+        batchController_->isBusy() || !batchDefinition_.has_value() || batchOutputTarget_.isEmpty()) {
+        return;
+    }
+
+    presentationState_ = PresentationState::BatchRunning;
+    applyPresentationState();
+    ui->batchStatusLabel->setText(QStringLiteral("Preparing"));
+    ui->batchCurrentEntryLabel->setText(QStringLiteral("-"));
+    ui->batchCurrentBenchmarkLabel->setText(QStringLiteral("-"));
+    ui->batchCurrentProgressLabel->setText(QStringLiteral("-"));
+    ui->batchCompletedCountLabel->setText(QStringLiteral("0"));
+    ui->batchFailedCountLabel->setText(QStringLiteral("0"));
+    ui->batchCancelledCountLabel->setText(QStringLiteral("0"));
+    ui->batchNotStartedCountLabel->setText(QStringLiteral("0"));
+
+    try {
+        batchController_->start(*batchDefinition_, batchOutputTarget_);
+    } catch (const std::exception& error) {
+        presentationState_ = PresentationState::Idle;
+        ui->batchStatusLabel->setText(QStringLiteral("Batch failed to start: %1")
+            .arg(QString::fromUtf8(error.what())));
         applyPresentationState();
     }
 }
@@ -582,7 +623,17 @@ void MainWindow::requestCancel()
     presentationState_ = PresentationState::SingleCancelling;
     applyPresentationState();
     ui->statusLabel->setText(QStringLiteral("Cancelling..."));
-    controller_->requestCancel();
+    singleController_->requestCancel();
+}
+
+void MainWindow::requestBatchCancel()
+{
+    if (presentationState_ != PresentationState::BatchRunning || !batchController_->isBusy()) return;
+
+    presentationState_ = PresentationState::BatchCancelling;
+    applyPresentationState();
+    ui->batchStatusLabel->setText(QStringLiteral("Cancelling..."));
+    batchController_->requestCancel();
 }
 
 void MainWindow::onProgressChanged(const cryptobench::core::ProgressInfo& progress)
@@ -629,7 +680,7 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
         ui->cancelButton->setEnabled(false);
         ui->exportJsonButton->setEnabled(false);
         QTimer::singleShot(0, this, [this]() {
-            if (!controller_->isBusy()) {
+            if (!singleController_->isBusy()) {
                 closeAfterTerminal_ = false;
                 close();
             }
@@ -639,6 +690,72 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
 
     presentationState_ = PresentationState::Idle;
     applyPresentationState();
+}
+
+void MainWindow::onBatchProgressChanged(const cryptobench::application::BatchProgress& progress)
+{
+    if (progress.persistenceInProgress) {
+        ui->batchStatusLabel->setText(QStringLiteral("Saving results..."));
+    } else if (presentationState_ == PresentationState::BatchCancelling) {
+        ui->batchStatusLabel->setText(QStringLiteral("Cancelling..."));
+    } else {
+        ui->batchStatusLabel->setText(QStringLiteral("Running"));
+    }
+
+    ui->batchCurrentEntryLabel->setText(progress.currentEntryIndex
+        ? QStringLiteral("%1 / %2").arg(*progress.currentEntryIndex).arg(progress.totalEntries)
+        : QStringLiteral("-"));
+    ui->batchCompletedCountLabel->setText(QString::number(progress.completedCount));
+    ui->batchFailedCountLabel->setText(QString::number(progress.failedCount));
+    ui->batchCancelledCountLabel->setText(QString::number(progress.cancelledCount));
+    ui->batchNotStartedCountLabel->setText(QString::number(progress.notStartedCount));
+
+    if (progress.currentProfile && progress.currentOperation) {
+        const auto* profile = cryptobench::core::AlgorithmRegistry::find(*progress.currentProfile);
+        ui->batchCurrentBenchmarkLabel->setText(profile == nullptr
+            ? QStringLiteral("-")
+            : QString::fromUtf8(profile->displayName.data(),
+                                static_cast<int>(profile->displayName.size())) +
+                  QStringLiteral(" - ") + operationLabel(*progress.currentOperation));
+    } else {
+        ui->batchCurrentBenchmarkLabel->setText(QStringLiteral("-"));
+    }
+    ui->batchCurrentProgressLabel->setText(progress.currentProgress
+        ? phaseLabel(*progress.currentProgress)
+        : QStringLiteral("-"));
+}
+
+void MainWindow::onBatchFinished(const cryptobench::application::BatchExecutionState& state)
+{
+    const auto finalProgress = batchController_->progress();
+    onBatchProgressChanged(finalProgress);
+    QString terminalStatus;
+
+    switch (state.status) {
+    case cryptobench::application::BatchStatus::Completed:
+        terminalStatus = QStringLiteral("Completed");
+        break;
+    case cryptobench::application::BatchStatus::CompletedWithFailures:
+        terminalStatus = QStringLiteral("Completed with failures");
+        break;
+    case cryptobench::application::BatchStatus::Cancelled:
+        terminalStatus = QStringLiteral("Cancelled");
+        break;
+    case cryptobench::application::BatchStatus::Failed:
+        if (state.batchError && !state.batchError->technicalMessage.empty()) {
+            terminalStatus = QStringLiteral("Failed: %1")
+                .arg(QString::fromStdString(state.batchError->technicalMessage));
+        } else {
+            terminalStatus = QStringLiteral("Failed");
+        }
+        break;
+    case cryptobench::application::BatchStatus::InProgress:
+        return;
+    }
+
+    presentationState_ = PresentationState::Idle;
+    applyPresentationState();
+    ui->batchStatusLabel->setText(terminalStatus);
 }
 
 void MainWindow::exportSingleResult()
@@ -701,7 +818,13 @@ void MainWindow::exportSingleResult()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (presentationState_ == PresentationState::Idle && !controller_->isBusy()) {
+    if (presentationState_ == PresentationState::BatchRunning ||
+        presentationState_ == PresentationState::BatchCancelling) {
+        event->ignore();
+        return;
+    }
+
+    if (presentationState_ == PresentationState::Idle && !singleController_->isBusy()) {
         event->accept();
         return;
     }
@@ -718,7 +841,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     }
 
     event->ignore();
-    if (!controller_->isBusy()) {
+    if (!singleController_->isBusy()) {
         event->accept();
         return;
     }

@@ -8,6 +8,7 @@
 #include <optional>
 
 #include <cryptobench/application/BenchmarkController.h>
+#include <cryptobench/application/BatchController.h>
 #include <cryptobench/application/BatchInputParser.h>
 #include <cryptobench/core/AlgorithmProfileId.h>
 #include <cryptobench/core/BenchmarkConfig.h>
@@ -56,7 +57,9 @@ private:
     void updateRunAvailability();
     void applyPresentationState();
     void startBenchmark();
+    void startBatch();
     void requestCancel();
+    void requestBatchCancel();
     void exportSingleResult();
     void browseBatchInput();
     void browseBatchOutput();
@@ -64,12 +67,15 @@ private:
     void displayBatchIssues(const std::vector<cryptobench::application::BatchInputIssue>& issues);
     void onProgressChanged(const cryptobench::core::ProgressInfo& progress);
     void onBenchmarkFinished(const cryptobench::core::BenchmarkResult& result);
+    void onBatchProgressChanged(const cryptobench::application::BatchProgress& progress);
+    void onBatchFinished(const cryptobench::application::BatchExecutionState& state);
     std::optional<cryptobench::core::BenchmarkConfig> buildBenchmarkConfig(
         cryptobench::core::ValidationResult& validation) const;
     void closeEvent(QCloseEvent* event) override;
 
     Ui::MainWindow* ui;
-    std::unique_ptr<cryptobench::application::BenchmarkController> controller_;
+    std::unique_ptr<cryptobench::application::BenchmarkController> singleController_;
+    std::unique_ptr<cryptobench::application::BatchController> batchController_;
     PresentationState presentationState_ = PresentationState::Idle;
     std::optional<cryptobench::core::BenchmarkResult> exportableSingleResult_;
     std::optional<cryptobench::application::BatchDefinition> batchDefinition_;
