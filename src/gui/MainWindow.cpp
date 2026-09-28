@@ -211,6 +211,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->cancelButton, &QPushButton::clicked, this, &MainWindow::requestCancel);
     connect(ui->batchRunButton, &QPushButton::clicked, this, &MainWindow::startBatch);
     connect(ui->batchCancelButton, &QPushButton::clicked, this, &MainWindow::requestBatchCancel);
+    connect(ui->batchSaveAsButton, &QPushButton::clicked, this, &MainWindow::saveBatchAs);
     connect(ui->exportJsonButton, &QPushButton::clicked, this, &MainWindow::exportSingleResult);
     connect(ui->batchInputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchInput);
     connect(ui->batchOutputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchOutput);
@@ -480,6 +481,9 @@ void MainWindow::updateBatchPresentation()
     ui->batchRunButton->setEnabled(
         idle && batchDefinition_.has_value() && !batchOutputTarget_.isEmpty());
     ui->batchCancelButton->setEnabled(batchRunning);
+    ui->batchSaveAsButton->setEnabled(
+        idle && !batchController_->isBusy() &&
+        batchController_->state().status == cryptobench::application::BatchStatus::Failed);
 }
 
 void MainWindow::displayBatchIssues(
@@ -756,6 +760,110 @@ void MainWindow::onBatchFinished(const cryptobench::application::BatchExecutionS
     presentationState_ = PresentationState::Idle;
     applyPresentationState();
     ui->batchStatusLabel->setText(terminalStatus);
+
+    if (closeAfterBatchTerminal_ && !batchController_->isBusy()) {
+        handleBatchCloseAfterTerminal();
+    }
+}
+
+void MainWindow::handleBatchCloseAfterTerminal()
+{
+    if (!closeAfterBatchTerminal_ || batchController_->isBusy() ||
+        presentationState_ != PresentationState::Idle) {
+        return;
+    }
+
+    if (batchController_->state().status != cryptobench::application::BatchStatus::Failed) {
+        closeAfterBatchTerminal_ = false;
+        QTimer::singleShot(0, this, [this]() {
+            if (!batchController_->isBusy()) close();
+        });
+        return;
+    }
+
+    QMessageBox recoveryDialog(this);
+    recoveryDialog.setWindowTitle(QStringLiteral("Batch persistence failed"));
+    recoveryDialog.setText(QStringLiteral("The final Batch state could not be persisted."));
+    recoveryDialog.setInformativeText(QStringLiteral("Choose how to finish closing the application."));
+    auto* saveButton = recoveryDialog.addButton(QStringLiteral("Save As..."), QMessageBox::AcceptRole);
+    auto* exitButton = recoveryDialog.addButton(QStringLiteral("Exit without saving"), QMessageBox::DestructiveRole);
+    auto* keepButton = recoveryDialog.addButton(QStringLiteral("Keep open"), QMessageBox::RejectRole);
+    recoveryDialog.exec();
+
+    if (recoveryDialog.clickedButton() == exitButton) {
+        closeAfterBatchTerminal_ = false;
+        close();
+        return;
+    }
+    if (recoveryDialog.clickedButton() == saveButton && saveBatchAs()) {
+        closeAfterBatchTerminal_ = false;
+        QTimer::singleShot(0, this, [this]() {
+            if (!batchController_->isBusy()) close();
+        });
+        return;
+    }
+
+    Q_UNUSED(keepButton);
+    closeAfterBatchTerminal_ = false;
+}
+
+bool MainWindow::saveBatchAs()
+{
+    if (presentationState_ != PresentationState::Idle || batchController_->isBusy() ||
+        batchController_->state().status != cryptobench::application::BatchStatus::Failed) {
+        return false;
+    }
+
+    const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
+        ? dialogCallbacks_.chooseSaveTarget
+        : [this](QWidget*) {
+              return QFileDialog::getSaveFileName(
+                  this, QStringLiteral("Save batch result as"), {},
+                  QStringLiteral("JSON files (*.json);;All files (*)"));
+          };
+    const QString target = chooseSaveTarget(this);
+    if (target.isEmpty()) return false;
+
+    if (QFileInfo::exists(target)) {
+        const auto confirmOverwrite = dialogCallbacks_.confirmOverwrite
+            ? dialogCallbacks_.confirmOverwrite
+            : [this](QWidget*, const QString& path) {
+                  return QMessageBox::question(
+                             this, QStringLiteral("Replace existing file"),
+                             QStringLiteral("The target already exists. Replace it?\n%1").arg(path),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                      == QMessageBox::Yes;
+              };
+        if (!confirmOverwrite(this, target)) return false;
+    }
+
+    cryptobench::application::WriteResult writeResult;
+    try {
+        writeResult = batchController_->saveAs(target);
+    } catch (const std::exception& error) {
+        writeResult = {false, QString::fromUtf8(error.what())};
+    }
+
+    if (!writeResult.success) {
+        const QString message = writeResult.technicalMessage.isEmpty()
+            ? QStringLiteral("Batch Save As failed.")
+            : writeResult.technicalMessage;
+        if (dialogCallbacks_.reportMessage) {
+            dialogCallbacks_.reportMessage(this, QStringLiteral("Batch Save As failed"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("Batch Save As failed"), message);
+        }
+        return false;
+    }
+
+    if (dialogCallbacks_.reportMessage) {
+        dialogCallbacks_.reportMessage(this, QStringLiteral("Batch Save As complete"),
+                                       QStringLiteral("The Batch result was saved successfully."));
+    } else {
+        QMessageBox::information(this, QStringLiteral("Batch Save As complete"),
+                                 QStringLiteral("The Batch result was saved successfully."));
+    }
+    return true;
 }
 
 void MainWindow::exportSingleResult()
@@ -818,8 +926,35 @@ void MainWindow::exportSingleResult()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (presentationState_ == PresentationState::BatchRunning ||
-        presentationState_ == PresentationState::BatchCancelling) {
+    if (presentationState_ == PresentationState::BatchRunning) {
+        const auto decision = QMessageBox::question(
+            this, QStringLiteral("Batch running"),
+            QStringLiteral("Batch is running. Cancel and exit?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (decision != QMessageBox::Yes) {
+            event->ignore();
+            return;
+        }
+
+        event->ignore();
+        closeAfterBatchTerminal_ = true;
+        if (batchController_->isBusy()) {
+            requestBatchCancel();
+        } else {
+            handleBatchCloseAfterTerminal();
+        }
+        return;
+    }
+
+    if (presentationState_ == PresentationState::BatchCancelling) {
+        const auto decision = QMessageBox::question(
+            this, QStringLiteral("Batch cancelling"),
+            QStringLiteral("Exit after Batch cancellation and cleanup?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        closeAfterBatchTerminal_ = decision == QMessageBox::Yes;
+        if (closeAfterBatchTerminal_ && !batchController_->isBusy()) {
+            handleBatchCloseAfterTerminal();
+        }
         event->ignore();
         return;
     }

@@ -61,6 +61,7 @@ private:
     void requestCancel();
     void requestBatchCancel();
     void exportSingleResult();
+    bool saveBatchAs();
     void browseBatchInput();
     void browseBatchOutput();
     void updateBatchPresentation();
@@ -69,6 +70,7 @@ private:
     void onBenchmarkFinished(const cryptobench::core::BenchmarkResult& result);
     void onBatchProgressChanged(const cryptobench::application::BatchProgress& progress);
     void onBatchFinished(const cryptobench::application::BatchExecutionState& state);
+    void handleBatchCloseAfterTerminal();
     std::optional<cryptobench::core::BenchmarkConfig> buildBenchmarkConfig(
         cryptobench::core::ValidationResult& validation) const;
     void closeEvent(QCloseEvent* event) override;
@@ -83,4 +85,5 @@ private:
     DialogCallbacks dialogCallbacks_;
     bool cancelRequested_ = false;
     bool closeAfterTerminal_ = false;
+    bool closeAfterBatchTerminal_ = false;
 };
