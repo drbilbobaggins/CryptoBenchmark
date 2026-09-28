@@ -16,6 +16,13 @@
   <widget class="QWidget" name="centralWidget">
    <layout class="QVBoxLayout" name="mainLayout">
     <item>
+     <widget class="QTabWidget" name="workflowTabWidget">
+      <widget class="QWidget" name="singleTab">
+       <attribute name="title">
+        <string>Single Benchmark</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="singleLayout">
+    <item>
      <widget class="QGroupBox" name="configurationGroupBox">
       <property name="title">
        <string>Configuration</string>
@@ -176,6 +183,16 @@
          </property>
         </widget>
        </item>
+        <item>
+         <widget class="QPushButton" name="exportJsonButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="text">
+           <string>Export JSON...</string>
+          </property>
+         </widget>
+        </item>
        <item>
         <spacer name="actionsSpacer">
          <property name="orientation">
@@ -268,6 +285,66 @@
         </widget>
        </item>
       </layout>
+     </widget>
+    </item>
+   </layout>
+      </widget>
+      <widget class="QWidget" name="batchTab">
+       <attribute name="title">
+        <string>Batch</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="batchLayout">
+        <item>
+         <widget class="QGroupBox" name="batchInputGroupBox">
+          <property name="title"><string>Batch input</string></property>
+          <layout class="QGridLayout" name="batchInputLayout">
+           <item row="0" column="0"><widget class="QLabel" name="batchInputLabel"><property name="text"><string>Input JSON:</string></property></widget></item>
+           <item row="0" column="1"><widget class="QLineEdit" name="batchInputPathLineEdit"><property name="readOnly"><bool>true</bool></property></widget></item>
+           <item row="0" column="2"><widget class="QPushButton" name="batchInputBrowseButton"><property name="text"><string>Browse...</string></property></widget></item>
+           <item row="1" column="0"><widget class="QLabel" name="batchValidationLabel"><property name="text"><string>Validation:</string></property></widget></item>
+           <item row="1" column="1" colspan="2"><widget class="QLabel" name="batchValidationSummaryLabel"><property name="text"><string>No batch input selected.</string></property></widget></item>
+           <item row="2" column="1" colspan="2"><widget class="QListWidget" name="batchValidationIssuesList"><property name="uniformItemSizes"><bool>true</bool></property></widget></item>
+          </layout>
+         </widget>
+        </item>
+        <item>
+         <widget class="QGroupBox" name="batchOutputGroupBox">
+          <property name="title"><string>Batch output</string></property>
+          <layout class="QGridLayout" name="batchOutputLayout">
+           <item row="0" column="0"><widget class="QLabel" name="batchOutputLabel"><property name="text"><string>Output JSON:</string></property></widget></item>
+           <item row="0" column="1"><widget class="QLineEdit" name="batchOutputPathLineEdit"><property name="readOnly"><bool>true</bool></property></widget></item>
+           <item row="0" column="2"><widget class="QPushButton" name="batchOutputBrowseButton"><property name="text"><string>Browse...</string></property></widget></item>
+          </layout>
+         </widget>
+        </item>
+        <item>
+         <widget class="QGroupBox" name="batchActionsGroupBox">
+          <property name="title"><string>Batch actions</string></property>
+          <layout class="QHBoxLayout" name="batchActionsLayout">
+           <item><widget class="QPushButton" name="batchRunButton"><property name="enabled"><bool>false</bool></property><property name="text"><string>Run Batch</string></property></widget></item>
+           <item><widget class="QPushButton" name="batchCancelButton"><property name="enabled"><bool>false</bool></property><property name="text"><string>Cancel</string></property></widget></item>
+           <item><widget class="QPushButton" name="batchSaveAsButton"><property name="enabled"><bool>false</bool></property><property name="text"><string>Save As...</string></property></widget></item>
+          </layout>
+         </widget>
+        </item>
+        <item>
+         <widget class="QGroupBox" name="batchStatusGroupBox">
+          <property name="title"><string>Batch status</string></property>
+          <layout class="QFormLayout" name="batchStatusLayout">
+           <item row="0" column="0"><widget class="QLabel" name="batchStatusTitleLabel"><property name="text"><string>Status:</string></property></widget></item><item row="0" column="1"><widget class="QLabel" name="batchStatusLabel"><property name="text"><string>Not running.</string></property></widget></item>
+           <item row="1" column="0"><widget class="QLabel" name="batchCurrentEntryTitleLabel"><property name="text"><string>Current entry:</string></property></widget></item><item row="1" column="1"><widget class="QLabel" name="batchCurrentEntryLabel"><property name="text"><string>-</string></property></widget></item>
+           <item row="2" column="0"><widget class="QLabel" name="batchCompletedTitleLabel"><property name="text"><string>Completed:</string></property></widget></item><item row="2" column="1"><widget class="QLabel" name="batchCompletedCountLabel"><property name="text"><string>-</string></property></widget></item>
+           <item row="3" column="0"><widget class="QLabel" name="batchFailedTitleLabel"><property name="text"><string>Failed:</string></property></widget></item><item row="3" column="1"><widget class="QLabel" name="batchFailedCountLabel"><property name="text"><string>-</string></property></widget></item>
+           <item row="4" column="0"><widget class="QLabel" name="batchCancelledTitleLabel"><property name="text"><string>Cancelled:</string></property></widget></item><item row="4" column="1"><widget class="QLabel" name="batchCancelledCountLabel"><property name="text"><string>-</string></property></widget></item>
+           <item row="5" column="0"><widget class="QLabel" name="batchNotStartedTitleLabel"><property name="text"><string>Not started:</string></property></widget></item><item row="5" column="1"><widget class="QLabel" name="batchNotStartedCountLabel"><property name="text"><string>-</string></property></widget></item>
+           <item row="6" column="0"><widget class="QLabel" name="batchCurrentBenchmarkTitleLabel"><property name="text"><string>Current benchmark:</string></property></widget></item><item row="6" column="1"><widget class="QLabel" name="batchCurrentBenchmarkLabel"><property name="text"><string>-</string></property></widget></item>
+           <item row="7" column="0"><widget class="QLabel" name="batchCurrentProgressTitleLabel"><property name="text"><string>Progress:</string></property></widget></item><item row="7" column="1"><widget class="QLabel" name="batchCurrentProgressLabel"><property name="text"><string>-</string></property></widget></item>
+          </layout>
+         </widget>
+        </item>
+        <item><spacer name="batchSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer></item>
+       </layout>
+      </widget>
      </widget>
     </item>
    </layout>

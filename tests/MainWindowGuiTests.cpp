@@ -3,12 +3,21 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QTimer>
+#include <QTemporaryDir>
 
 #include <cryptobench/core/AlgorithmProfileId.h>
 #include <cryptobench/core/DomainTypes.h>
@@ -148,6 +157,8 @@ void testIdleAndConfiguration()
             "Run was not enabled for a valid zero-byte Hash configuration");
     require(!widget<QPushButton>(window, "cancelButton")->isEnabled(),
             "Cancel was enabled while idle");
+    require(!widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+            "Export JSON was enabled before a Completed result");
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0,
             "initial results table was not empty");
 
@@ -207,6 +218,8 @@ void testCompletedAndReplacement()
             "Running state did not lock configuration and enable Cancel");
     waitForCompleted(window);
     require(!cancel->isEnabled(), "Cancel remained enabled after completion");
+    require(widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+            "Completed result did not enable Export JSON");
     require(widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
             "configuration was not restored after completion");
     requireCompletedTable(window);
@@ -214,7 +227,8 @@ void testCompletedAndReplacement()
     widget<QSpinBox>(window, "workloadSizeSpinBox")->setValue(16);
     run->click();
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
-                widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible(),
+                widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible() &&
+                !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "old result was not cleared at new Run start");
     waitForCompleted(window);
     requireCompletedTable(window);
@@ -237,7 +251,8 @@ void testCancelAndReuse()
             "Cancel did not enter the Cancelling presentation state");
     waitUntil([&] { return status(window) == QStringLiteral("Benchmark cancelled"); }, 10'000);
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
-                widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
+                widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
+                !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Cancelled result did not restore an empty idle GUI");
 
     setScenario("completed");
@@ -260,7 +275,8 @@ void testFailedAndReuse()
             "Failed result did not expose the scripted worker technical message");
     require(!widget<QPushButton>(window, "cancelButton")->isEnabled() &&
                 widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
-                widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
+                widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
+                !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Failed result did not restore the idle empty GUI");
 
     setScenario("completed");
@@ -269,6 +285,188 @@ void testFailedAndReuse()
     requireCompletedTable(window);
     clearScenario();
 }
+
+QByteArray readFile(const QString& path)
+{
+    QFile file(path);
+    require(file.open(QIODevice::ReadOnly), "could not read export target");
+    return file.readAll();
+}
+
+void writeFile(const QString& path, const QByteArray& bytes)
+{
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "could not create export target");
+    require(file.write(bytes) == bytes.size(), "could not write export target");
+}
+
+void testSingleJsonExport()
+{
+    setScenario("completed");
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary export directory was not created");
+    MainWindow window;
+    window.show();
+    configureHash(window);
+
+    QString target;
+    bool overwrite = false;
+    QString messageTitle;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseSaveTarget = [&](QWidget*) { return target; };
+    callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
+    callbacks.reportMessage = [&](QWidget*, const QString& title, const QString&) { messageTitle = title; };
+    window.setDialogCallbacks(std::move(callbacks));
+
+    widget<QPushButton>(window, "runButton")->click();
+    waitForCompleted(window);
+    auto* exportButton = widget<QPushButton>(window, "exportJsonButton");
+    require(exportButton->isEnabled(), "Completed result did not remain exportable");
+
+    target = directory.filePath("single-result.json");
+    exportButton->click();
+    const auto firstPayload = readFile(target);
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(firstPayload, &parseError);
+    require(parseError.error == QJsonParseError::NoError && document.isObject(),
+            "successful export was not canonical JSON");
+    require(document.object().value("mode") == QStringLiteral("single") &&
+                document.object().value("status") == QStringLiteral("completed"),
+            "successful export had incorrect document status");
+    require(messageTitle == QStringLiteral("Export complete"),
+            "successful export did not report completion");
+
+        target.clear();
+        messageTitle.clear();
+        exportButton->click();
+        require(messageTitle.isEmpty() && exportButton->isEnabled(),
+            "cancelling the Single export target changed the retained Completed result");
+
+            target = directory.filePath("single-result.json");
+    const QByteArray original = "existing target";
+    writeFile(target, original);
+    overwrite = false;
+    exportButton->click();
+    require(readFile(target) == original, "declined overwrite changed the target");
+
+    overwrite = true;
+    exportButton->click();
+    require(readFile(target) == firstPayload, "approved overwrite did not replace the target");
+
+    const auto parentFile = directory.filePath("not-a-directory");
+    writeFile(parentFile, "parent");
+    target = parentFile + "/result.json";
+    exportButton->click();
+    require(status(window) == QStringLiteral("Completed"),
+            "export failure changed the visible Completed status");
+    require(exportButton->isEnabled(), "export failure discarded the retained result");
+    require(messageTitle == QStringLiteral("Export failed"), "export failure was not reported");
+
+    target = directory.filePath("retry-result.json");
+    exportButton->click();
+    require(readFile(target) == firstPayload, "retry export did not persist the retained result");
+    require(exportButton->isEnabled(), "successful export discarded the retained result");
+    clearScenario();
+}
+
+    QByteArray validBatchFixture()
+    {
+        return R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[{"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}}]})";
+    }
+
+    QByteArray invalidBatchFixture()
+    {
+        return R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[{"profileId":"unknown-profile","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}}]})";
+    }
+
+    void testBatchGui()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "temporary batch directory was not created");
+        const auto validPath = directory.filePath("valid-batch.json");
+        const auto invalidPath = directory.filePath("invalid-batch.json");
+        writeFile(validPath, validBatchFixture());
+        writeFile(invalidPath, invalidBatchFixture());
+
+        MainWindow window;
+        window.show();
+        auto* tabs = widget<QTabWidget>(window, "workflowTabWidget");
+        require(tabs->count() == 2 && tabs->tabText(0) == QStringLiteral("Single Benchmark") &&
+            tabs->tabText(1) == QStringLiteral("Batch"),
+            "single and batch workflows were not separated into the expected tabs");
+        require(!widget<QPushButton>(window, "batchRunButton")->isEnabled() &&
+            !widget<QPushButton>(window, "batchCancelButton")->isEnabled(),
+            "batch execution controls were enabled before M13-C");
+        require(!widget<QPushButton>(window, "batchSaveAsButton")->isEnabled(),
+            "Batch Save As was enabled before a failed Batch existed");
+        require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Not running.") &&
+            widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("-"),
+            "batch status placeholders were not initialized");
+
+        QString selectedInput;
+        QString selectedOutput;
+        bool overwrite = false;
+        MainWindow::DialogCallbacks callbacks;
+        callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+        callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+        callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
+        window.setDialogCallbacks(std::move(callbacks));
+
+        auto* inputPath = widget<QLineEdit>(window, "batchInputPathLineEdit");
+        auto* validationSummary = widget<QLabel>(window, "batchValidationSummaryLabel");
+        auto* issues = widget<QListWidget>(window, "batchValidationIssuesList");
+        auto* inputBrowse = widget<QPushButton>(window, "batchInputBrowseButton");
+        auto* outputPath = widget<QLineEdit>(window, "batchOutputPathLineEdit");
+        auto* outputBrowse = widget<QPushButton>(window, "batchOutputBrowseButton");
+
+        inputBrowse->click();
+        require(inputPath->text().isEmpty() && validationSummary->text() == QStringLiteral("No batch input selected."),
+            "cancelling input browse changed batch state");
+
+        selectedInput = validPath;
+        inputBrowse->click();
+        require(inputPath->text() == validPath &&
+            validationSummary->text() == QStringLiteral("Valid batch - 1 entries") && issues->count() == 0,
+            "valid batch input was not parsed and displayed correctly");
+
+        selectedInput.clear();
+        inputBrowse->click();
+        require(inputPath->text() == validPath && validationSummary->text() == QStringLiteral("Valid batch - 1 entries"),
+            "cancelled input browse discarded the accepted batch state");
+
+        selectedInput = invalidPath;
+        inputBrowse->click();
+        require(inputPath->text() == invalidPath && validationSummary->text() == QStringLiteral("Invalid batch") &&
+            issues->count() > 0 && issues->item(0)->text().contains(QStringLiteral("/entries/0/profileId")) &&
+            issues->item(0)->text().contains(QStringLiteral("unknown")),
+            "invalid batch parser issue was not displayed with path and message");
+        require(!widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+            "invalid batch input left a batch action enabled");
+
+        const auto acceptedOutput = directory.filePath("accepted-output.json");
+        selectedOutput = acceptedOutput;
+        outputBrowse->click();
+        require(outputPath->text() == acceptedOutput && !QFileInfo::exists(acceptedOutput),
+            "non-existing output target was not accepted without writing");
+
+        selectedOutput.clear();
+        outputBrowse->click();
+        require(outputPath->text() == acceptedOutput, "cancelling output browse changed the accepted target");
+
+        const auto existingOutput = directory.filePath("existing-output.json");
+        const QByteArray original = "existing output";
+        writeFile(existingOutput, original);
+        selectedOutput = existingOutput;
+        overwrite = false;
+        outputBrowse->click();
+        require(outputPath->text() == acceptedOutput && readFile(existingOutput) == original,
+            "declined output overwrite changed target selection or file contents");
+
+        overwrite = true;
+        outputBrowse->click();
+        require(outputPath->text() == existingOutput && readFile(existingOutput) == original,
+            "approved output target selection wrote or changed the existing file");
+    }
 
 void answerMessageBox(QMessageBox::StandardButton answer)
 {
@@ -284,6 +482,594 @@ void answerMessageBox(QMessageBox::StandardButton answer)
     throw std::runtime_error("close confirmation dialog was not found");
 }
 
+QByteArray multiEntryBatchFixture()
+{
+    return R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[{"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}},{"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":16}}]})";
+}
+
+void testBatchRunAndCancel()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary batch execution directory was not created");
+    const auto inputPath = directory.filePath("multi-entry-batch.json");
+    const auto outputPath = directory.filePath("batch-result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("completed");
+    MainWindow window;
+    window.show();
+    QString selectedInput = inputPath;
+    QString selectedOutput = outputPath;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    window.setDialogCallbacks(std::move(callbacks));
+
+    auto* inputBrowse = widget<QPushButton>(window, "batchInputBrowseButton");
+    auto* outputBrowse = widget<QPushButton>(window, "batchOutputBrowseButton");
+    auto* run = widget<QPushButton>(window, "batchRunButton");
+    auto* cancel = widget<QPushButton>(window, "batchCancelButton");
+    inputBrowse->click();
+    require(!run->isEnabled(), "valid batch without an output target enabled Run Batch");
+    outputBrowse->click();
+    require(run->isEnabled(), "valid batch and accepted output target did not enable Run Batch");
+
+    const auto invalidPath = directory.filePath("invalid-batch.json");
+    writeFile(invalidPath, invalidBatchFixture());
+    selectedInput = invalidPath;
+    inputBrowse->click();
+    require(!run->isEnabled(), "replacing valid input with invalid input left Run Batch enabled");
+    selectedInput = inputPath;
+    inputBrowse->click();
+    require(run->isEnabled(), "selecting a valid input again did not restore Run Batch eligibility");
+
+    run->click();
+    require(!run->isEnabled() && cancel->isEnabled() &&
+        !inputBrowse->isEnabled() && !outputBrowse->isEnabled() &&
+        !widget<QPushButton>(window, "runButton")->isEnabled() &&
+        !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+        "BatchRunning did not enforce mutual exclusion and control locking");
+    waitUntil([&] {
+        const auto currentStatus = widget<QLabel>(window, "batchStatusLabel")->text();
+        return currentStatus == QStringLiteral("Completed") ||
+               currentStatus.startsWith(QStringLiteral("Failed"));
+    }, 30'000);
+    require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed"),
+            "Batch completion did not reach the Completed terminal status");
+    require(!cancel->isEnabled() && run->isEnabled() && inputBrowse->isEnabled() &&
+        outputBrowse->isEnabled(),
+        "completed Batch did not return to Idle presentation");
+    require(widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("2 / 2"),
+            "terminal Batch did not retain the controller-supplied current entry");
+    require(widget<QLabel>(window, "batchCompletedCountLabel")->text() == QStringLiteral("2") &&
+        widget<QLabel>(window, "batchFailedCountLabel")->text() == QStringLiteral("0") &&
+        widget<QLabel>(window, "batchCancelledCountLabel")->text() == QStringLiteral("0") &&
+        widget<QLabel>(window, "batchNotStartedCountLabel")->text() == QStringLiteral("0"),
+        "Batch terminal counters did not reflect controller progress");
+    require(!widget<QPushButton>(window, "batchSaveAsButton")->isEnabled(),
+            "Completed Batch incorrectly enabled Save As");
+    const auto payload = readFile(outputPath);
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(payload, &parseError);
+    require(parseError.error == QJsonParseError::NoError && document.isObject() &&
+        document.object().value("mode") == QStringLiteral("batch"),
+        "BatchController did not produce a batch result document");
+    clearScenario();
+
+    setScenario("wait-before-measurement");
+    const auto cancelInputPath = directory.filePath("cancel-batch.json");
+    const auto cancelOutputPath = directory.filePath("cancel-result.json");
+    writeFile(cancelInputPath, multiEntryBatchFixture());
+    MainWindow cancelWindow;
+    cancelWindow.show();
+    selectedInput = cancelInputPath;
+    selectedOutput = cancelOutputPath;
+    MainWindow::DialogCallbacks cancelCallbacks;
+    cancelCallbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    cancelCallbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    cancelWindow.setDialogCallbacks(std::move(cancelCallbacks));
+    widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->click();
+    widget<QPushButton>(cancelWindow, "batchOutputBrowseButton")->click();
+    auto* batchCancel = widget<QPushButton>(cancelWindow, "batchCancelButton");
+    widget<QPushButton>(cancelWindow, "batchRunButton")->click();
+    require(batchCancel->isEnabled(), "Batch Run did not enter BatchRunning presentation");
+    waitUntil([&] {
+        return widget<QLabel>(cancelWindow, "batchCurrentEntryLabel")->text() == QStringLiteral("1 / 2") &&
+               widget<QLabel>(cancelWindow, "batchCurrentBenchmarkLabel")->text() != QStringLiteral("-") &&
+               widget<QLabel>(cancelWindow, "batchCurrentProgressLabel")->text() != QStringLiteral("-");
+    }, 10'000);
+    QTimer::singleShot(0, [&] { answerMessageBox(QMessageBox::No); });
+    cancelWindow.close();
+    require(cancelWindow.isVisible(), "active Batch close with No unexpectedly closed the window");
+    batchCancel->click();
+    require(widget<QLabel>(cancelWindow, "batchStatusLabel")->text() == QStringLiteral("Cancelling...") &&
+                !batchCancel->isEnabled(),
+        "Batch Cancel did not enter BatchCancelling presentation");
+    QTimer::singleShot(0, [&] { answerMessageBox(QMessageBox::No); });
+    cancelWindow.close();
+    require(cancelWindow.isVisible(), "close during BatchCancelling with No unexpectedly closed the window");
+    waitUntil([&] {
+        const auto currentStatus = widget<QLabel>(cancelWindow, "batchStatusLabel")->text();
+        return currentStatus == QStringLiteral("Cancelled") ||
+               currentStatus.startsWith(QStringLiteral("Failed"));
+    }, 15'000);
+    require(widget<QLabel>(cancelWindow, "batchStatusLabel")->text() == QStringLiteral("Cancelled"),
+            "Batch cancellation did not reach the Cancelled terminal status");
+    require(widget<QPushButton>(cancelWindow, "batchRunButton")->isEnabled() &&
+        widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->isEnabled() &&
+        !widget<QPushButton>(cancelWindow, "batchSaveAsButton")->isEnabled(),
+        "cancelled Batch did not return to Idle presentation");
+    clearScenario();
+
+    setScenario("failed-immediately");
+    const auto failureOutputPath = directory.filePath("failure-result.json");
+    MainWindow failureWindow;
+    failureWindow.show();
+    selectedInput = inputPath;
+    selectedOutput = failureOutputPath;
+    MainWindow::DialogCallbacks failureCallbacks;
+    failureCallbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    failureCallbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    failureWindow.setDialogCallbacks(std::move(failureCallbacks));
+    widget<QPushButton>(failureWindow, "batchInputBrowseButton")->click();
+    widget<QPushButton>(failureWindow, "batchOutputBrowseButton")->click();
+    widget<QPushButton>(failureWindow, "batchRunButton")->click();
+    waitUntil([&] {
+        return widget<QLabel>(failureWindow, "batchStatusLabel")->text() ==
+               QStringLiteral("Completed with failures");
+    }, 30'000);
+    require(widget<QLabel>(failureWindow, "batchFailedCountLabel")->text() == QStringLiteral("2") &&
+                widget<QLabel>(failureWindow, "batchCompletedCountLabel")->text() == QStringLiteral("0") &&
+                !widget<QPushButton>(failureWindow, "batchSaveAsButton")->isEnabled(),
+            "CompletedWithFailures did not display controller-supplied failed/completed counters");
+    clearScenario();
+}
+
+void testBatchBusyCloseYes()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary Batch close directory was not created");
+    const auto inputPath = directory.filePath("close-batch.json");
+    const auto outputPath = directory.filePath("close-result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("wait-before-measurement");
+    MainWindow window;
+    window.show();
+    QString selectedInput = inputPath;
+    QString selectedOutput = outputPath;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    window.setDialogCallbacks(std::move(callbacks));
+    widget<QPushButton>(window, "batchInputBrowseButton")->click();
+    widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+    widget<QPushButton>(window, "batchRunButton")->click();
+    waitUntil([&] {
+        return widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("1 / 2");
+    }, 10'000);
+
+    QTimer::singleShot(0, [&] { answerMessageBox(QMessageBox::Yes); });
+    window.close();
+    waitUntil([&] { return !window.isVisible(); }, 15'000);
+    clearScenario();
+}
+
+bool tryAnswerMessageBox(QMessageBox::StandardButton answer);
+
+void testBatchCloseDialogAfterTerminalization()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary Batch modal-race directory was not created");
+    const auto inputPath = directory.filePath("modal-race-batch.json");
+    const auto outputPath = directory.filePath("modal-race-result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("completed");
+    MainWindow window;
+    window.show();
+    QString selectedInput = inputPath;
+    QString selectedOutput = outputPath;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    window.setDialogCallbacks(std::move(callbacks));
+    widget<QPushButton>(window, "batchInputBrowseButton")->click();
+    widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+    widget<QPushButton>(window, "batchRunButton")->click();
+
+    bool terminalObserved = false;
+    bool answered = false;
+    QTimer pollTimer;
+    pollTimer.setInterval(10);
+    QObject::connect(&pollTimer, &QTimer::timeout, &window, [&] {
+        if (!terminalObserved &&
+            widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed")) {
+            terminalObserved = true;
+        }
+        if (terminalObserved && !answered) {
+            answered = tryAnswerMessageBox(QMessageBox::Yes);
+            if (answered) pollTimer.stop();
+        }
+    });
+    pollTimer.start();
+    window.close();
+    pollTimer.stop();
+
+    require(terminalObserved && answered,
+        "Batch close dialog was not held open until terminalization");
+    waitUntil([&] { return !window.isVisible(); }, 5'000);
+    clearScenario();
+}
+
+void testBatchSaveAsRecovery()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary Batch recovery directory was not created");
+    const auto inputPath = directory.filePath("recovery-batch.json");
+    writeFile(inputPath, validBatchFixture());
+    const auto invalidOutput = directory.filePath("missing-parent/result.json");
+    const auto validOutput = directory.filePath("recovered-result.json");
+    const auto existingOutput = directory.filePath("existing-recovery.json");
+    writeFile(existingOutput, "keep this file");
+    const auto invalidRecoveryTarget = directory.filePath("missing-recovery-parent/result.json");
+
+    setScenario("completed");
+    MainWindow window;
+    window.show();
+    QString selectedInput = inputPath;
+    QString selectedOutput = invalidOutput;
+    bool overwrite = false;
+    QString messageTitle;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
+    callbacks.reportMessage = [&](QWidget*, const QString& title, const QString&) { messageTitle = title; };
+    window.setDialogCallbacks(std::move(callbacks));
+
+    widget<QPushButton>(window, "batchInputBrowseButton")->click();
+    widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+    widget<QPushButton>(window, "batchRunButton")->click();
+    waitUntil([&] {
+        return widget<QLabel>(window, "batchStatusLabel")->text().startsWith(QStringLiteral("Failed"));
+    }, 10'000);
+
+    auto* saveAs = widget<QPushButton>(window, "batchSaveAsButton");
+    require(saveAs->isEnabled(), "failed Batch did not enable Save As");
+    require(widget<QLabel>(window, "batchStatusLabel")->text().size() > QStringLiteral("Failed: ").size(),
+        "failed Batch did not retain the persistence technical message");
+
+    selectedOutput = existingOutput;
+    overwrite = false;
+    saveAs->click();
+    require(readFile(existingOutput) == QByteArray("keep this file"),
+        "declined recovery overwrite changed the existing target");
+    require(saveAs->isEnabled(), "declined recovery overwrite disabled Save As");
+
+    overwrite = true;
+    saveAs->click();
+    const auto overwrittenPayload = readFile(existingOutput);
+    QJsonParseError overwriteParseError;
+    const auto overwrittenDocument = QJsonDocument::fromJson(overwrittenPayload, &overwriteParseError);
+    require(overwriteParseError.error == QJsonParseError::NoError &&
+        overwrittenDocument.isObject() &&
+        overwrittenDocument.object().value("mode") == QStringLiteral("batch") &&
+        overwrittenDocument.object().value("status") == QStringLiteral("failed"),
+        "approved recovery overwrite did not replace the existing target");
+
+    selectedOutput = invalidRecoveryTarget;
+    saveAs->click();
+    require(messageTitle == QStringLiteral("Batch Save As failed") && saveAs->isEnabled(),
+        "failed recovery Save As did not preserve retryability");
+
+    selectedOutput = validOutput;
+    saveAs->click();
+    const auto payload = readFile(validOutput);
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(payload, &parseError);
+    require(parseError.error == QJsonParseError::NoError && document.isObject() &&
+        document.object().value("mode") == QStringLiteral("batch") &&
+        document.object().value("status") == QStringLiteral("failed"),
+        "recovery Save As did not persist the failed Batch document");
+    require(widget<QLabel>(window, "batchStatusLabel")->text().startsWith(QStringLiteral("Failed")) &&
+        saveAs->isEnabled() && messageTitle == QStringLiteral("Batch Save As complete"),
+        "successful recovery Save As changed failed-state presentation or retryability");
+    clearScenario();
+}
+
+
+bool tryClickMessageBoxButton(const QString& text)
+{
+    for (QWidget* topLevel : QApplication::topLevelWidgets()) {
+        if (auto* messageBox = qobject_cast<QMessageBox*>(topLevel)) {
+            for (QAbstractButton* button : messageBox->buttons()) {
+                if (button->text().contains(text)) {
+                    button->click();
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool messageBoxHasButton(const QString& text)
+{
+    for (QWidget* topLevel : QApplication::topLevelWidgets()) {
+        if (auto* messageBox = qobject_cast<QMessageBox*>(topLevel)) {
+            for (QAbstractButton* button : messageBox->buttons()) {
+                if (button->text().contains(text)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool tryAnswerMessageBox(QMessageBox::StandardButton answer);
+
+void clickMessageBoxButtonWhenShown(const QString& text)
+{
+    bool clicked = false;
+    waitUntil([&] {
+        return clicked || (clicked = tryClickMessageBoxButton(text));
+    }, 10'000);
+}
+
+void removeBatchOutputDirectory(const QString& outputDirectory, const QString& outputPath)
+{
+    require(QFile::exists(outputPath), "initial Batch snapshot was not written");
+    require(QFile::remove(outputPath), "could not remove the initial Batch snapshot");
+    require(QDir().rmdir(outputDirectory), "could not remove the dedicated Batch output directory");
+}
+
+void prepareBatchCloseFailure(
+    MainWindow& window,
+    const QString& inputPath,
+    const QString& outputPath,
+    const QString& outputDirectory,
+    QString& selectedInput,
+    QString& selectedOutput,
+    MainWindow::DialogCallbacks callbacks)
+{
+    selectedInput = inputPath;
+    selectedOutput = outputPath;
+    window.setDialogCallbacks(std::move(callbacks));
+    widget<QPushButton>(window, "batchInputBrowseButton")->click();
+    widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+    widget<QPushButton>(window, "batchRunButton")->click();
+    waitUntil([&] {
+        return widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("1 / 2");
+    }, 10'000);
+    removeBatchOutputDirectory(outputDirectory, outputPath);
+    QTimer::singleShot(0, [&] { answerMessageBox(QMessageBox::Yes); });
+    window.close();
+}
+
+void testBatchClosePersistenceFailureRecovery()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary close-recovery directory was not created");
+    const auto inputPath = directory.filePath("close-failure-batch.json");
+    const auto outputDirectory = directory.filePath("batch-output");
+    require(QDir().mkpath(outputDirectory), "could not create dedicated Batch output directory");
+    const auto outputPath = QDir(outputDirectory).filePath("batch-result.json");
+    const auto recoveryTarget = directory.filePath("close-recovered-result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("wait-before-measurement");
+    MainWindow window;
+    window.show();
+    QString selectedInput;
+    QString selectedOutput;
+    QString messageTitle;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    callbacks.reportMessage = [&](QWidget*, const QString& title, const QString&) { messageTitle = title; };
+    prepareBatchCloseFailure(window, inputPath, outputPath, outputDirectory,
+                             selectedInput, selectedOutput, std::move(callbacks));
+
+    selectedOutput = recoveryTarget;
+    clickMessageBoxButtonWhenShown(QStringLiteral("Save As..."));
+    const auto payload = readFile(recoveryTarget);
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(payload, &parseError);
+    require(parseError.error == QJsonParseError::NoError && document.isObject() &&
+        document.object().value("mode") == QStringLiteral("batch") &&
+        document.object().value("status") == QStringLiteral("failed"),
+        "close-time recovery Save As did not persist the failed Batch document");
+    waitUntil([&] { return !window.isVisible(); }, 10'000);
+    require(messageTitle == QStringLiteral("Batch Save As complete"),
+        "close-time recovery Save As did not report success");
+    clearScenario();
+}
+
+void testBatchClosePersistenceFailureRecoveryRetry()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary recovery-retry directory was not created");
+    const auto inputPath = directory.filePath("retry-close-failure-batch.json");
+    const auto outputDirectory = directory.filePath("retry-output");
+    require(QDir().mkpath(outputDirectory), "could not create recovery-retry output directory");
+    const auto outputPath = QDir(outputDirectory).filePath("batch-result.json");
+    const auto invalidRecoveryTarget = directory.filePath("missing-recovery-parent/result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("wait-before-measurement");
+    MainWindow window;
+    window.show();
+    QString selectedInput;
+    QString selectedOutput;
+    QString messageTitle;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    callbacks.reportMessage = [&](QWidget*, const QString& title, const QString&) { messageTitle = title; };
+    prepareBatchCloseFailure(window, inputPath, outputPath, outputDirectory,
+                             selectedInput, selectedOutput, std::move(callbacks));
+
+    selectedOutput = invalidRecoveryTarget;
+    clickMessageBoxButtonWhenShown(QStringLiteral("Save As..."));
+    require(messageTitle == QStringLiteral("Batch Save As failed") && window.isVisible() &&
+                widget<QPushButton>(window, "batchSaveAsButton")->isEnabled(),
+        "failed close-time recovery Save As did not preserve retryability");
+    clearScenario();
+}
+
+void testBatchClosePersistenceFailureExitWithoutSaving()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary exit-without-saving directory was not created");
+    const auto inputPath = directory.filePath("exit-batch.json");
+    const auto outputDirectory = directory.filePath("exit-output");
+    require(QDir().mkpath(outputDirectory), "could not create exit output directory");
+    const auto outputPath = QDir(outputDirectory).filePath("batch-result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("wait-before-measurement");
+    MainWindow window;
+    window.show();
+    QString selectedInput;
+    QString selectedOutput;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    prepareBatchCloseFailure(window, inputPath, outputPath, outputDirectory,
+                             selectedInput, selectedOutput, std::move(callbacks));
+
+    clickMessageBoxButtonWhenShown(QStringLiteral("Exit without saving"));
+    waitUntil([&] { return !window.isVisible(); }, 10'000);
+    require(!QFile::exists(outputPath), "Exit without saving unexpectedly retried persistence");
+    clearScenario();
+}
+
+void testBatchCancellingCloseYes()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary Batch cancelling directory was not created");
+    const auto inputPath = directory.filePath("cancelling-close-batch.json");
+    const auto outputPath = directory.filePath("cancelling-close-result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("wait-before-measurement");
+    MainWindow window;
+    window.show();
+    QString selectedInput = inputPath;
+    QString selectedOutput = outputPath;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    window.setDialogCallbacks(std::move(callbacks));
+    widget<QPushButton>(window, "batchInputBrowseButton")->click();
+    widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+    widget<QPushButton>(window, "batchRunButton")->click();
+    waitUntil([&] {
+        return widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("1 / 2");
+    }, 10'000);
+    widget<QPushButton>(window, "batchCancelButton")->click();
+    require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Cancelling..."),
+        "Batch did not enter Cancelling before the second close attempt");
+
+    QTimer answerTimer;
+    answerTimer.setInterval(10);
+    QObject::connect(&answerTimer, &QTimer::timeout, &window, [&] {
+        if (tryAnswerMessageBox(QMessageBox::Yes)) answerTimer.stop();
+    });
+    answerTimer.start();
+    window.close();
+    answerTimer.stop();
+    require(window.isVisible(), "close during BatchCancelling was not deferred");
+    waitUntil([&] { return !window.isVisible(); }, 15'000);
+    clearScenario();
+}
+
+void testBatchCancellingCloseDialogAfterFailedTerminalization()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary cancelling modal-race directory was not created");
+    const auto inputPath = directory.filePath("cancelling-modal-race-batch.json");
+    const auto outputDirectory = directory.filePath("cancelling-modal-race-output");
+    require(QDir().mkpath(outputDirectory), "could not create cancelling modal-race output directory");
+    const auto outputPath = QDir(outputDirectory).filePath("batch-result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("wait-before-measurement");
+    MainWindow window;
+    window.show();
+    QString selectedInput = inputPath;
+    QString selectedOutput = outputPath;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    window.setDialogCallbacks(std::move(callbacks));
+    widget<QPushButton>(window, "batchInputBrowseButton")->click();
+    widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+    widget<QPushButton>(window, "batchRunButton")->click();
+    waitUntil([&] {
+        return widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("1 / 2");
+    }, 10'000);
+    widget<QPushButton>(window, "batchCancelButton")->click();
+    require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Cancelling..."),
+        "Batch did not enter Cancelling before the modal failed-terminal race");
+
+    bool failedObserved = false;
+    bool answered = false;
+    bool recoveryObserved = false;
+    bool unexpectedTerminal = false;
+    bool outputRemoved = false;
+    QTimer failureTimer;
+    failureTimer.setInterval(0);
+    QObject::connect(&failureTimer, &QTimer::timeout, &window, [&] {
+        if (!outputRemoved) {
+            removeBatchOutputDirectory(outputDirectory, outputPath);
+            outputRemoved = true;
+            failureTimer.stop();
+        }
+    });
+    QTimer pollTimer;
+    pollTimer.setInterval(10);
+    QObject::connect(&pollTimer, &QTimer::timeout, &window, [&] {
+        if (!failedObserved &&
+            widget<QLabel>(window, "batchStatusLabel")->text().startsWith(QStringLiteral("Failed"))) {
+            failedObserved = true;
+        }
+        if (!failedObserved &&
+            widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Cancelled")) {
+            unexpectedTerminal = true;
+        }
+        if ((failedObserved || unexpectedTerminal) && !answered) {
+            answered = tryAnswerMessageBox(failedObserved ? QMessageBox::Yes : QMessageBox::No);
+        }
+        if (answered && !recoveryObserved && messageBoxHasButton(QStringLiteral("Keep open"))) {
+            recoveryObserved = true;
+            tryClickMessageBoxButton(QStringLiteral("Keep open"));
+        }
+    });
+    failureTimer.start();
+    pollTimer.start();
+    QTimer safetyTimer;
+    safetyTimer.setSingleShot(true);
+    QObject::connect(&safetyTimer, &QTimer::timeout, &window, [&] {
+        if (!answered) {
+            answered = tryAnswerMessageBox(QMessageBox::No);
+            pollTimer.stop();
+        }
+    });
+    safetyTimer.start(10'000);
+    window.close();
+    failureTimer.stop();
+    pollTimer.stop();
+    safetyTimer.stop();
+
+    require(failedObserved && !unexpectedTerminal && answered && recoveryObserved,
+        "BatchCancelling close dialog was not held open until Failed terminalization");
+    require(window.isVisible(),
+        "failed BatchCancelling terminalization silently closed the window");
+    require(window.isVisible() && widget<QPushButton>(window, "batchSaveAsButton")->isEnabled(),
+        "failed BatchCancelling terminalization did not present recoverable failed state");
+    clearScenario();
+}
 void testBusyCloseNo()
 {
     setScenario("wait-before-measurement");
@@ -384,6 +1170,28 @@ int main(int argc, char* argv[])
         testCancelAndReuse();
         std::cout << "CASE failed/reuse\n";
         testFailedAndReuse();
+        std::cout << "CASE single-json-export\n";
+        testSingleJsonExport();
+        std::cout << "CASE batch-gui\n";
+        testBatchGui();
+        std::cout << "CASE batch-run-cancel\n";
+        testBatchRunAndCancel();
+        std::cout << "CASE batch-save-as-recovery\n";
+        testBatchSaveAsRecovery();
+        std::cout << "CASE batch-busy-close-yes\n";
+        testBatchBusyCloseYes();
+        std::cout << "CASE batch-close-dialog-after-terminalization\n";
+        testBatchCloseDialogAfterTerminalization();
+        std::cout << "CASE batch-close-persistence-failure-recovery\n";
+        testBatchClosePersistenceFailureRecovery();
+        std::cout << "CASE batch-close-persistence-failure-retry\n";
+        testBatchClosePersistenceFailureRecoveryRetry();
+        std::cout << "CASE batch-close-persistence-failure-exit\n";
+        testBatchClosePersistenceFailureExitWithoutSaving();
+        std::cout << "CASE batch-cancelling-close-yes\n";
+        testBatchCancellingCloseYes();
+        std::cout << "CASE batch-cancelling-close-dialog-after-failed-terminalization\n";
+        testBatchCancellingCloseDialogAfterFailedTerminalization();
         std::cout << "CASE busy-close-no\n";
         testBusyCloseNo();
         std::cout << "CASE busy-close-yes\n";

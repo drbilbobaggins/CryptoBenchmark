@@ -2,6 +2,10 @@
 
 #include "ui_MainWindow.h"
 
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QListWidget>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QSignalBlocker>
 #include <QTimer>
@@ -15,6 +19,10 @@
 #include <cryptobench/core/ConfigValidator.h>
 #include <cryptobench/core/InputCapability.h>
 #include <cryptobench/core/ConfigValidation.h>
+#include <cryptobench/application/AtomicFileWriter.h>
+#include <cryptobench/application/JsonResultExportService.h>
+#include <cryptobench/application/SingleResultDocumentService.h>
+#include <cryptobench/application/BatchInputParser.h>
 
 namespace {
 
@@ -186,16 +194,27 @@ constexpr std::array<BenchmarkOperation, 10> kOperations = {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
-    , controller_(std::make_unique<cryptobench::application::BenchmarkController>())
+    , singleController_(std::make_unique<cryptobench::application::BenchmarkController>())
+    , batchController_(std::make_unique<cryptobench::application::BatchController>())
 {
     ui->setupUi(this);
 
-    connect(controller_.get(), &cryptobench::application::BenchmarkController::progressChanged,
+    connect(singleController_.get(), &cryptobench::application::BenchmarkController::progressChanged,
             this, &MainWindow::onProgressChanged);
-    connect(controller_.get(), &cryptobench::application::BenchmarkController::benchmarkFinished,
+    connect(singleController_.get(), &cryptobench::application::BenchmarkController::benchmarkFinished,
             this, &MainWindow::onBenchmarkFinished);
+    connect(batchController_.get(), &cryptobench::application::BatchController::progressChanged,
+            this, &MainWindow::onBatchProgressChanged);
+    connect(batchController_.get(), &cryptobench::application::BatchController::batchFinished,
+            this, &MainWindow::onBatchFinished);
     connect(ui->runButton, &QPushButton::clicked, this, &MainWindow::startBenchmark);
     connect(ui->cancelButton, &QPushButton::clicked, this, &MainWindow::requestCancel);
+    connect(ui->batchRunButton, &QPushButton::clicked, this, &MainWindow::startBatch);
+    connect(ui->batchCancelButton, &QPushButton::clicked, this, &MainWindow::requestBatchCancel);
+    connect(ui->batchSaveAsButton, &QPushButton::clicked, this, &MainWindow::saveBatchAs);
+    connect(ui->exportJsonButton, &QPushButton::clicked, this, &MainWindow::exportSingleResult);
+    connect(ui->batchInputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchInput);
+    connect(ui->batchOutputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchOutput);
 
     connect(ui->categoryComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
         const auto category = static_cast<PrimitiveCategory>(ui->categoryComboBox->currentData().toInt());
@@ -240,11 +259,18 @@ MainWindow::MainWindow(QWidget* parent)
     ui->runsSpinBox->setValue(3);
     ui->runsSpinBox->setEnabled(true);
     populateCategories();
+    applyPresentationState();
+    updateBatchPresentation();
 }
 
 MainWindow::~MainWindow()
 {
     delete ui;
+}
+
+void MainWindow::setDialogCallbacks(DialogCallbacks callbacks)
+{
+    dialogCallbacks_ = std::move(callbacks);
 }
 
 void MainWindow::populateCategories()
@@ -397,15 +423,15 @@ void MainWindow::updateInputControls()
     cryptobench::core::ValidationResult validation;
     const auto config = buildBenchmarkConfig(validation);
     if (config.has_value()) {
-        if (!controller_->isBusy()) {
+        if (!singleController_->isBusy() && presentationState_ == PresentationState::Idle) {
             ui->statusLabel->setText(QStringLiteral("Configuration valid; ready to run."));
         }
     } else if (!validation.errors.empty()) {
-        if (!controller_->isBusy()) {
+        if (!singleController_->isBusy() && presentationState_ == PresentationState::Idle) {
             ui->statusLabel->setText(QStringLiteral("Configuration invalid: %1")
                 .arg(QString::fromStdString(validation.errors.front().technicalMessage)));
         }
-    } else if (!controller_->isBusy()) {
+    } else if (!singleController_->isBusy() && presentationState_ == PresentationState::Idle) {
         ui->statusLabel->setText(QStringLiteral("Select a valid benchmark configuration."));
     }
     updateRunAvailability();
@@ -426,18 +452,114 @@ void MainWindow::setConfigurationEnabled(bool enabled)
 
 void MainWindow::updateRunAvailability()
 {
-    if (controller_->isBusy()) {
-        ui->runButton->setEnabled(false);
+    cryptobench::core::ValidationResult validation;
+    ui->runButton->setEnabled(
+        presentationState_ == PresentationState::Idle &&
+        buildBenchmarkConfig(validation).has_value());
+}
+
+void MainWindow::applyPresentationState()
+{
+    const bool idle = presentationState_ == PresentationState::Idle;
+    const bool singleRunning = presentationState_ == PresentationState::SingleRunning;
+
+    setConfigurationEnabled(idle);
+    ui->cancelButton->setEnabled(singleRunning);
+    ui->exportJsonButton->setEnabled(idle && exportableSingleResult_.has_value());
+    updateRunAvailability();
+    updateBatchPresentation();
+}
+
+void MainWindow::updateBatchPresentation()
+{
+    const bool idle = presentationState_ == PresentationState::Idle;
+    const bool batchRunning = presentationState_ == PresentationState::BatchRunning;
+    ui->batchInputPathLineEdit->setEnabled(idle);
+    ui->batchInputBrowseButton->setEnabled(idle);
+    ui->batchOutputPathLineEdit->setEnabled(idle);
+    ui->batchOutputBrowseButton->setEnabled(idle);
+    ui->batchRunButton->setEnabled(
+        idle && batchDefinition_.has_value() && !batchOutputTarget_.isEmpty());
+    ui->batchCancelButton->setEnabled(batchRunning);
+    ui->batchSaveAsButton->setEnabled(
+        idle && !batchController_->isBusy() &&
+        batchController_->state().status == cryptobench::application::BatchStatus::Failed);
+}
+
+void MainWindow::displayBatchIssues(
+    const std::vector<cryptobench::application::BatchInputIssue>& issues)
+{
+    ui->batchValidationIssuesList->clear();
+    for (const auto& issue : issues) {
+        const QString path = QString::fromStdString(issue.path);
+        const QString message = QString::fromStdString(issue.technicalMessage);
+        const QString context = path.isEmpty() ? QStringLiteral("(document)") : path;
+        ui->batchValidationIssuesList->addItem(context + QStringLiteral(": ") + message);
+    }
+}
+
+void MainWindow::browseBatchInput()
+{
+    const auto chooseOpenTarget = dialogCallbacks_.chooseOpenTarget
+        ? dialogCallbacks_.chooseOpenTarget
+        : [this](QWidget*) {
+              return QFileDialog::getOpenFileName(
+                  this, QStringLiteral("Select batch input"), {}, QStringLiteral("JSON files (*.json);;All files (*)"));
+          };
+    const QString target = chooseOpenTarget(this);
+    if (target.isEmpty()) return;
+
+    const auto result = cryptobench::application::BatchInputParser{}.parseFile(target);
+    batchDefinition_ = result.definition;
+    if (batchDefinition_.has_value() && result.issues.empty()) {
+        ui->batchInputPathLineEdit->setText(target);
+        ui->batchValidationSummaryLabel->setText(
+            QStringLiteral("Valid batch - %1 entries").arg(batchDefinition_->entries().size()));
+        displayBatchIssues({});
+        updateBatchPresentation();
         return;
     }
 
-    cryptobench::core::ValidationResult validation;
-    ui->runButton->setEnabled(buildBenchmarkConfig(validation).has_value());
+    batchDefinition_.reset();
+    ui->batchInputPathLineEdit->setText(target);
+    ui->batchValidationSummaryLabel->setText(QStringLiteral("Invalid batch"));
+    displayBatchIssues(result.issues);
+    updateBatchPresentation();
+}
+
+void MainWindow::browseBatchOutput()
+{
+    const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
+        ? dialogCallbacks_.chooseSaveTarget
+        : [this](QWidget*) {
+              return QFileDialog::getSaveFileName(
+                  this, QStringLiteral("Select batch output"), {}, QStringLiteral("JSON files (*.json);;All files (*)"));
+          };
+    const QString target = chooseSaveTarget(this);
+    if (target.isEmpty()) return;
+
+    if (QFileInfo::exists(target)) {
+        const auto confirmOverwrite = dialogCallbacks_.confirmOverwrite
+            ? dialogCallbacks_.confirmOverwrite
+            : [this](QWidget*, const QString& path) {
+                  return QMessageBox::question(
+                             this, QStringLiteral("Replace existing file"),
+                             QStringLiteral("The target already exists. Replace it?\n%1").arg(path),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                      == QMessageBox::Yes;
+              };
+        if (!confirmOverwrite(this, target)) return;
+    }
+
+    batchOutputTarget_ = target;
+    ui->batchOutputPathLineEdit->setText(batchOutputTarget_);
+    updateBatchPresentation();
 }
 
 void MainWindow::startBenchmark()
 {
-    if (controller_->isBusy()) return;
+    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
+        batchController_->isBusy()) return;
 
     cryptobench::core::ValidationResult validation;
     const auto config = buildBenchmarkConfig(validation);
@@ -446,42 +568,76 @@ void MainWindow::startBenchmark()
         return;
     }
 
+    exportableSingleResult_.reset();
     clearDisplayedResults(ui);
     ui->resultsPlaceholderLabel->setText(QStringLiteral("No benchmark results available."));
-    setConfigurationEnabled(false);
-    ui->runButton->setEnabled(false);
+    presentationState_ = PresentationState::SingleRunning;
+    applyPresentationState();
     ui->statusLabel->setText(QStringLiteral("Preparing"));
 
     try {
-        controller_->start(*config);
+        singleController_->start(*config);
     } catch (const std::exception& error) {
-        setConfigurationEnabled(true);
-        ui->cancelButton->setEnabled(false);
+        presentationState_ = PresentationState::Idle;
         ui->statusLabel->setText(QStringLiteral("Benchmark failed to start: %1")
             .arg(QString::fromUtf8(error.what())));
-        updateRunAvailability();
+        applyPresentationState();
         return;
     }
 
-    if (controller_->isBusy()) {
-        ui->cancelButton->setEnabled(true);
-    } else {
-        setConfigurationEnabled(true);
-        ui->cancelButton->setEnabled(false);
-        updateRunAvailability();
+    if (!singleController_->isBusy()) {
+        presentationState_ = PresentationState::Idle;
+        applyPresentationState();
+    }
+}
+
+void MainWindow::startBatch()
+{
+    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
+        batchController_->isBusy() || !batchDefinition_.has_value() || batchOutputTarget_.isEmpty()) {
+        return;
+    }
+
+    presentationState_ = PresentationState::BatchRunning;
+    applyPresentationState();
+    ui->batchStatusLabel->setText(QStringLiteral("Preparing"));
+    ui->batchCurrentEntryLabel->setText(QStringLiteral("-"));
+    ui->batchCurrentBenchmarkLabel->setText(QStringLiteral("-"));
+    ui->batchCurrentProgressLabel->setText(QStringLiteral("-"));
+    ui->batchCompletedCountLabel->setText(QStringLiteral("0"));
+    ui->batchFailedCountLabel->setText(QStringLiteral("0"));
+    ui->batchCancelledCountLabel->setText(QStringLiteral("0"));
+    ui->batchNotStartedCountLabel->setText(QStringLiteral("0"));
+
+    try {
+        batchController_->start(*batchDefinition_, batchOutputTarget_);
+    } catch (const std::exception& error) {
+        presentationState_ = PresentationState::Idle;
+        ui->batchStatusLabel->setText(QStringLiteral("Batch failed to start: %1")
+            .arg(QString::fromUtf8(error.what())));
+        applyPresentationState();
     }
 }
 
 void MainWindow::requestCancel()
 {
-    if (!controller_->isBusy() || cancelRequested_) return;
+    if (presentationState_ != PresentationState::SingleRunning || cancelRequested_) return;
 
     cancelRequested_ = true;
-    setConfigurationEnabled(false);
-    ui->runButton->setEnabled(false);
-    ui->cancelButton->setEnabled(false);
+    presentationState_ = PresentationState::SingleCancelling;
+    applyPresentationState();
     ui->statusLabel->setText(QStringLiteral("Cancelling..."));
-    controller_->requestCancel();
+    singleController_->requestCancel();
+}
+
+void MainWindow::requestBatchCancel()
+{
+    if (presentationState_ != PresentationState::BatchRunning || !batchController_->isBusy()) return;
+
+    presentationState_ = PresentationState::BatchCancelling;
+    applyPresentationState();
+    ui->batchStatusLabel->setText(QStringLiteral("Cancelling..."));
+    batchController_->requestCancel();
 }
 
 void MainWindow::onProgressChanged(const cryptobench::core::ProgressInfo& progress)
@@ -499,14 +655,17 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
     ui->cancelButton->setEnabled(false);
     switch (result.status) {
         case cryptobench::core::BenchmarkStatus::Completed:
+            exportableSingleResult_ = result;
             ui->statusLabel->setText(QStringLiteral("Completed"));
             displayCompletedResults(ui, result);
             break;
         case cryptobench::core::BenchmarkStatus::Cancelled:
+            exportableSingleResult_.reset();
             ui->statusLabel->setText(QStringLiteral("Benchmark cancelled"));
             clearDisplayedResults(ui);
             break;
         case cryptobench::core::BenchmarkStatus::Failed:
+            exportableSingleResult_.reset();
             if (result.error && !result.error->technicalMessage.empty()) {
                 ui->statusLabel->setText(QStringLiteral("Benchmark failed: %1")
                     .arg(QString::fromStdString(result.error->technicalMessage)));
@@ -518,11 +677,14 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
     }
 
     if (closeAfterTerminal) {
+        presentationState_ = PresentationState::Idle;
+        applyPresentationState();
         setConfigurationEnabled(false);
         ui->runButton->setEnabled(false);
         ui->cancelButton->setEnabled(false);
+        ui->exportJsonButton->setEnabled(false);
         QTimer::singleShot(0, this, [this]() {
-            if (!controller_->isBusy()) {
+            if (!singleController_->isBusy()) {
                 closeAfterTerminal_ = false;
                 close();
             }
@@ -530,12 +692,274 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
         return;
     }
 
-    updateRunAvailability();
+    presentationState_ = PresentationState::Idle;
+    applyPresentationState();
+}
+
+void MainWindow::onBatchProgressChanged(const cryptobench::application::BatchProgress& progress)
+{
+    if (progress.persistenceInProgress) {
+        ui->batchStatusLabel->setText(QStringLiteral("Saving results..."));
+    } else if (presentationState_ == PresentationState::BatchCancelling) {
+        ui->batchStatusLabel->setText(QStringLiteral("Cancelling..."));
+    } else {
+        ui->batchStatusLabel->setText(QStringLiteral("Running"));
+    }
+
+    ui->batchCurrentEntryLabel->setText(progress.currentEntryIndex
+        ? QStringLiteral("%1 / %2").arg(*progress.currentEntryIndex).arg(progress.totalEntries)
+        : QStringLiteral("-"));
+    ui->batchCompletedCountLabel->setText(QString::number(progress.completedCount));
+    ui->batchFailedCountLabel->setText(QString::number(progress.failedCount));
+    ui->batchCancelledCountLabel->setText(QString::number(progress.cancelledCount));
+    ui->batchNotStartedCountLabel->setText(QString::number(progress.notStartedCount));
+
+    if (progress.currentProfile && progress.currentOperation) {
+        const auto* profile = cryptobench::core::AlgorithmRegistry::find(*progress.currentProfile);
+        ui->batchCurrentBenchmarkLabel->setText(profile == nullptr
+            ? QStringLiteral("-")
+            : QString::fromUtf8(profile->displayName.data(),
+                                static_cast<int>(profile->displayName.size())) +
+                  QStringLiteral(" - ") + operationLabel(*progress.currentOperation));
+    } else {
+        ui->batchCurrentBenchmarkLabel->setText(QStringLiteral("-"));
+    }
+    ui->batchCurrentProgressLabel->setText(progress.currentProgress
+        ? phaseLabel(*progress.currentProgress)
+        : QStringLiteral("-"));
+}
+
+void MainWindow::onBatchFinished(const cryptobench::application::BatchExecutionState& state)
+{
+    const auto finalProgress = batchController_->progress();
+    onBatchProgressChanged(finalProgress);
+    QString terminalStatus;
+
+    switch (state.status) {
+    case cryptobench::application::BatchStatus::Completed:
+        terminalStatus = QStringLiteral("Completed");
+        break;
+    case cryptobench::application::BatchStatus::CompletedWithFailures:
+        terminalStatus = QStringLiteral("Completed with failures");
+        break;
+    case cryptobench::application::BatchStatus::Cancelled:
+        terminalStatus = QStringLiteral("Cancelled");
+        break;
+    case cryptobench::application::BatchStatus::Failed:
+        if (state.batchError && !state.batchError->technicalMessage.empty()) {
+            terminalStatus = QStringLiteral("Failed: %1")
+                .arg(QString::fromStdString(state.batchError->technicalMessage));
+        } else {
+            terminalStatus = QStringLiteral("Failed");
+        }
+        break;
+    case cryptobench::application::BatchStatus::InProgress:
+        return;
+    }
+
+    presentationState_ = PresentationState::Idle;
+    applyPresentationState();
+    ui->batchStatusLabel->setText(terminalStatus);
+
+    if (closeAfterBatchTerminal_ && !batchController_->isBusy()) {
+        handleBatchCloseAfterTerminal();
+    }
+}
+
+void MainWindow::handleBatchCloseAfterTerminal()
+{
+    if (!closeAfterBatchTerminal_ || batchController_->isBusy() ||
+        presentationState_ != PresentationState::Idle) {
+        return;
+    }
+
+    if (batchController_->state().status != cryptobench::application::BatchStatus::Failed) {
+        closeAfterBatchTerminal_ = false;
+        QTimer::singleShot(0, this, [this]() {
+            if (!batchController_->isBusy()) close();
+        });
+        return;
+    }
+
+    QMessageBox recoveryDialog(this);
+    recoveryDialog.setWindowTitle(QStringLiteral("Batch persistence failed"));
+    recoveryDialog.setText(QStringLiteral("The final Batch state could not be persisted."));
+    recoveryDialog.setInformativeText(QStringLiteral("Choose how to finish closing the application."));
+    auto* saveButton = recoveryDialog.addButton(QStringLiteral("Save As..."), QMessageBox::AcceptRole);
+    auto* exitButton = recoveryDialog.addButton(QStringLiteral("Exit without saving"), QMessageBox::DestructiveRole);
+    auto* keepButton = recoveryDialog.addButton(QStringLiteral("Keep open"), QMessageBox::RejectRole);
+    recoveryDialog.exec();
+
+    if (recoveryDialog.clickedButton() == exitButton) {
+        closeAfterBatchTerminal_ = false;
+        close();
+        return;
+    }
+    if (recoveryDialog.clickedButton() == saveButton && saveBatchAs()) {
+        closeAfterBatchTerminal_ = false;
+        QTimer::singleShot(0, this, [this]() {
+            if (!batchController_->isBusy()) close();
+        });
+        return;
+    }
+
+    Q_UNUSED(keepButton);
+    closeAfterBatchTerminal_ = false;
+}
+
+bool MainWindow::saveBatchAs()
+{
+    if (presentationState_ != PresentationState::Idle || batchController_->isBusy() ||
+        batchController_->state().status != cryptobench::application::BatchStatus::Failed) {
+        return false;
+    }
+
+    const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
+        ? dialogCallbacks_.chooseSaveTarget
+        : [this](QWidget*) {
+              return QFileDialog::getSaveFileName(
+                  this, QStringLiteral("Save batch result as"), {},
+                  QStringLiteral("JSON files (*.json);;All files (*)"));
+          };
+    const QString target = chooseSaveTarget(this);
+    if (target.isEmpty()) return false;
+
+    if (QFileInfo::exists(target)) {
+        const auto confirmOverwrite = dialogCallbacks_.confirmOverwrite
+            ? dialogCallbacks_.confirmOverwrite
+            : [this](QWidget*, const QString& path) {
+                  return QMessageBox::question(
+                             this, QStringLiteral("Replace existing file"),
+                             QStringLiteral("The target already exists. Replace it?\n%1").arg(path),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                      == QMessageBox::Yes;
+              };
+        if (!confirmOverwrite(this, target)) return false;
+    }
+
+    cryptobench::application::WriteResult writeResult;
+    try {
+        writeResult = batchController_->saveAs(target);
+    } catch (const std::exception& error) {
+        writeResult = {false, QString::fromUtf8(error.what())};
+    }
+
+    if (!writeResult.success) {
+        const QString message = writeResult.technicalMessage.isEmpty()
+            ? QStringLiteral("Batch Save As failed.")
+            : writeResult.technicalMessage;
+        if (dialogCallbacks_.reportMessage) {
+            dialogCallbacks_.reportMessage(this, QStringLiteral("Batch Save As failed"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("Batch Save As failed"), message);
+        }
+        return false;
+    }
+
+    if (dialogCallbacks_.reportMessage) {
+        dialogCallbacks_.reportMessage(this, QStringLiteral("Batch Save As complete"),
+                                       QStringLiteral("The Batch result was saved successfully."));
+    } else {
+        QMessageBox::information(this, QStringLiteral("Batch Save As complete"),
+                                 QStringLiteral("The Batch result was saved successfully."));
+    }
+    return true;
+}
+
+void MainWindow::exportSingleResult()
+{
+    if (presentationState_ != PresentationState::Idle || !exportableSingleResult_.has_value()) return;
+
+    const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
+        ? dialogCallbacks_.chooseSaveTarget
+        : [this](QWidget*) {
+              return QFileDialog::getSaveFileName(
+                  this, QStringLiteral("Export JSON"), {}, QStringLiteral("JSON files (*.json);;All files (*)"));
+          };
+    const QString target = chooseSaveTarget(this);
+    if (target.isEmpty()) return;
+
+    if (QFileInfo::exists(target)) {
+        const auto confirmOverwrite = dialogCallbacks_.confirmOverwrite
+            ? dialogCallbacks_.confirmOverwrite
+            : [this](QWidget*, const QString& path) {
+                  return QMessageBox::question(
+                             this, QStringLiteral("Replace existing file"),
+                             QStringLiteral("The target already exists. Replace it?\n%1").arg(path),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                      == QMessageBox::Yes;
+              };
+        if (!confirmOverwrite(this, target)) return;
+    }
+
+    try {
+        const auto document = cryptobench::application::SingleResultDocumentService{}.create(
+            *exportableSingleResult_);
+        const auto json = cryptobench::application::JsonResultExportService{}.serialize(document);
+        const auto writeResult = cryptobench::application::AtomicFileWriter{}.writeAtomically(target, json);
+        if (!writeResult.success) {
+            if (dialogCallbacks_.reportMessage) {
+                dialogCallbacks_.reportMessage(this, QStringLiteral("Export failed"), writeResult.technicalMessage);
+            } else {
+                QMessageBox::warning(this, QStringLiteral("Export failed"), writeResult.technicalMessage);
+            }
+            return;
+        }
+    } catch (const std::exception& error) {
+        const QString message = QString::fromUtf8(error.what());
+        if (dialogCallbacks_.reportMessage) {
+            dialogCallbacks_.reportMessage(this, QStringLiteral("Export failed"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("Export failed"), message);
+        }
+        return;
+    }
+
+    if (dialogCallbacks_.reportMessage) {
+        dialogCallbacks_.reportMessage(this, QStringLiteral("Export complete"),
+                                       QStringLiteral("JSON was exported successfully."));
+    } else {
+        QMessageBox::information(this, QStringLiteral("Export complete"),
+                                 QStringLiteral("JSON was exported successfully."));
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (!controller_->isBusy()) {
+    if (presentationState_ == PresentationState::BatchRunning) {
+        const auto decision = QMessageBox::question(
+            this, QStringLiteral("Batch running"),
+            QStringLiteral("Batch is running. Cancel and exit?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (decision != QMessageBox::Yes) {
+            event->ignore();
+            return;
+        }
+
+        event->ignore();
+        closeAfterBatchTerminal_ = true;
+        if (batchController_->isBusy()) {
+            requestBatchCancel();
+        } else {
+            handleBatchCloseAfterTerminal();
+        }
+        return;
+    }
+
+    if (presentationState_ == PresentationState::BatchCancelling) {
+        const auto decision = QMessageBox::question(
+            this, QStringLiteral("Batch cancelling"),
+            QStringLiteral("Exit after Batch cancellation and cleanup?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        closeAfterBatchTerminal_ = decision == QMessageBox::Yes;
+        if (closeAfterBatchTerminal_ && !batchController_->isBusy()) {
+            handleBatchCloseAfterTerminal();
+        }
+        event->ignore();
+        return;
+    }
+
+    if (presentationState_ == PresentationState::Idle && !singleController_->isBusy()) {
         event->accept();
         return;
     }
@@ -552,7 +976,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     }
 
     event->ignore();
-    if (!controller_->isBusy()) {
+    if (!singleController_->isBusy()) {
         event->accept();
         return;
     }
