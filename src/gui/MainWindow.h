@@ -8,6 +8,7 @@
 #include <optional>
 
 #include <cryptobench/application/BenchmarkController.h>
+#include <cryptobench/application/BatchInputParser.h>
 #include <cryptobench/core/AlgorithmProfileId.h>
 #include <cryptobench/core/BenchmarkConfig.h>
 #include <cryptobench/core/BenchmarkResult.h>
@@ -27,6 +28,7 @@ class MainWindow final : public QMainWindow
 
 public:
     struct DialogCallbacks {
+        std::function<QString(QWidget*)> chooseOpenTarget;
         std::function<QString(QWidget*)> chooseSaveTarget;
         std::function<bool(QWidget*, const QString&)> confirmOverwrite;
         std::function<void(QWidget*, const QString&, const QString&)> reportMessage;
@@ -56,6 +58,10 @@ private:
     void startBenchmark();
     void requestCancel();
     void exportSingleResult();
+    void browseBatchInput();
+    void browseBatchOutput();
+    void updateBatchPresentation();
+    void displayBatchIssues(const std::vector<cryptobench::application::BatchInputIssue>& issues);
     void onProgressChanged(const cryptobench::core::ProgressInfo& progress);
     void onBenchmarkFinished(const cryptobench::core::BenchmarkResult& result);
     std::optional<cryptobench::core::BenchmarkConfig> buildBenchmarkConfig(
@@ -66,6 +72,8 @@ private:
     std::unique_ptr<cryptobench::application::BenchmarkController> controller_;
     PresentationState presentationState_ = PresentationState::Idle;
     std::optional<cryptobench::core::BenchmarkResult> exportableSingleResult_;
+    std::optional<cryptobench::application::BatchDefinition> batchDefinition_;
+    QString batchOutputTarget_;
     DialogCallbacks dialogCallbacks_;
     bool cancelRequested_ = false;
     bool closeAfterTerminal_ = false;

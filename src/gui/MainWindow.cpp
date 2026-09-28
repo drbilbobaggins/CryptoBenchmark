@@ -4,6 +4,8 @@
 
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QListWidget>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QSignalBlocker>
 #include <QTimer>
@@ -20,6 +22,7 @@
 #include <cryptobench/application/AtomicFileWriter.h>
 #include <cryptobench/application/JsonResultExportService.h>
 #include <cryptobench/application/SingleResultDocumentService.h>
+#include <cryptobench/application/BatchInputParser.h>
 
 namespace {
 
@@ -202,6 +205,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->runButton, &QPushButton::clicked, this, &MainWindow::startBenchmark);
     connect(ui->cancelButton, &QPushButton::clicked, this, &MainWindow::requestCancel);
     connect(ui->exportJsonButton, &QPushButton::clicked, this, &MainWindow::exportSingleResult);
+    connect(ui->batchInputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchInput);
+    connect(ui->batchOutputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchOutput);
 
     connect(ui->categoryComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
         const auto category = static_cast<PrimitiveCategory>(ui->categoryComboBox->currentData().toInt());
@@ -247,6 +252,7 @@ MainWindow::MainWindow(QWidget* parent)
     ui->runsSpinBox->setEnabled(true);
     populateCategories();
     applyPresentationState();
+    updateBatchPresentation();
 }
 
 MainWindow::~MainWindow()
@@ -453,6 +459,85 @@ void MainWindow::applyPresentationState()
     ui->cancelButton->setEnabled(singleRunning);
     ui->exportJsonButton->setEnabled(idle && exportableSingleResult_.has_value());
     updateRunAvailability();
+    updateBatchPresentation();
+}
+
+void MainWindow::updateBatchPresentation()
+{
+    const bool idle = presentationState_ == PresentationState::Idle;
+    ui->batchInputPathLineEdit->setEnabled(idle);
+    ui->batchInputBrowseButton->setEnabled(idle);
+    ui->batchOutputPathLineEdit->setEnabled(false);
+    ui->batchOutputBrowseButton->setEnabled(idle);
+    ui->batchRunButton->setEnabled(false);
+    ui->batchCancelButton->setEnabled(false);
+}
+
+void MainWindow::displayBatchIssues(
+    const std::vector<cryptobench::application::BatchInputIssue>& issues)
+{
+    ui->batchValidationIssuesList->clear();
+    for (const auto& issue : issues) {
+        const QString path = QString::fromStdString(issue.path);
+        const QString message = QString::fromStdString(issue.technicalMessage);
+        const QString context = path.isEmpty() ? QStringLiteral("(document)") : path;
+        ui->batchValidationIssuesList->addItem(context + QStringLiteral(": ") + message);
+    }
+}
+
+void MainWindow::browseBatchInput()
+{
+    const auto chooseOpenTarget = dialogCallbacks_.chooseOpenTarget
+        ? dialogCallbacks_.chooseOpenTarget
+        : [this](QWidget*) {
+              return QFileDialog::getOpenFileName(
+                  this, QStringLiteral("Select batch input"), {}, QStringLiteral("JSON files (*.json);;All files (*)"));
+          };
+    const QString target = chooseOpenTarget(this);
+    if (target.isEmpty()) return;
+
+    const auto result = cryptobench::application::BatchInputParser{}.parseFile(target);
+    batchDefinition_ = result.definition;
+    if (batchDefinition_.has_value() && result.issues.empty()) {
+        ui->batchInputPathLineEdit->setText(target);
+        ui->batchValidationSummaryLabel->setText(
+            QStringLiteral("Valid batch - %1 entries").arg(batchDefinition_->entries().size()));
+        displayBatchIssues({});
+        return;
+    }
+
+    batchDefinition_.reset();
+    ui->batchInputPathLineEdit->setText(target);
+    ui->batchValidationSummaryLabel->setText(QStringLiteral("Invalid batch"));
+    displayBatchIssues(result.issues);
+}
+
+void MainWindow::browseBatchOutput()
+{
+    const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
+        ? dialogCallbacks_.chooseSaveTarget
+        : [this](QWidget*) {
+              return QFileDialog::getSaveFileName(
+                  this, QStringLiteral("Select batch output"), {}, QStringLiteral("JSON files (*.json);;All files (*)"));
+          };
+    const QString target = chooseSaveTarget(this);
+    if (target.isEmpty()) return;
+
+    if (QFileInfo::exists(target)) {
+        const auto confirmOverwrite = dialogCallbacks_.confirmOverwrite
+            ? dialogCallbacks_.confirmOverwrite
+            : [this](QWidget*, const QString& path) {
+                  return QMessageBox::question(
+                             this, QStringLiteral("Replace existing file"),
+                             QStringLiteral("The target already exists. Replace it?\n%1").arg(path),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                      == QMessageBox::Yes;
+              };
+        if (!confirmOverwrite(this, target)) return;
+    }
+
+    batchOutputTarget_ = target;
+    ui->batchOutputPathLineEdit->setText(batchOutputTarget_);
 }
 
 void MainWindow::startBenchmark()

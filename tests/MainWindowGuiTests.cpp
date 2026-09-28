@@ -4,13 +4,17 @@
 #include <QComboBox>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QTimer>
 #include <QTemporaryDir>
 
@@ -357,6 +361,103 @@ void testSingleJsonExport()
     clearScenario();
 }
 
+    QByteArray validBatchFixture()
+    {
+        return R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[{"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}}]})";
+    }
+
+    QByteArray invalidBatchFixture()
+    {
+        return R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[{"profileId":"unknown-profile","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}}]})";
+    }
+
+    void testBatchGui()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "temporary batch directory was not created");
+        const auto validPath = directory.filePath("valid-batch.json");
+        const auto invalidPath = directory.filePath("invalid-batch.json");
+        writeFile(validPath, validBatchFixture());
+        writeFile(invalidPath, invalidBatchFixture());
+
+        MainWindow window;
+        window.show();
+        auto* tabs = widget<QTabWidget>(window, "workflowTabWidget");
+        require(tabs->count() == 2 && tabs->tabText(0) == QStringLiteral("Single Benchmark") &&
+            tabs->tabText(1) == QStringLiteral("Batch"),
+            "single and batch workflows were not separated into the expected tabs");
+        require(!widget<QPushButton>(window, "batchRunButton")->isEnabled() &&
+            !widget<QPushButton>(window, "batchCancelButton")->isEnabled(),
+            "batch execution controls were enabled before M13-C");
+        require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Not running.") &&
+            widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("-"),
+            "batch status placeholders were not initialized");
+
+        QString selectedInput;
+        QString selectedOutput;
+        bool overwrite = false;
+        MainWindow::DialogCallbacks callbacks;
+        callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+        callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+        callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
+        window.setDialogCallbacks(std::move(callbacks));
+
+        auto* inputPath = widget<QLineEdit>(window, "batchInputPathLineEdit");
+        auto* validationSummary = widget<QLabel>(window, "batchValidationSummaryLabel");
+        auto* issues = widget<QListWidget>(window, "batchValidationIssuesList");
+        auto* inputBrowse = widget<QPushButton>(window, "batchInputBrowseButton");
+        auto* outputPath = widget<QLineEdit>(window, "batchOutputPathLineEdit");
+        auto* outputBrowse = widget<QPushButton>(window, "batchOutputBrowseButton");
+
+        inputBrowse->click();
+        require(inputPath->text().isEmpty() && validationSummary->text() == QStringLiteral("No batch input selected."),
+            "cancelling input browse changed batch state");
+
+        selectedInput = validPath;
+        inputBrowse->click();
+        require(inputPath->text() == validPath &&
+            validationSummary->text() == QStringLiteral("Valid batch - 1 entries") && issues->count() == 0,
+            "valid batch input was not parsed and displayed correctly");
+
+        selectedInput.clear();
+        inputBrowse->click();
+        require(inputPath->text() == validPath && validationSummary->text() == QStringLiteral("Valid batch - 1 entries"),
+            "cancelled input browse discarded the accepted batch state");
+
+        selectedInput = invalidPath;
+        inputBrowse->click();
+        require(inputPath->text() == invalidPath && validationSummary->text() == QStringLiteral("Invalid batch") &&
+            issues->count() > 0 && issues->item(0)->text().contains(QStringLiteral("/entries/0/profileId")) &&
+            issues->item(0)->text().contains(QStringLiteral("unknown")),
+            "invalid batch parser issue was not displayed with path and message");
+        require(!widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+            "invalid batch input left a batch action enabled");
+
+        const auto acceptedOutput = directory.filePath("accepted-output.json");
+        selectedOutput = acceptedOutput;
+        outputBrowse->click();
+        require(outputPath->text() == acceptedOutput && !QFileInfo::exists(acceptedOutput),
+            "non-existing output target was not accepted without writing");
+
+        selectedOutput.clear();
+        outputBrowse->click();
+        require(outputPath->text() == acceptedOutput, "cancelling output browse changed the accepted target");
+
+        const auto existingOutput = directory.filePath("existing-output.json");
+        const QByteArray original = "existing output";
+        writeFile(existingOutput, original);
+        selectedOutput = existingOutput;
+        overwrite = false;
+        outputBrowse->click();
+        require(outputPath->text() == acceptedOutput && readFile(existingOutput) == original,
+            "declined output overwrite changed target selection or file contents");
+
+        overwrite = true;
+        outputBrowse->click();
+        require(outputPath->text() == existingOutput && readFile(existingOutput) == original,
+            "approved output target selection wrote or changed the existing file");
+    }
+
 void answerMessageBox(QMessageBox::StandardButton answer)
 {
     for (QWidget* topLevel : QApplication::topLevelWidgets()) {
@@ -473,6 +574,8 @@ int main(int argc, char* argv[])
         testFailedAndReuse();
         std::cout << "CASE single-json-export\n";
         testSingleJsonExport();
+        std::cout << "CASE batch-gui\n";
+        testBatchGui();
         std::cout << "CASE busy-close-no\n";
         testBusyCloseNo();
         std::cout << "CASE busy-close-yes\n";
