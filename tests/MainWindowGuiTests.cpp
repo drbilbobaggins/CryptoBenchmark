@@ -336,6 +336,13 @@ void testSingleJsonExport()
     require(messageTitle == QStringLiteral("Export complete"),
             "successful export did not report completion");
 
+        target.clear();
+        messageTitle.clear();
+        exportButton->click();
+        require(messageTitle.isEmpty() && exportButton->isEnabled(),
+            "cancelling the Single export target changed the retained Completed result");
+
+            target = directory.filePath("single-result.json");
     const QByteArray original = "existing target";
     writeFile(target, original);
     overwrite = false;
@@ -539,6 +546,8 @@ void testBatchRunAndCancel()
         widget<QLabel>(window, "batchCancelledCountLabel")->text() == QStringLiteral("0") &&
         widget<QLabel>(window, "batchNotStartedCountLabel")->text() == QStringLiteral("0"),
         "Batch terminal counters did not reflect controller progress");
+    require(!widget<QPushButton>(window, "batchSaveAsButton")->isEnabled(),
+            "Completed Batch incorrectly enabled Save As");
     const auto payload = readFile(outputPath);
     QJsonParseError parseError;
     const auto document = QJsonDocument::fromJson(payload, &parseError);
@@ -587,7 +596,8 @@ void testBatchRunAndCancel()
     require(widget<QLabel>(cancelWindow, "batchStatusLabel")->text() == QStringLiteral("Cancelled"),
             "Batch cancellation did not reach the Cancelled terminal status");
     require(widget<QPushButton>(cancelWindow, "batchRunButton")->isEnabled() &&
-        widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->isEnabled(),
+        widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->isEnabled() &&
+        !widget<QPushButton>(cancelWindow, "batchSaveAsButton")->isEnabled(),
         "cancelled Batch did not return to Idle presentation");
     clearScenario();
 
@@ -609,7 +619,8 @@ void testBatchRunAndCancel()
                QStringLiteral("Completed with failures");
     }, 30'000);
     require(widget<QLabel>(failureWindow, "batchFailedCountLabel")->text() == QStringLiteral("2") &&
-                widget<QLabel>(failureWindow, "batchCompletedCountLabel")->text() == QStringLiteral("0"),
+                widget<QLabel>(failureWindow, "batchCompletedCountLabel")->text() == QStringLiteral("0") &&
+                !widget<QPushButton>(failureWindow, "batchSaveAsButton")->isEnabled(),
             "CompletedWithFailures did not display controller-supplied failed/completed counters");
     clearScenario();
 }
