@@ -683,6 +683,29 @@ add_dependencies(CryptoBenchmarkWorkerProcessIntegrationTests CryptoBenchmarkWor
 
 add_test(NAME CryptoBenchmarkWorkerProcessIntegrationTests COMMAND CryptoBenchmarkWorkerProcessIntegrationTests)
 
+add_executable(CryptoBenchmarkSamplingOverheadQualification
+	SamplingOverheadQualification.cpp
+)
+
+target_link_libraries(CryptoBenchmarkSamplingOverheadQualification
+	PRIVATE
+		cryptobench_application
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkSamplingOverheadQualification CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkSamplingOverheadQualificationSmoke
+	COMMAND CryptoBenchmarkSamplingOverheadQualification --self-test
+)
+
+set_tests_properties(CryptoBenchmarkSamplingOverheadQualificationSmoke
+	PROPERTIES
+		TIMEOUT 120
+)
+
 add_executable(CryptoBenchmarkPlatformWindowsTests
 	WindowsProcessCpuTimeSourceTests.cpp
 )
