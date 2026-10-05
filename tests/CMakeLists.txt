@@ -30,6 +30,17 @@ target_link_libraries(CryptoBenchmarkMemoryV2FoundationTests
 
 add_test(NAME CryptoBenchmarkMemoryV2FoundationTests COMMAND CryptoBenchmarkMemoryV2FoundationTests)
 
+add_executable(CryptoBenchmarkMemoryV2CalculatorTests
+	MemoryV2CalculatorTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkMemoryV2CalculatorTests
+	PRIVATE
+		cryptobench_core
+)
+
+add_test(NAME CryptoBenchmarkMemoryV2CalculatorTests COMMAND CryptoBenchmarkMemoryV2CalculatorTests)
+
 add_executable(CryptoBenchmarkEnvironmentInfoTests
 	EnvironmentInfoProviderTests.cpp
 )
