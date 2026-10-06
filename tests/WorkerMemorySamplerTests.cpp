@@ -141,6 +141,43 @@ void testRealWorkerLifecycle()
     sampler.stopAndDiscard();
     require(!sampler.isActive(), "sampler could not be reused after discard");
 
+    sampler.startV2(static_cast<std::uint32_t>(worker.processId()), {2});
+    require(sampler.isActive(), "v2 sampler was not active after start");
+
+    QElapsedTimer preparationWindow;
+    preparationWindow.start();
+    while (preparationWindow.elapsed() < 40) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+
+    sampler.markExecutionBoundaryV2();
+
+    QElapsedTimer executionWindow;
+    executionWindow.start();
+    while (executionWindow.elapsed() < 40) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+
+    const auto v2Result = sampler.stopAndCollectV2();
+    require(v2Result.baselinePrivateUsageBytes > 0, "v2 B0 was not collected");
+    require(v2Result.readyPrivateUsageBytes > 0, "v2 B1 was not collected");
+    require(v2Result.finalPrivateUsageBytes > 0, "v2 E was not collected");
+    require(
+        (v2Result.preparationSampleCount > 0
+            && v2Result.preparationPeakSampledPrivateUsageBytes.has_value())
+            || (v2Result.executionSampleCount > 0
+                && v2Result.executionPeakSampledPrivateUsageBytes.has_value()),
+        "v2 sampler did not collect a periodic phase sample");
+    require(
+        v2Result.preparationPeakSampledPrivateUsageBytes.has_value()
+            == (v2Result.preparationSampleCount > 0),
+        "v2 preparation peak/count semantics mismatch");
+    require(
+        v2Result.executionPeakSampledPrivateUsageBytes.has_value()
+            == (v2Result.executionSampleCount > 0),
+        "v2 execution peak/count semantics mismatch");
+    require(!sampler.isActive(), "v2 sampler remained active after collection");
+
     channel.close();
 }
 
