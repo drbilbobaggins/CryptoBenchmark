@@ -4,6 +4,7 @@ add_library(cryptobench_platform_windows STATIC
     WorkerMemorySampler.cpp
     include/cryptobench/platform/windows/WindowsWorkerProcess.h
     include/cryptobench/platform/windows/WorkerMemorySampler.h
+    WorkerMemorySamplerAccounting.h
 )
 
 set_target_properties(cryptobench_platform_windows PROPERTIES AUTOMOC ON)

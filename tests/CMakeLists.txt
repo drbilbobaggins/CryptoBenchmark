@@ -751,6 +751,11 @@ target_link_libraries(CryptoBenchmarkWorkerMemorySamplerTests
 		Qt6::Network
 )
 
+target_include_directories(CryptoBenchmarkWorkerMemorySamplerTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/platform/windows
+)
+
 add_dependencies(CryptoBenchmarkWorkerMemorySamplerTests CryptoBenchmarkWorker)
 
 add_test(NAME CryptoBenchmarkWorkerMemorySamplerTests COMMAND CryptoBenchmarkWorkerMemorySamplerTests)

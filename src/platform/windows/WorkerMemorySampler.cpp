@@ -1,4 +1,5 @@
 #include <cryptobench/platform/windows/WorkerMemorySampler.h>
+#include "WorkerMemorySamplerAccounting.h"
 
 #include <windows.h>
 #include <psapi.h>
@@ -305,23 +306,11 @@ void WorkerMemorySampler::samplingThreadMain() noexcept
                 if (lifecycle_ == Lifecycle::Legacy) {
                     peakSampledBytes_ = std::max(peakSampledBytes_, sample);
                 } else if (lifecycle_ == Lifecycle::V2Preparation) {
-                    ++memoryV2Raw_.preparationSampleCount;
-                    if (!memoryV2Raw_.preparationPeakSampledPrivateUsageBytes.has_value()) {
-                        memoryV2Raw_.preparationPeakSampledPrivateUsageBytes = sample;
-                    } else {
-                        memoryV2Raw_.preparationPeakSampledPrivateUsageBytes = std::max(
-                            *memoryV2Raw_.preparationPeakSampledPrivateUsageBytes,
-                            sample);
-                    }
+                    recordMemoryV2Sample(
+                        memoryV2Raw_, MemoryV2SamplePhase::Preparation, sample);
                 } else if (lifecycle_ == Lifecycle::V2Execution) {
-                    ++memoryV2Raw_.executionSampleCount;
-                    if (!memoryV2Raw_.executionPeakSampledPrivateUsageBytes.has_value()) {
-                        memoryV2Raw_.executionPeakSampledPrivateUsageBytes = sample;
-                    } else {
-                        memoryV2Raw_.executionPeakSampledPrivateUsageBytes = std::max(
-                            *memoryV2Raw_.executionPeakSampledPrivateUsageBytes,
-                            sample);
-                    }
+                    recordMemoryV2Sample(
+                        memoryV2Raw_, MemoryV2SamplePhase::Execution, sample);
                 }
                 continue;
             }
