@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <span>
+#include <optional>
 #include <variant>
 #include <vector>
 
 #include <cryptobench/core/AlgorithmAdapter.h>
+#include <cryptobench/core/CommonWorkload.h>
 #include <cryptobench/core/DomainTypes.h>
 #include <cryptobench/core/ProfileParameters.h>
 
@@ -20,6 +22,8 @@ public:
     EcdsaAdapter(core::EcKeyGenParameters parameters, core::BenchmarkOperation operation);
     EcdsaAdapter(core::EcdsaParameters parameters, core::BenchmarkOperation operation, InputMode inputMode,
                  core::ByteCount signatureBytes, core::WorkloadBytes messageSize = 0);
+    EcdsaAdapter(core::EcdsaParameters parameters, core::BenchmarkOperation operation, InputMode inputMode,
+                 core::ByteCount signatureBytes, core::CommonWorkload&& workload);
 
     void prepareSeries() override;
     void prepareRun() override;
@@ -41,6 +45,8 @@ private:
     void executeKeyGeneration();
     void executeSign();
     void executeVerify();
+    std::span<const unsigned char> digestInput() const noexcept;
+    std::span<const unsigned char> messageInput() const noexcept;
 
     Parameters parameters_;
     core::BenchmarkOperation operation_;
@@ -53,6 +59,7 @@ private:
     openssl::EvpPkeyPtr currentKey_{nullptr, &EVP_PKEY_free};
     openssl::EvpPkeyPtr signingKey_{nullptr, &EVP_PKEY_free};
     std::vector<unsigned char> digestBytes_;
+    std::optional<core::CommonWorkload> commonWorkload_;
     std::vector<unsigned char> message_;
     std::vector<unsigned char> signature_;
     std::size_t actualSignatureLength_ = 0;

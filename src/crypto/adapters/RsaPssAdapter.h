@@ -1,10 +1,12 @@
 #pragma once
 
 #include <span>
+#include <optional>
 #include <variant>
 #include <vector>
 
 #include <cryptobench/core/AlgorithmAdapter.h>
+#include <cryptobench/core/CommonWorkload.h>
 #include <cryptobench/core/DomainTypes.h>
 #include <cryptobench/core/ProfileParameters.h>
 
@@ -25,6 +27,9 @@ public:
     RsaPssAdapter(core::RsaPssParameters parameters, core::BenchmarkOperation operation,
                   InputMode inputMode, core::ByteCount signatureBytes,
                   core::WorkloadBytes messageSize = 0);
+    RsaPssAdapter(core::RsaPssParameters parameters, core::BenchmarkOperation operation,
+                  InputMode inputMode, core::ByteCount signatureBytes,
+                  core::CommonWorkload&& workload);
 
     void prepareSeries() override;
     void prepareRun() override;
@@ -47,6 +52,8 @@ private:
     void executeSign();
     void executeVerify();
     void configurePss(EVP_PKEY_CTX* context) const;
+    std::span<const unsigned char> digestInput() const noexcept;
+    std::span<const unsigned char> messageInput() const noexcept;
 
     Parameters parameters_;
     core::BenchmarkOperation operation_;
@@ -58,6 +65,7 @@ private:
     openssl::EvpPkeyPtr currentKey_{nullptr, &EVP_PKEY_free};
     openssl::EvpPkeyPtr signingKey_{nullptr, &EVP_PKEY_free};
     std::vector<unsigned char> digestBytes_;
+    std::optional<core::CommonWorkload> commonWorkload_;
     core::WorkloadBytes messageSize_ = 0;
     std::vector<unsigned char> message_;
     std::vector<unsigned char> signature_;

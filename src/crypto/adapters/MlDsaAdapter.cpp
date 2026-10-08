@@ -3,6 +3,7 @@
 #include <array>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 #include <openssl/evp.h>
 
@@ -53,6 +54,18 @@ MlDsaAdapter::MlDsaAdapter(
     }
 }
 
+MlDsaAdapter::MlDsaAdapter(
+    core::MlDsaParameters parameters,
+    core::BenchmarkOperation operation,
+    InputMode inputMode,
+    core::ByteCount signatureBytes,
+    core::CommonWorkload&& workload)
+    : MlDsaAdapter(parameters, operation, inputMode, signatureBytes,
+                   static_cast<core::WorkloadBytes>(workload.size()))
+{
+    commonWorkload_.emplace(std::move(workload));
+}
+
 void MlDsaAdapter::prepareSeries()
 {
     if (operation_ == core::BenchmarkOperation::KeyGen) {
@@ -101,10 +114,12 @@ void MlDsaAdapter::prepareSignature()
         openssl::throwOpenSslError("EVP_PKEY_CTX_new_from_pkey(ML-DSA)");
     }
 
-    message_.resize(static_cast<std::size_t>(messageSize_));
-    constexpr std::array pattern{'a', 'b', 'c'};
-    for (std::size_t index = 0; index < message_.size(); ++index) {
-        message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+    if (!commonWorkload_) {
+        message_.resize(static_cast<std::size_t>(messageSize_));
+        constexpr std::array pattern{'a', 'b', 'c'};
+        for (std::size_t index = 0; index < message_.size(); ++index) {
+            message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+        }
     }
     signature_.resize(static_cast<std::size_t>(signatureBytes_));
     if (operation_ == core::BenchmarkOperation::Verify) {
@@ -126,7 +141,7 @@ void MlDsaAdapter::createPrerequisiteSignature()
     openssl::checkOpenSslReturn(
         EVP_PKEY_sign(
             prerequisiteContext.get(), signature_.data(), &signatureLength,
-            message_.data(), message_.size()),
+            messageInput().data(), messageInput().size()),
         "EVP_PKEY_sign(ML-DSA prerequisite)");
     if (signatureLength != signature_.size()) {
         throw std::runtime_error("ML-DSA prerequisite signature length mismatch");
@@ -162,7 +177,7 @@ void MlDsaAdapter::executeSign()
         "EVP_PKEY_sign_message_init(ML-DSA)");
     std::size_t signatureLength = signature_.size();
     openssl::checkOpenSslReturn(
-        EVP_PKEY_sign(context_.get(), signature_.data(), &signatureLength, message_.data(), message_.size()),
+        EVP_PKEY_sign(context_.get(), signature_.data(), &signatureLength, messageInput().data(), messageInput().size()),
         "EVP_PKEY_sign(ML-DSA)");
     if (signatureLength != signature_.size()) {
         throw std::runtime_error("ML-DSA signature length mismatch");
@@ -175,7 +190,7 @@ void MlDsaAdapter::executeVerify()
         EVP_PKEY_verify_message_init(context_.get(), signatureAlgorithm_.get(), nullptr),
         "EVP_PKEY_verify_message_init(ML-DSA)");
     const int result = EVP_PKEY_verify(
-        context_.get(), signature_.data(), signature_.size(), message_.data(), message_.size());
+        context_.get(), signature_.data(), signature_.size(), messageInput().data(), messageInput().size());
     if (result == 1) {
         return;
     }
@@ -187,6 +202,12 @@ void MlDsaAdapter::executeVerify()
 
 std::span<const unsigned char> MlDsaAdapter::messageForTesting() const noexcept
 {
+    return messageInput();
+}
+
+std::span<const unsigned char> MlDsaAdapter::messageInput() const noexcept
+{
+    if (commonWorkload_) return commonWorkload_->bytes();
     return message_;
 }
 

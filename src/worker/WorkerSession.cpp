@@ -141,19 +141,9 @@ int runWorkerSession(const QString& endpoint)
         try {
             crypto::initializeGenericOpenSslRuntime();
             crypto::AdapterFactory factory;
-            switch (profile->executionStrategy) {
-            case core::ExecutionStrategyId::Digest:
-            case core::ExecutionStrategyId::Xof:
-            case core::ExecutionStrategyId::Aead: {
-                auto workload = core::buildCommonWorkload(*validated, *profile);
-                adapter = factory.create(
-                    *profile, validated->value().operation, *validated, std::move(workload));
-                break;
-            }
-            default:
-                adapter = factory.create(*profile, validated->value().operation, *validated);
-                break;
-            }
+            auto workload = core::buildCommonWorkload(*validated, *profile);
+            adapter = factory.create(
+                *profile, validated->value().operation, *validated, std::move(workload));
         } catch (const std::invalid_argument& error) {
             const auto info = errorInfoForTaskFailure(error, true);
             trySendFailure(channel, info);

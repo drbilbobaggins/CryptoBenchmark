@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <span>
+#include <optional>
 #include <variant>
 #include <vector>
 
 #include <cryptobench/core/AlgorithmAdapter.h>
+#include <cryptobench/core/CommonWorkload.h>
 #include <cryptobench/core/DomainTypes.h>
 #include <cryptobench/core/ProfileParameters.h>
 
@@ -26,6 +28,12 @@ public:
         InputMode inputMode,
         core::ByteCount signatureBytes,
         core::WorkloadBytes messageSize = 0);
+    EdDsaAdapter(
+        core::EdDsaParameters parameters,
+        core::BenchmarkOperation operation,
+        InputMode inputMode,
+        core::ByteCount signatureBytes,
+        core::CommonWorkload&& workload);
 
     void prepareSeries() override;
     void prepareRun() override;
@@ -43,12 +51,14 @@ private:
     void executeKeyGeneration();
     void executeSign();
     void executeVerify();
+    std::span<const unsigned char> messageInput() const noexcept;
 
     core::EdDsaParameters parameters_;
     core::BenchmarkOperation operation_;
     InputMode inputMode_;
     core::ByteCount signatureBytes_;
     core::WorkloadBytes messageSize_ = 0;
+    std::optional<core::CommonWorkload> commonWorkload_;
     openssl::EvpSignaturePtr signatureAlgorithm_{nullptr, &EVP_SIGNATURE_free};
     openssl::EvpPkeyCtxPtr context_{nullptr, &EVP_PKEY_CTX_free};
     openssl::EvpPkeyPtr currentKey_{nullptr, &EVP_PKEY_free};
