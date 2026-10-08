@@ -4,6 +4,7 @@
 #include <cryptobench/core/AlgorithmAdapter.h>
 #include <cryptobench/core/BenchmarkRunner.h>
 #include <cryptobench/core/BenchmarkTask.h>
+#include <cryptobench/core/CommonWorkload.h>
 #include <cryptobench/core/ConfigValidator.h>
 #include <cryptobench/core/ErrorInfo.h>
 #include <cryptobench/core/RunnerFailure.h>
@@ -21,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace cryptobench::worker {
 namespace {
@@ -138,7 +140,20 @@ int runWorkerSession(const QString& endpoint)
         std::unique_ptr<core::AlgorithmAdapter> adapter;
         try {
             crypto::initializeGenericOpenSslRuntime();
-            adapter = crypto::AdapterFactory{}.create(*profile, validated->value().operation, *validated);
+            crypto::AdapterFactory factory;
+            switch (profile->executionStrategy) {
+            case core::ExecutionStrategyId::Digest:
+            case core::ExecutionStrategyId::Xof:
+            case core::ExecutionStrategyId::Aead: {
+                auto workload = core::buildCommonWorkload(*validated, *profile);
+                adapter = factory.create(
+                    *profile, validated->value().operation, *validated, std::move(workload));
+                break;
+            }
+            default:
+                adapter = factory.create(*profile, validated->value().operation, *validated);
+                break;
+            }
         } catch (const std::invalid_argument& error) {
             const auto info = errorInfoForTaskFailure(error, true);
             trySendFailure(channel, info);

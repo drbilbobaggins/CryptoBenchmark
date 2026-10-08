@@ -3,6 +3,7 @@
 #include <cryptobench/crypto/AdapterFactory.h>
 
 #include <cryptobench/core/AlgorithmRegistry.h>
+#include <cryptobench/core/CommonWorkload.h>
 #include <cryptobench/core/ConfigValidator.h>
 
 #include <array>
@@ -156,6 +157,34 @@ void testPayloadSizes()
     }
 }
 
+void testCommonWorkloadMigrationPreservesPlaintextAndSupportsEmptyInput()
+{
+    std::vector<unsigned char> plaintext{0xffU, 0x01U, 0x80U, 0x42U};
+    const auto expectedPlaintext = plaintext;
+    const auto originalAddress = plaintext.data();
+    auto validated = validateConfig(AlgorithmProfileId::Aes128Gcm, BenchmarkOperation::Encrypt, plaintext.size());
+    const auto& profile = profileFor(AlgorithmProfileId::Aes128Gcm);
+    auto adapterOwner = AdapterFactory{}.create(
+        profile, BenchmarkOperation::Encrypt, validated,
+        core::CommonWorkload{std::move(plaintext)});
+    auto& adapter = asAead(*adapterOwner);
+    require(adapter.plaintext().data() == originalAddress, "AEAD workload allocation was copied");
+    require(std::vector(adapter.plaintext().begin(), adapter.plaintext().end()) == expectedPlaintext,
+            "AEAD migrated plaintext changed before preparation");
+    adapter.prepareSeries();
+    adapter.executeIteration();
+    require(adapter.ciphertext().size() == expectedPlaintext.size(), "migrated AEAD ciphertext size mismatch");
+
+    AeadAdapter emptyAdapter(
+        std::get<core::AesGcmParameters>(profile.parameters),
+        BenchmarkOperation::Encrypt,
+        core::CommonWorkload{std::vector<unsigned char>{}});
+    emptyAdapter.prepareSeries();
+    emptyAdapter.executeIteration();
+    require(emptyAdapter.plaintext().empty() && emptyAdapter.ciphertext().empty(),
+            "migrated empty AEAD workload was regenerated");
+}
+
 void testFactoryCreatesAllCanonicalPairs()
 {
     for (const auto profileId : profiles) {
@@ -194,6 +223,7 @@ int main()
             std::pair{"valid AEAD roundtrip and repeated execution", &testValidRoundtripAndRepeatedExecution},
             std::pair{"modified AEAD tag and ciphertext rejection", &testModifiedTagAndCiphertextRejection},
             std::pair{"AEAD payload sizes", &testPayloadSizes},
+            std::pair{"common workload migration preserves plaintext and supports empty input", &testCommonWorkloadMigrationPreservesPlaintextAndSupportsEmptyInput},
             std::pair{"factory creates all canonical AEAD pairs", &testFactoryCreatesAllCanonicalPairs},
             std::pair{"factory rejects incorrect AEAD parameter variant", &testFactoryRejectsIncorrectParameterVariant}};
         for (const auto& [name, test] : tests) {

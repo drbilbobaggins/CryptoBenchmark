@@ -35,6 +35,17 @@ XofAdapter::XofAdapter(core::XofParameters parameters, core::WorkloadBytes input
     }
 }
 
+XofAdapter::XofAdapter(core::XofParameters parameters, core::CommonWorkload&& workload)
+    : parameters_(parameters),
+      inputSize_(static_cast<core::WorkloadBytes>(workload.size())),
+      commonWorkload_(std::move(workload))
+{
+    static_cast<void>(xofName(parameters_.algorithm));
+    if (parameters_.outputBytes == 0) {
+        throw std::invalid_argument("XofAdapter output size must be non-zero");
+    }
+}
+
 void XofAdapter::prepareSeries()
 {
     const auto name = xofName(parameters_.algorithm);
@@ -48,10 +59,12 @@ void XofAdapter::prepareSeries()
         openssl::throwOpenSslError("EVP_MD_CTX_new");
     }
 
-    input_.resize(static_cast<std::size_t>(inputSize_));
-    constexpr std::array pattern{'a', 'b', 'c'};
-    for (std::size_t index = 0; index < input_.size(); ++index) {
-        input_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+    if (!commonWorkload_) {
+        input_.resize(static_cast<std::size_t>(inputSize_));
+        constexpr std::array pattern{'a', 'b', 'c'};
+        for (std::size_t index = 0; index < input_.size(); ++index) {
+            input_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+        }
     }
     output_.resize(static_cast<std::size_t>(parameters_.outputBytes));
 }
@@ -64,9 +77,10 @@ void XofAdapter::executeIteration()
 
     openssl::checkOpenSslReturn(EVP_MD_CTX_reset(context_.get()), "EVP_MD_CTX_reset");
     openssl::checkOpenSslReturn(EVP_DigestInit_ex2(context_.get(), digest_.get(), nullptr), "EVP_DigestInit_ex2");
-    if (!input_.empty()) {
+    const auto input = inputBytes();
+    if (!input.empty()) {
         openssl::checkOpenSslReturn(
-            EVP_DigestUpdate(context_.get(), input_.data(), input_.size()),
+            EVP_DigestUpdate(context_.get(), input.data(), input.size()),
             "EVP_DigestUpdate");
     }
 
@@ -78,6 +92,17 @@ void XofAdapter::executeIteration()
 std::span<const unsigned char> XofAdapter::output() const noexcept
 {
     return output_;
+}
+
+std::span<const unsigned char> XofAdapter::input() const noexcept
+{
+    return inputBytes();
+}
+
+std::span<const unsigned char> XofAdapter::inputBytes() const noexcept
+{
+    if (commonWorkload_) return commonWorkload_->bytes();
+    return input_;
 }
 
 } // namespace cryptobench::crypto

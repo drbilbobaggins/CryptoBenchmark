@@ -20,6 +20,72 @@ namespace cryptobench::crypto {
 std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
     const core::AlgorithmProfile& profile,
     core::BenchmarkOperation operation,
+    const core::ValidatedBenchmarkConfig& config,
+    core::CommonWorkload&& workload) const
+{
+    const auto& validatedConfig = config.value();
+    if (profile.id != validatedConfig.profile) {
+        throw std::logic_error("AdapterFactory profile does not match validated configuration");
+    }
+    if (operation != validatedConfig.operation) {
+        throw std::logic_error("AdapterFactory operation does not match validated configuration");
+    }
+
+    switch (profile.executionStrategy) {
+    case core::ExecutionStrategyId::Digest: {
+        const auto* parameters = std::get_if<core::DigestParameters>(&profile.parameters);
+        const auto* hashConfig = std::get_if<core::HashConfig>(&validatedConfig.parameters);
+        if (parameters == nullptr || hashConfig == nullptr) {
+            throw std::logic_error("Digest workload path requires matching canonical parameters");
+        }
+        if (workload.size() != static_cast<std::size_t>(hashConfig->inputSize)) {
+            throw std::invalid_argument("Digest common workload size does not match configuration");
+        }
+        return std::make_unique<DigestAdapter>(*parameters, std::move(workload));
+    }
+    case core::ExecutionStrategyId::Xof: {
+        const auto* parameters = std::get_if<core::XofParameters>(&profile.parameters);
+        const auto* hashConfig = std::get_if<core::HashConfig>(&validatedConfig.parameters);
+        if (parameters == nullptr || hashConfig == nullptr) {
+            throw std::logic_error("XOF workload path requires matching canonical parameters");
+        }
+        if (workload.size() != static_cast<std::size_t>(hashConfig->inputSize)) {
+            throw std::invalid_argument("XOF common workload size does not match configuration");
+        }
+        return std::make_unique<XofAdapter>(*parameters, std::move(workload));
+    }
+    case core::ExecutionStrategyId::Aead: {
+        const auto* aeadConfig = std::get_if<core::AeadConfig>(&validatedConfig.parameters);
+        if (aeadConfig == nullptr) {
+            throw std::logic_error("AEAD workload path requires AeadConfig");
+        }
+        if (workload.size() != static_cast<std::size_t>(aeadConfig->plaintextSize)) {
+            throw std::invalid_argument("AEAD common workload size does not match configuration");
+        }
+        if (profile.family == core::AlgorithmFamily::AesGcm) {
+            const auto* parameters = std::get_if<core::AesGcmParameters>(&profile.parameters);
+            if (parameters == nullptr) {
+                throw std::logic_error("AES-GCM profile requires AesGcmParameters");
+            }
+            return std::make_unique<AeadAdapter>(*parameters, operation, std::move(workload));
+        }
+        if (profile.family == core::AlgorithmFamily::ChaCha20Poly1305) {
+            const auto* parameters = std::get_if<core::ChaCha20Poly1305Parameters>(&profile.parameters);
+            if (parameters == nullptr) {
+                throw std::logic_error("ChaCha20-Poly1305 profile requires ChaCha20Poly1305Parameters");
+            }
+            return std::make_unique<AeadAdapter>(*parameters, operation, std::move(workload));
+        }
+        throw std::logic_error("AEAD workload path requires matching parameters");
+    }
+    default:
+        throw std::logic_error("Common workload path supports only Digest, XOF, and AEAD");
+    }
+}
+
+std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
+    const core::AlgorithmProfile& profile,
+    core::BenchmarkOperation operation,
     const core::ValidatedBenchmarkConfig& config) const
 {
     const auto& validatedConfig = config.value();

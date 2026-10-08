@@ -1,11 +1,13 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <variant>
 #include <vector>
 
 #include <cryptobench/core/AlgorithmAdapter.h>
+#include <cryptobench/core/CommonWorkload.h>
 #include <cryptobench/core/DomainTypes.h>
 #include <cryptobench/core/ProfileParameters.h>
 
@@ -19,6 +21,8 @@ public:
 
     AeadAdapter(core::AesGcmParameters parameters, core::BenchmarkOperation operation, core::WorkloadBytes plaintextSize);
     AeadAdapter(core::ChaCha20Poly1305Parameters parameters, core::BenchmarkOperation operation, core::WorkloadBytes plaintextSize);
+    AeadAdapter(core::AesGcmParameters parameters, core::BenchmarkOperation operation, core::CommonWorkload&& workload);
+    AeadAdapter(core::ChaCha20Poly1305Parameters parameters, core::BenchmarkOperation operation, core::CommonWorkload&& workload);
 
     void prepareSeries() override;
     void prepareRun() override;
@@ -32,6 +36,7 @@ public:
     std::span<unsigned char> mutableTag() noexcept;
 
 private:
+    std::span<const unsigned char> plaintextInput() const noexcept;
     void prepareSeriesImpl();
     void encryptPrerequisite();
     void executeEncrypt();
@@ -42,6 +47,7 @@ private:
     core::WorkloadBytes plaintextSize_;
     openssl::EvpCipherPtr cipher_{nullptr, &EVP_CIPHER_free};
     openssl::EvpCipherCtxPtr context_{nullptr, &EVP_CIPHER_CTX_free};
+    std::optional<core::CommonWorkload> commonWorkload_;
     std::vector<unsigned char> key_;
     std::vector<unsigned char> nonce_;
     std::vector<unsigned char> aad_;
