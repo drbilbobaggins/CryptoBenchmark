@@ -19,6 +19,28 @@ target_link_libraries(CryptoBenchmarkTests
 
 add_test(NAME CryptoBenchmarkTests COMMAND CryptoBenchmarkTests)
 
+add_executable(CryptoBenchmarkMemoryV2FoundationTests
+	MemoryV2FoundationTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkMemoryV2FoundationTests
+	PRIVATE
+		cryptobench_core
+)
+
+add_test(NAME CryptoBenchmarkMemoryV2FoundationTests COMMAND CryptoBenchmarkMemoryV2FoundationTests)
+
+add_executable(CryptoBenchmarkMemoryV2CalculatorTests
+	MemoryV2CalculatorTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkMemoryV2CalculatorTests
+	PRIVATE
+		cryptobench_core
+)
+
+add_test(NAME CryptoBenchmarkMemoryV2CalculatorTests COMMAND CryptoBenchmarkMemoryV2CalculatorTests)
+
 add_executable(CryptoBenchmarkEnvironmentInfoTests
 	EnvironmentInfoProviderTests.cpp
 )
@@ -727,6 +749,11 @@ target_link_libraries(CryptoBenchmarkWorkerMemorySamplerTests
 		cryptobench_platform_windows
 		Qt6::Core
 		Qt6::Network
+)
+
+target_include_directories(CryptoBenchmarkWorkerMemorySamplerTests
+	PRIVATE
+		${CMAKE_SOURCE_DIR}/src/platform/windows
 )
 
 add_dependencies(CryptoBenchmarkWorkerMemorySamplerTests CryptoBenchmarkWorker)
