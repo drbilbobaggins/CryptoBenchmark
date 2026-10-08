@@ -8,6 +8,7 @@
 #include <cryptobench/core/ErrorInfo.h>
 #include <cryptobench/core/RunnerFailure.h>
 #include <cryptobench/crypto/AdapterFactory.h>
+#include <cryptobench/crypto/OpenSslRuntimeBootstrap.h>
 #include <cryptobench/ipc/WireDtos.h>
 #include <cryptobench/ipc/WorkerIpcChannel.h>
 #include <cryptobench/platform/windows/WindowsProcessCpuTimeSource.h>
@@ -136,6 +137,7 @@ int runWorkerSession(const QString& endpoint)
 
         std::unique_ptr<core::AlgorithmAdapter> adapter;
         try {
+            crypto::initializeGenericOpenSslRuntime();
             adapter = crypto::AdapterFactory{}.create(*profile, validated->value().operation, *validated);
         } catch (const std::invalid_argument& error) {
             const auto info = errorInfoForTaskFailure(error, true);
