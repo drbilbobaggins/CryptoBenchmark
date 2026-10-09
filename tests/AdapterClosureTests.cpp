@@ -4,9 +4,11 @@
 #include <cryptobench/crypto/AdapterFactory.h>
 
 #include <array>
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -292,6 +294,211 @@ void testNegativeContracts()
     require(threw, "factory accepted a typed parameter mismatch");
 }
 
+std::span<const unsigned char> messageInputFor(const AlgorithmProfile& profile, const core::AlgorithmAdapter& adapter)
+{
+    switch (profile.executionStrategy) {
+    case ExecutionStrategyId::RsaPssSignature:
+        return dynamic_cast<const crypto::RsaPssAdapter&>(adapter).messageForTesting();
+    case ExecutionStrategyId::EcdsaSignature:
+        return dynamic_cast<const crypto::EcdsaAdapter&>(adapter).messageForTesting();
+    case ExecutionStrategyId::EdDsaSignature:
+        return dynamic_cast<const crypto::EdDsaAdapter&>(adapter).messageForTesting();
+    case ExecutionStrategyId::MlDsaSignature:
+        return dynamic_cast<const crypto::MlDsaAdapter&>(adapter).messageForTesting();
+    case ExecutionStrategyId::SlhDsaSignature:
+        return dynamic_cast<const crypto::SlhDsaAdapter&>(adapter).messageForTesting();
+    default:
+        fail("unexpected strategy for migrated message input");
+    }
+}
+
+std::span<const unsigned char> digestInputFor(const AlgorithmProfile& profile, const core::AlgorithmAdapter& adapter)
+{
+    switch (profile.executionStrategy) {
+    case ExecutionStrategyId::RsaPssSignature:
+        return dynamic_cast<const crypto::RsaPssAdapter&>(adapter).digestForTesting();
+    case ExecutionStrategyId::EcdsaSignature:
+        return dynamic_cast<const crypto::EcdsaAdapter&>(adapter).digestForTesting();
+    default:
+        fail("unexpected strategy for migrated digest input");
+    }
+}
+
+void testMigratedMessageSignAndVerify()
+{
+    ConfigValidator validator;
+    crypto::AdapterFactory factory;
+    const std::array signatureProfiles{
+        AlgorithmProfileId::RsaPss2048Sha256,
+        AlgorithmProfileId::EcdsaP256Sha256,
+        AlgorithmProfileId::Ed25519,
+        AlgorithmProfileId::MlDsa44,
+        AlgorithmProfileId::SlhDsaSha2128F};
+    const std::vector<unsigned char> expected{0x01U, 0xFEU, 0x7BU};
+
+    for (const auto profileId : signatureProfiles) {
+        const auto* profile = AlgorithmRegistry::find(profileId);
+        require(profile != nullptr, "migrated signature profile was not found");
+        for (const auto operation : {BenchmarkOperation::Sign, BenchmarkOperation::Verify}) {
+            ValidationResult validation;
+            const auto config = BenchmarkConfig{
+                profileId, operation, 1, 1, SignatureConfig{MessageInput{expected.size()}}};
+            const auto validated = validator.validateAndCreate(config, validation);
+            require(validated.has_value() && validation.isValid(), "migrated signature config was invalid");
+            auto bytes = expected;
+            const auto* originalData = bytes.data();
+            auto adapter = factory.create(
+                *profile, operation, *validated, CommonWorkload{std::move(bytes)});
+            require(messageInputFor(*profile, *adapter).data() == originalData,
+                    "migrated message pointer changed during factory transfer");
+            adapter->prepareSeries();
+            require(messageInputFor(*profile, *adapter).data() == originalData,
+                    "migrated message pointer changed during preparation");
+            adapter->executeIteration();
+            require(messageInputFor(*profile, *adapter).data() == originalData,
+                    "migrated message pointer changed during execution");
+            require(std::equal(messageInputFor(*profile, *adapter).begin(),
+                               messageInputFor(*profile, *adapter).end(), expected.begin(), expected.end()),
+                    "migrated signature input was regenerated or copied incorrectly");
+        }
+    }
+}
+
+void testMigratedPrehashedSignAndVerify()
+{
+    ConfigValidator validator;
+    crypto::AdapterFactory factory;
+    constexpr std::array cases{
+        std::pair{AlgorithmProfileId::RsaPss2048Sha256, std::size_t{32}},
+        std::pair{AlgorithmProfileId::RsaPss2048Sha384, std::size_t{48}},
+        std::pair{AlgorithmProfileId::RsaPss2048Sha512, std::size_t{64}},
+        std::pair{AlgorithmProfileId::EcdsaP256Sha256, std::size_t{32}},
+        std::pair{AlgorithmProfileId::EcdsaP256Sha384, std::size_t{48}},
+        std::pair{AlgorithmProfileId::EcdsaP256Sha512, std::size_t{64}}};
+
+    for (const auto& [profileId, digestSize] : cases) {
+        const auto* profile = AlgorithmRegistry::find(profileId);
+        require(profile != nullptr, "migrated prehashed profile was not found");
+        for (const auto operation : {BenchmarkOperation::Sign, BenchmarkOperation::Verify}) {
+            ValidationResult validation;
+            const auto config = BenchmarkConfig{
+                profileId, operation, 1, 1, SignatureConfig{PrehashedInput{}}};
+            const auto validated = validator.validateAndCreate(config, validation);
+            require(validated.has_value() && validation.isValid(), "migrated prehashed config was invalid");
+            std::vector<unsigned char> digest(digestSize, 0x3CU);
+            const auto* originalData = digest.data();
+            auto adapter = factory.create(
+                *profile, operation, *validated, CommonWorkload{std::move(digest)});
+            require(digestInputFor(*profile, *adapter).data() == originalData,
+                    "migrated digest pointer changed during factory transfer");
+            adapter->prepareSeries();
+            require(digestInputFor(*profile, *adapter).data() == originalData,
+                    "migrated digest pointer changed during preparation");
+            require(digestInputFor(*profile, *adapter).size() == digestSize,
+                    "migrated digest size was not retained");
+            require(std::all_of(digestInputFor(*profile, *adapter).begin(),
+                                digestInputFor(*profile, *adapter).end(),
+                                [](unsigned char value) { return value == 0x3CU; }),
+                    "migrated digest contents were changed during preparation");
+            adapter->executeIteration();
+            require(digestInputFor(*profile, *adapter).data() == originalData,
+                    "migrated digest pointer changed during execution");
+        }
+    }
+}
+
+void testMigratedEmptyWorkloadRouting()
+{
+    ConfigValidator validator;
+    crypto::AdapterFactory factory;
+    constexpr std::array cases{
+        std::pair{AlgorithmProfileId::Ed25519, BenchmarkOperation::KeyGen},
+        std::pair{AlgorithmProfileId::X25519, BenchmarkOperation::KeyGen},
+        std::pair{AlgorithmProfileId::X448, BenchmarkOperation::KeyGen},
+        std::pair{AlgorithmProfileId::MlKem512, BenchmarkOperation::KeyGen}};
+    for (const auto& [profileId, operation] : cases) {
+        const auto* profile = AlgorithmRegistry::find(profileId);
+        require(profile != nullptr, "empty-workload profile was not found");
+        ValidationResult validation;
+        const auto parameters = profile->category == PrimitiveCategory::Signature
+            ? PrimitiveConfig{SignatureConfig{NoSignatureInput{}}}
+            : PrimitiveConfig{KeyEstablishmentConfig{}};
+        const auto config = BenchmarkConfig{profileId, operation, 1, 1, parameters};
+        const auto validated = validator.validateAndCreate(config, validation);
+        require(validated.has_value() && validation.isValid(), "empty-workload config was invalid");
+        auto adapter = factory.create(*profile, operation, *validated, CommonWorkload{});
+        assertAdapterType(*profile, adapter);
+        adapter->prepareSeries();
+        adapter->executeIteration();
+
+        bool rejected = false;
+        try {
+            static_cast<void>(factory.create(
+                *profile, operation, *validated,
+                CommonWorkload{std::vector<unsigned char>{0x01U}}));
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "empty-only strategy accepted a nonempty common workload");
+    }
+}
+
+void testMigratedWorkloadRejectionsAndCanonicalConstruction()
+{
+    ConfigValidator validator;
+    crypto::AdapterFactory factory;
+    const auto expectWorkloadRejected = [&](AlgorithmProfileId profileId,
+                                            BenchmarkOperation operation,
+                                            SignatureConfig parameters,
+                                            std::vector<unsigned char> bytes) {
+        const auto* profile = AlgorithmRegistry::find(profileId);
+        require(profile != nullptr, "invalid-workload profile was not found");
+        ValidationResult validation;
+        const auto config = BenchmarkConfig{profileId, operation, 1, 1, std::move(parameters)};
+        const auto validated = validator.validateAndCreate(config, validation);
+        require(validated.has_value() && validation.isValid(), "invalid-workload config was invalid");
+        bool rejected = false;
+        try {
+            static_cast<void>(factory.create(
+                *profile, operation, *validated, CommonWorkload{std::move(bytes)}));
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "factory accepted an invalid migrated workload size");
+    };
+    expectWorkloadRejected(AlgorithmProfileId::RsaPss2048Sha256, BenchmarkOperation::Sign,
+                           SignatureConfig{MessageInput{3}}, {0x01U, 0x02U});
+    expectWorkloadRejected(AlgorithmProfileId::EcdsaP256Sha256, BenchmarkOperation::Sign,
+                           SignatureConfig{PrehashedInput{}}, std::vector<unsigned char>(31, 0x01U));
+    expectWorkloadRejected(AlgorithmProfileId::Ed25519, BenchmarkOperation::Verify,
+                           SignatureConfig{MessageInput{3}}, {0x01U, 0x02U});
+
+    ValidationResult inputModeValidation;
+    const auto unsupportedInput = validator.validateAndCreate(
+        {AlgorithmProfileId::Ed25519, BenchmarkOperation::Sign, 1, 1,
+         SignatureConfig{PrehashedInput{}}},
+        inputModeValidation);
+    require(!unsupportedInput.has_value() && !inputModeValidation.isValid(),
+            "EdDSA accepted the unsupported Prehashed input mode");
+
+    std::set<AlgorithmProfileId> profileIds;
+    std::set<ExecutionStrategyId> strategies;
+    std::set<std::pair<AlgorithmProfileId, BenchmarkOperation>> pairs;
+    const auto canonicalCases = enumerateCases(profileIds, strategies, pairs);
+    std::set<std::tuple<AlgorithmProfileId, BenchmarkOperation, InputMode>> seen;
+    for (const auto& testCase : canonicalCases) {
+        if (!seen.insert({testCase.profile->id, testCase.operation, testCase.inputMode}).second) continue;
+        ValidationResult validation;
+        const auto config = makeConfig(testCase);
+        const auto validated = validator.validateAndCreate(config, validation);
+        require(validated.has_value() && validation.isValid(), "canonical four-argument config was invalid");
+        auto adapter = factory.create(
+            *testCase.profile, testCase.operation, *validated,
+            buildCommonWorkload(*validated, *testCase.profile));
+        assertAdapterType(*testCase.profile, adapter);
+    }
+}
+
 } // namespace
 } // namespace cryptobench::tests
 
@@ -300,6 +507,10 @@ int main()
     try {
         cryptobench::tests::testCanonicalClosure();
         cryptobench::tests::testNegativeContracts();
+        cryptobench::tests::testMigratedMessageSignAndVerify();
+        cryptobench::tests::testMigratedPrehashedSignAndVerify();
+        cryptobench::tests::testMigratedEmptyWorkloadRouting();
+        cryptobench::tests::testMigratedWorkloadRejectionsAndCanonicalConstruction();
         return 0;
     } catch (const std::exception& error) {
         return (std::cerr << "FAIL " << error.what() << '\n'), 1;

@@ -4,6 +4,7 @@
 
 #include <cryptobench/core/AlgorithmAdapter.h>
 #include <cryptobench/core/AlgorithmProfile.h>
+#include <cryptobench/core/CommonWorkload.h>
 #include <cryptobench/core/ConfigValidation.h>
 
 namespace cryptobench::crypto {
@@ -14,6 +15,12 @@ public:
         const core::AlgorithmProfile& profile,
         core::BenchmarkOperation operation,
         const core::ValidatedBenchmarkConfig& config) const;
+
+    std::unique_ptr<core::AlgorithmAdapter> create(
+        const core::AlgorithmProfile& profile,
+        core::BenchmarkOperation operation,
+        const core::ValidatedBenchmarkConfig& config,
+        core::CommonWorkload&& workload) const;
 };
 
 } // namespace cryptobench::crypto

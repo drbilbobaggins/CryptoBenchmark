@@ -87,6 +87,30 @@ AeadAdapter::AeadAdapter(core::ChaCha20Poly1305Parameters parameters, core::Benc
     }
 }
 
+AeadAdapter::AeadAdapter(core::AesGcmParameters parameters, core::BenchmarkOperation operation, core::CommonWorkload&& workload)
+    : parameters_(parameters),
+      operation_(operation),
+      plaintextSize_(static_cast<core::WorkloadBytes>(workload.size())),
+      commonWorkload_(std::move(workload))
+{
+    static_cast<void>(cipherName(parameters_));
+    if (operation_ != core::BenchmarkOperation::Encrypt && operation_ != core::BenchmarkOperation::Decrypt) {
+        throw std::invalid_argument("AeadAdapter supports only Encrypt and Decrypt");
+    }
+}
+
+AeadAdapter::AeadAdapter(core::ChaCha20Poly1305Parameters parameters, core::BenchmarkOperation operation, core::CommonWorkload&& workload)
+    : parameters_(parameters),
+      operation_(operation),
+      plaintextSize_(static_cast<core::WorkloadBytes>(workload.size())),
+      commonWorkload_(std::move(workload))
+{
+    static_cast<void>(cipherName(parameters_));
+    if (operation_ != core::BenchmarkOperation::Encrypt && operation_ != core::BenchmarkOperation::Decrypt) {
+        throw std::invalid_argument("AeadAdapter supports only Encrypt and Decrypt");
+    }
+}
+
 void AeadAdapter::prepareSeries()
 {
     prepareSeriesImpl();
@@ -111,9 +135,18 @@ void AeadAdapter::prepareSeriesImpl()
     key_.resize(keySize(parameters_));
     nonce_.resize(nonceSize);
     aad_.resize(aadSize);
-    plaintext_.resize(static_cast<std::size_t>(plaintextSize_));
-    ciphertext_.resize(plaintext_.size());
-    decryptedPlaintext_.resize(plaintext_.size());
+    if (!commonWorkload_) {
+        plaintext_.resize(static_cast<std::size_t>(plaintextSize_));
+        constexpr auto pattern = [](std::size_t index) {
+            return static_cast<unsigned char>(index & 0xffU);
+        };
+        for (std::size_t index = 0; index < plaintext_.size(); ++index) {
+            plaintext_[index] = pattern(index);
+        }
+    }
+    const auto plaintext = plaintextInput();
+    ciphertext_.resize(plaintext.size());
+    decryptedPlaintext_.resize(plaintext.size());
     tag_.resize(tagSize);
 
     for (std::size_t index = 0; index < key_.size(); ++index) {
@@ -125,9 +158,12 @@ void AeadAdapter::prepareSeriesImpl()
     for (std::size_t index = 0; index < aad_.size(); ++index) {
         aad_[index] = static_cast<unsigned char>(0x30U + index);
     }
-    for (std::size_t index = 0; index < plaintext_.size(); ++index) {
-        plaintext_[index] = static_cast<unsigned char>(index & 0xffU);
-    }
+}
+
+std::span<const unsigned char> AeadAdapter::plaintextInput() const noexcept
+{
+    if (commonWorkload_) return commonWorkload_->bytes();
+    return plaintext_;
 }
 
 void AeadAdapter::encryptPrerequisite()
@@ -142,7 +178,7 @@ void AeadAdapter::prepareRun()
 void AeadAdapter::executeIteration()
 {
     if (!cipher_ || !context_ || key_.empty() || nonce_.size() != nonceSize || aad_.size() != aadSize ||
-        tag_.size() != tagSize || plaintext_.size() != static_cast<std::size_t>(plaintextSize_)) {
+        tag_.size() != tagSize || plaintextInput().size() != static_cast<std::size_t>(plaintextSize_)) {
         throw std::logic_error("AeadAdapter is not prepared");
     }
 
@@ -155,6 +191,7 @@ void AeadAdapter::executeIteration()
 
 void AeadAdapter::executeEncrypt()
 {
+    const auto plaintext = plaintextInput();
     openssl::checkOpenSslReturn(EVP_CIPHER_CTX_reset(context_.get()), "EVP_CIPHER_CTX_reset");
     openssl::checkOpenSslReturn(
         EVP_EncryptInit_ex(context_.get(), cipher_.get(), nullptr, nullptr, nullptr),
@@ -171,14 +208,14 @@ void AeadAdapter::executeEncrypt()
 
     int payloadLength = 0;
     openssl::checkOpenSslReturn(
-        EVP_EncryptUpdate(context_.get(), ciphertext_.data(), &payloadLength, plaintext_.data(), checkedLength(plaintext_.size(), "plaintext")),
+        EVP_EncryptUpdate(context_.get(), ciphertext_.data(), &payloadLength, plaintext.data(), checkedLength(plaintext.size(), "plaintext")),
         "EVP_EncryptUpdate plaintext");
     int finalLength = 0;
     openssl::checkOpenSslReturn(
         EVP_EncryptFinal_ex(context_.get(), ciphertext_.data() + payloadLength, &finalLength),
         "EVP_EncryptFinal_ex");
     ciphertextSize_ = static_cast<std::size_t>(payloadLength + finalLength);
-    requireLength(payloadLength + finalLength, plaintext_.size(), "ciphertext");
+    requireLength(payloadLength + finalLength, plaintext.size(), "ciphertext");
 
     openssl::checkOpenSslReturn(
         EVP_CIPHER_CTX_ctrl(context_.get(), EVP_CTRL_AEAD_GET_TAG, checkedLength(tag_.size(), "tag"), tag_.data()),
@@ -187,7 +224,7 @@ void AeadAdapter::executeEncrypt()
 
 void AeadAdapter::executeDecrypt()
 {
-    if (ciphertextSize_ != plaintext_.size() || ciphertext_.size() < ciphertextSize_) {
+    if (ciphertextSize_ != plaintextInput().size() || ciphertext_.size() < ciphertextSize_) {
         throw std::logic_error("AeadAdapter decrypt prerequisite is not prepared");
     }
 
@@ -218,10 +255,10 @@ void AeadAdapter::executeDecrypt()
     if (finalResult != 1) {
         throw std::runtime_error("AeadAdapter authentication failed");
     }
-    requireLength(payloadLength + finalLength, plaintext_.size(), "decrypted plaintext");
+    requireLength(payloadLength + finalLength, plaintextInput().size(), "decrypted plaintext");
 }
 
-std::span<const unsigned char> AeadAdapter::plaintext() const noexcept { return plaintext_; }
+std::span<const unsigned char> AeadAdapter::plaintext() const noexcept { return plaintextInput(); }
 std::span<const unsigned char> AeadAdapter::ciphertext() const noexcept { return {ciphertext_.data(), ciphertextSize_}; }
 std::span<unsigned char> AeadAdapter::mutableCiphertext() noexcept { return {ciphertext_.data(), ciphertextSize_}; }
 std::span<const unsigned char> AeadAdapter::decryptedPlaintext() const noexcept { return decryptedPlaintext_; }

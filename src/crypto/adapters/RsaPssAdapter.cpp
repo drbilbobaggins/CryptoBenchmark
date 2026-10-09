@@ -3,6 +3,7 @@
 #include <array>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
@@ -53,6 +54,24 @@ RsaPssAdapter::RsaPssAdapter(
     }
     if (signatureBytes_ == 0) {
         throw std::invalid_argument("RsaPssAdapter signature size must be non-zero");
+    }
+}
+
+RsaPssAdapter::RsaPssAdapter(
+    core::RsaPssParameters parameters,
+    core::BenchmarkOperation operation,
+    InputMode inputMode,
+    core::ByteCount signatureBytes,
+    core::CommonWorkload&& workload)
+    : RsaPssAdapter(parameters, operation, inputMode, signatureBytes,
+                    static_cast<core::WorkloadBytes>(workload.size()))
+{
+    commonWorkload_.emplace(std::move(workload));
+    const auto expectedSize = inputMode_ == InputMode::Prehashed
+        ? digestBytes(parameters.digest)
+        : static_cast<std::size_t>(messageSize_);
+    if (commonWorkload_->size() != expectedSize) {
+        throw std::invalid_argument("RsaPssAdapter common workload size does not match input mode");
     }
 }
 
@@ -116,7 +135,9 @@ void RsaPssAdapter::prepareSignature()
         openssl::throwOpenSslError("EVP_MD_fetch(RSA-PSS digest)");
     }
     if (inputMode_ == InputMode::Prehashed) {
-        digestBytes_.assign(digestBytes(parameters.digest), 0xA5U);
+        if (!commonWorkload_) {
+            digestBytes_.assign(digestBytes(parameters.digest), 0xA5U);
+        }
         context_ = openssl::EvpPkeyCtxPtr(
             EVP_PKEY_CTX_new_from_pkey(nullptr, signingKey_.get(), nullptr), &EVP_PKEY_CTX_free);
         if (!context_) {
@@ -124,10 +145,12 @@ void RsaPssAdapter::prepareSignature()
         }
     }
     if (inputMode_ == InputMode::Message) {
-        message_.resize(static_cast<std::size_t>(messageSize_));
-        constexpr std::array pattern{'a', 'b', 'c'};
-        for (std::size_t index = 0; index < message_.size(); ++index) {
-            message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+        if (!commonWorkload_) {
+            message_.resize(static_cast<std::size_t>(messageSize_));
+            constexpr std::array pattern{'a', 'b', 'c'};
+            for (std::size_t index = 0; index < message_.size(); ++index) {
+                message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+            }
         }
         messageContext_ = openssl::EvpMdCtxPtr(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
         if (!messageContext_) {
@@ -151,7 +174,7 @@ void RsaPssAdapter::prepareSignature()
             "EVP_DigestSignInit(RSA-PSS message prerequisite)");
         configurePss(borrowedContext);
         openssl::checkOpenSslReturn(
-            EVP_DigestSignUpdate(prerequisiteContext.get(), message_.data(), message_.size()),
+            EVP_DigestSignUpdate(prerequisiteContext.get(), messageInput().data(), messageInput().size()),
             "EVP_DigestSignUpdate(RSA-PSS message prerequisite)");
         std::size_t signatureLength = signature_.size();
         openssl::checkOpenSslReturn(
@@ -193,7 +216,7 @@ void RsaPssAdapter::createPrerequisiteSignature()
     openssl::checkOpenSslReturn(
         EVP_PKEY_sign(
             prerequisiteContext.get(), signature_.data(), &signatureLength,
-            digestBytes_.data(), digestBytes_.size()),
+            digestInput().data(), digestInput().size()),
         "EVP_PKEY_sign(RSA-PSS prerequisite)");
     if (signatureLength != signature_.size()) {
         throw std::runtime_error("RSA-PSS prerequisite signature length mismatch");
@@ -248,7 +271,7 @@ void RsaPssAdapter::executeSign()
             "EVP_DigestSignInit(RSA-PSS message)");
         configurePss(borrowedContext);
         openssl::checkOpenSslReturn(
-            EVP_DigestSignUpdate(messageContext_.get(), message_.data(), message_.size()),
+            EVP_DigestSignUpdate(messageContext_.get(), messageInput().data(), messageInput().size()),
             "EVP_DigestSignUpdate(RSA-PSS message)");
         std::size_t signatureLength = signature_.size();
         openssl::checkOpenSslReturn(
@@ -265,7 +288,7 @@ void RsaPssAdapter::executeSign()
     openssl::checkOpenSslReturn(
         EVP_PKEY_sign(
             context_.get(), signature_.data(), &signatureLength,
-            digestBytes_.data(), digestBytes_.size()),
+            digestInput().data(), digestInput().size()),
         "EVP_PKEY_sign(RSA-PSS)");
     if (signatureLength != signature_.size()) {
         throw std::runtime_error("RSA-PSS signature length mismatch");
@@ -282,7 +305,7 @@ void RsaPssAdapter::executeVerify()
             "EVP_DigestVerifyInit(RSA-PSS message)");
         configurePss(borrowedContext);
         openssl::checkOpenSslReturn(
-            EVP_DigestVerifyUpdate(messageContext_.get(), message_.data(), message_.size()),
+            EVP_DigestVerifyUpdate(messageContext_.get(), messageInput().data(), messageInput().size()),
             "EVP_DigestVerifyUpdate(RSA-PSS message)");
         const int result = EVP_DigestVerifyFinal(
             messageContext_.get(), signature_.data(), signature_.size());
@@ -298,7 +321,7 @@ void RsaPssAdapter::executeVerify()
     configurePss(context_.get());
     const int result = EVP_PKEY_verify(
         context_.get(), signature_.data(), signature_.size(),
-        digestBytes_.data(), digestBytes_.size());
+        digestInput().data(), digestInput().size());
     if (result == 1) {
         return;
     }
@@ -326,11 +349,23 @@ void RsaPssAdapter::configurePss(EVP_PKEY_CTX* context) const
 
 std::span<const unsigned char> RsaPssAdapter::digestForTesting() const noexcept
 {
-    return digestBytes_;
+    return digestInput();
 }
 
 std::span<const unsigned char> RsaPssAdapter::messageForTesting() const noexcept
 {
+    return messageInput();
+}
+
+std::span<const unsigned char> RsaPssAdapter::digestInput() const noexcept
+{
+    if (commonWorkload_ && inputMode_ == InputMode::Prehashed) return commonWorkload_->bytes();
+    return digestBytes_;
+}
+
+std::span<const unsigned char> RsaPssAdapter::messageInput() const noexcept
+{
+    if (commonWorkload_ && inputMode_ == InputMode::Message) return commonWorkload_->bytes();
     return message_;
 }
 

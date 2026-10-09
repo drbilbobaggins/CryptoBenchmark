@@ -6,6 +6,7 @@
 #include <cryptobench/core/AlgorithmRegistry.h>
 #include <cryptobench/core/BenchmarkRunner.h>
 #include <cryptobench/core/BenchmarkTask.h>
+#include <cryptobench/core/CommonWorkload.h>
 #include <cryptobench/core/ConfigValidator.h>
 #include <cryptobench/core/ProcessCpuTimeSource.h>
 #include <cryptobench/core/ProgressSink.h>
@@ -55,6 +56,9 @@ void require(bool condition, std::string_view message)
         throw std::runtime_error(std::string(message));
     }
 }
+
+core::ValidatedBenchmarkConfig validateFactoryConfig(core::BenchmarkConfig config);
+const core::AlgorithmProfile& canonicalFactoryProfile(core::AlgorithmProfileId id);
 
 std::string hex(std::span<const unsigned char> bytes)
 {
@@ -167,6 +171,54 @@ void testCanonicalXofVectors()
             require(hex(adapter.output()) == reference.substr(0, length * 2), "repeated XOF mismatch");
         }
     }
+}
+
+void testCommonWorkloadMigrationPreservesDigestAndXofInput()
+{
+    std::vector<unsigned char> bytes{0xffU, 0x00U, 0x7fU, 0x42U};
+    const auto expected = bytes;
+    const auto originalAddress = bytes.data();
+
+    DigestAdapter digest(DigestParameters{DigestAlgorithm::Sha256}, core::CommonWorkload{std::move(bytes)});
+    require(digest.input().data() == originalAddress, "Digest workload allocation was copied");
+    require(std::vector(digest.input().begin(), digest.input().end()) == expected,
+            "Digest workload bytes changed before preparation");
+    digest.prepareSeries();
+    digest.executeIteration();
+
+    std::vector<unsigned char> xofBytes{0xffU, 0x00U, 0x7fU, 0x42U};
+    XofAdapter xof(XofParameters{XofAlgorithm::Shake128, 32}, core::CommonWorkload{std::move(xofBytes)});
+    require(xof.input().size() == expected.size(), "XOF migrated workload size mismatch");
+    require(std::vector(xof.input().begin(), xof.input().end()) == expected,
+            "XOF workload bytes changed before preparation");
+    xof.prepareSeries();
+    xof.executeIteration();
+
+    DigestAdapter empty(DigestParameters{DigestAlgorithm::Sha256}, core::CommonWorkload{std::vector<unsigned char>{}});
+    empty.prepareSeries();
+    requireDigest(empty, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", 32);
+}
+
+void testCommonWorkloadFactoryRejectsSizeMismatch()
+{
+    const core::BenchmarkConfig config{
+        core::AlgorithmProfileId::Sha256,
+        BenchmarkOperation::Hash,
+        1,
+        1,
+        core::HashConfig{4}
+    };
+    auto validated = validateFactoryConfig(config);
+    const auto& profile = canonicalFactoryProfile(config.profile);
+    bool rejected = false;
+    try {
+        static_cast<void>(AdapterFactory{}.create(
+            profile, config.operation, validated,
+            core::CommonWorkload{std::vector<unsigned char>{0x01U}}));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    require(rejected, "factory accepted a mismatched common workload size");
 }
 
 class NoOpProgressSink final : public ProgressSink {
@@ -401,6 +453,8 @@ int main()
             std::pair{"longer prepared hash and XOF input", &testLongerPreparedHashAndXofInput},
             std::pair{"all canonical digest vectors", &testAllCanonicalDigests},
             std::pair{"canonical XOF vectors", &testCanonicalXofVectors},
+            std::pair{"common workload migration preserves Digest/XOF input", &testCommonWorkloadMigrationPreservesDigestAndXofInput},
+            std::pair{"common workload factory rejects size mismatch", &testCommonWorkloadFactoryRejectsSizeMismatch},
             std::pair{"DigestAdapter through BenchmarkRunner", &testDigestAdapterRunsThroughBenchmarkRunner},
             std::pair{"AdapterFactory creates and executes canonical SHA-256", &testAdapterFactoryCreatesAndExecutesCanonicalSha256},
             std::pair{"AdapterFactory creates all canonical Hash/XOF profiles", &testAdapterFactoryCreatesAllCanonicalHashXofProfiles},

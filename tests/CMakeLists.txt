@@ -41,6 +41,28 @@ target_link_libraries(CryptoBenchmarkMemoryV2CalculatorTests
 
 add_test(NAME CryptoBenchmarkMemoryV2CalculatorTests COMMAND CryptoBenchmarkMemoryV2CalculatorTests)
 
+add_executable(CryptoBenchmarkCommonWorkloadTests
+	CommonWorkloadTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkCommonWorkloadTests
+	PRIVATE
+		cryptobench_core
+)
+
+add_test(NAME CryptoBenchmarkCommonWorkloadTests COMMAND CryptoBenchmarkCommonWorkloadTests)
+
+add_executable(CryptoBenchmarkOpenSslRuntimeBootstrapTests
+	OpenSslRuntimeBootstrapTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkOpenSslRuntimeBootstrapTests
+	PRIVATE
+		cryptobench_crypto
+)
+
+add_test(NAME CryptoBenchmarkOpenSslRuntimeBootstrapTests COMMAND CryptoBenchmarkOpenSslRuntimeBootstrapTests)
+
 add_executable(CryptoBenchmarkEnvironmentInfoTests
 	EnvironmentInfoProviderTests.cpp
 )

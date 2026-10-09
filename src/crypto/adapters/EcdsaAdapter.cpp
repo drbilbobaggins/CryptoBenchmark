@@ -3,6 +3,7 @@
 #include <array>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 #include <openssl/evp.h>
 
@@ -71,6 +72,24 @@ EcdsaAdapter::EcdsaAdapter(
     }
 }
 
+EcdsaAdapter::EcdsaAdapter(
+    core::EcdsaParameters parameters,
+    core::BenchmarkOperation operation,
+    InputMode inputMode,
+    core::ByteCount signatureBytes,
+    core::CommonWorkload&& workload)
+    : EcdsaAdapter(parameters, operation, inputMode, signatureBytes,
+                   static_cast<core::WorkloadBytes>(workload.size()))
+{
+    commonWorkload_.emplace(std::move(workload));
+    const auto expectedSize = inputMode_ == InputMode::Prehashed
+        ? digestBytes(parameters.digest)
+        : static_cast<std::size_t>(messageSize_);
+    if (commonWorkload_->size() != expectedSize) {
+        throw std::invalid_argument("EcdsaAdapter common workload size does not match input mode");
+    }
+}
+
 void EcdsaAdapter::prepareSeries()
 {
     if (std::holds_alternative<core::EcKeyGenParameters>(parameters_)) {
@@ -100,17 +119,21 @@ void EcdsaAdapter::prepareSignature()
         openssl::throwOpenSslError("EVP_MD_fetch(ECDSA digest)");
     }
     if (inputMode_ == InputMode::Prehashed) {
-        digestBytes_.assign(digestBytes(parameters.digest), 0xA5U);
+        if (!commonWorkload_) {
+            digestBytes_.assign(digestBytes(parameters.digest), 0xA5U);
+        }
         context_ = openssl::EvpPkeyCtxPtr(
             EVP_PKEY_CTX_new_from_pkey(nullptr, signingKey_.get(), nullptr), &EVP_PKEY_CTX_free);
         if (!context_) {
             openssl::throwOpenSslError("EVP_PKEY_CTX_new_from_pkey(ECDSA)");
         }
     } else {
-        message_.resize(static_cast<std::size_t>(messageSize_));
-        constexpr std::array pattern{'a', 'b', 'c'};
-        for (std::size_t index = 0; index < message_.size(); ++index) {
-            message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+        if (!commonWorkload_) {
+            message_.resize(static_cast<std::size_t>(messageSize_));
+            constexpr std::array pattern{'a', 'b', 'c'};
+            for (std::size_t index = 0; index < message_.size(); ++index) {
+                message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+            }
         }
         messageContext_ = openssl::EvpMdCtxPtr(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
         if (!messageContext_) {
@@ -141,7 +164,7 @@ void EcdsaAdapter::createPrerequisiteSignature()
     openssl::checkOpenSslReturn(
         EVP_PKEY_sign(
             prerequisiteContext.get(), signature_.data(), &actualSignatureLength_,
-            digestBytes_.data(), digestBytes_.size()),
+            digestInput().data(), digestInput().size()),
         "EVP_PKEY_sign(ECDSA prerequisite)");
     if (actualSignatureLength_ == 0 || actualSignatureLength_ > signature_.size()) {
         throw std::runtime_error("ECDSA prerequisite signature length is invalid");
@@ -160,7 +183,7 @@ void EcdsaAdapter::createPrerequisiteMessageSignature()
             prerequisiteContext.get(), &borrowedContext, digest_.get(), nullptr, signingKey_.get()),
         "EVP_DigestSignInit(ECDSA message prerequisite)");
     openssl::checkOpenSslReturn(
-        EVP_DigestSignUpdate(prerequisiteContext.get(), message_.data(), message_.size()),
+        EVP_DigestSignUpdate(prerequisiteContext.get(), messageInput().data(), messageInput().size()),
         "EVP_DigestSignUpdate(ECDSA message prerequisite)");
     actualSignatureLength_ = signature_.size();
     openssl::checkOpenSslReturn(
@@ -207,7 +230,7 @@ void EcdsaAdapter::executeSign()
                 messageContext_.get(), &borrowedContext, digest_.get(), nullptr, signingKey_.get()),
             "EVP_DigestSignInit(ECDSA message)");
         openssl::checkOpenSslReturn(
-            EVP_DigestSignUpdate(messageContext_.get(), message_.data(), message_.size()),
+            EVP_DigestSignUpdate(messageContext_.get(), messageInput().data(), messageInput().size()),
             "EVP_DigestSignUpdate(ECDSA message)");
         actualSignatureLength_ = signature_.size();
         openssl::checkOpenSslReturn(
@@ -226,7 +249,7 @@ void EcdsaAdapter::executeSign()
     openssl::checkOpenSslReturn(
         EVP_PKEY_sign(
             context_.get(), signature_.data(), &actualSignatureLength_,
-            digestBytes_.data(), digestBytes_.size()),
+            digestInput().data(), digestInput().size()),
         "EVP_PKEY_sign(ECDSA)");
     if (actualSignatureLength_ == 0 || actualSignatureLength_ > signature_.size()) {
         throw std::runtime_error("ECDSA signature length is invalid");
@@ -243,7 +266,7 @@ void EcdsaAdapter::executeVerify()
                 messageContext_.get(), &borrowedContext, digest_.get(), nullptr, signingKey_.get()),
             "EVP_DigestVerifyInit(ECDSA message)");
         openssl::checkOpenSslReturn(
-            EVP_DigestVerifyUpdate(messageContext_.get(), message_.data(), message_.size()),
+            EVP_DigestVerifyUpdate(messageContext_.get(), messageInput().data(), messageInput().size()),
             "EVP_DigestVerifyUpdate(ECDSA message)");
         const int result = EVP_DigestVerifyFinal(
             messageContext_.get(), signature_.data(), actualSignatureLength_);
@@ -260,7 +283,7 @@ void EcdsaAdapter::executeVerify()
         EVP_PKEY_CTX_set_signature_md(context_.get(), digest_.get()),
         "EVP_PKEY_CTX_set_signature_md(ECDSA)");
     const int result = EVP_PKEY_verify(
-        context_.get(), signature_.data(), actualSignatureLength_, digestBytes_.data(), digestBytes_.size());
+        context_.get(), signature_.data(), actualSignatureLength_, digestInput().data(), digestInput().size());
     if (result == 1) {
         return;
     }
@@ -272,11 +295,23 @@ void EcdsaAdapter::executeVerify()
 
 std::span<const unsigned char> EcdsaAdapter::digestForTesting() const noexcept
 {
-    return digestBytes_;
+    return digestInput();
 }
 
 std::span<const unsigned char> EcdsaAdapter::messageForTesting() const noexcept
 {
+    return messageInput();
+}
+
+std::span<const unsigned char> EcdsaAdapter::digestInput() const noexcept
+{
+    if (commonWorkload_ && inputMode_ == InputMode::Prehashed) return commonWorkload_->bytes();
+    return digestBytes_;
+}
+
+std::span<const unsigned char> EcdsaAdapter::messageInput() const noexcept
+{
+    if (commonWorkload_ && inputMode_ == InputMode::Message) return commonWorkload_->bytes();
     return message_;
 }
 

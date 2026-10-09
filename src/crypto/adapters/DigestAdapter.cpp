@@ -52,6 +52,14 @@ DigestAdapter::DigestAdapter(core::DigestParameters parameters, core::WorkloadBy
     static_cast<void>(digestName(parameters_.algorithm));
 }
 
+DigestAdapter::DigestAdapter(core::DigestParameters parameters, core::CommonWorkload&& workload)
+    : parameters_(parameters),
+      inputSize_(static_cast<core::WorkloadBytes>(workload.size())),
+      commonWorkload_(std::move(workload))
+{
+    static_cast<void>(digestName(parameters_.algorithm));
+}
+
 void DigestAdapter::prepareSeries()
 {
     const auto name = digestName(parameters_.algorithm);
@@ -65,10 +73,12 @@ void DigestAdapter::prepareSeries()
         openssl::throwOpenSslError("EVP_MD_CTX_new");
     }
 
-    input_.resize(static_cast<std::size_t>(inputSize_));
-    constexpr std::array pattern{'a', 'b', 'c'};
-    for (std::size_t index = 0; index < input_.size(); ++index) {
-        input_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+    if (!commonWorkload_) {
+        input_.resize(static_cast<std::size_t>(inputSize_));
+        constexpr std::array pattern{'a', 'b', 'c'};
+        for (std::size_t index = 0; index < input_.size(); ++index) {
+            input_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+        }
     }
     output_.resize(digestOutputSize(parameters_.algorithm));
 }
@@ -81,9 +91,10 @@ void DigestAdapter::executeIteration()
 
     openssl::checkOpenSslReturn(EVP_MD_CTX_reset(context_.get()), "EVP_MD_CTX_reset");
     openssl::checkOpenSslReturn(EVP_DigestInit_ex2(context_.get(), digest_.get(), nullptr), "EVP_DigestInit_ex2");
-    if (!input_.empty()) {
+    const auto input = inputBytes();
+    if (!input.empty()) {
         openssl::checkOpenSslReturn(
-            EVP_DigestUpdate(context_.get(), input_.data(), input_.size()),
+            EVP_DigestUpdate(context_.get(), input.data(), input.size()),
             "EVP_DigestUpdate");
     }
 
@@ -99,6 +110,17 @@ void DigestAdapter::executeIteration()
 std::span<const unsigned char> DigestAdapter::output() const noexcept
 {
     return output_;
+}
+
+std::span<const unsigned char> DigestAdapter::input() const noexcept
+{
+    return inputBytes();
+}
+
+std::span<const unsigned char> DigestAdapter::inputBytes() const noexcept
+{
+    if (commonWorkload_) return commonWorkload_->bytes();
+    return input_;
 }
 
 } // namespace cryptobench::crypto

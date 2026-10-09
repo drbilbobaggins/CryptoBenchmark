@@ -1,6 +1,7 @@
 add_library(cryptobench_crypto STATIC
     AdapterFactory.cpp
     EcKeyGen.cpp
+    openssl/OpenSslRuntimeBootstrap.cpp
     adapters/AeadAdapter.cpp
     adapters/DigestAdapter.cpp
     adapters/EdDsaAdapter.cpp

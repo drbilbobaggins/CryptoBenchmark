@@ -3,6 +3,7 @@
 #include <array>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 #include <openssl/evp.h>
 
@@ -72,6 +73,18 @@ SlhDsaAdapter::SlhDsaAdapter(
     }
 }
 
+SlhDsaAdapter::SlhDsaAdapter(
+    core::SlhDsaParameters parameters,
+    core::BenchmarkOperation operation,
+    InputMode inputMode,
+    core::ByteCount signatureBytes,
+    core::CommonWorkload&& workload)
+    : SlhDsaAdapter(parameters, operation, inputMode, signatureBytes,
+                    static_cast<core::WorkloadBytes>(workload.size()))
+{
+    commonWorkload_.emplace(std::move(workload));
+}
+
 void SlhDsaAdapter::prepareSeries()
 {
     if (operation_ == core::BenchmarkOperation::KeyGen) {
@@ -120,10 +133,12 @@ void SlhDsaAdapter::prepareSignature()
         openssl::throwOpenSslError("EVP_PKEY_CTX_new_from_pkey(SLH-DSA)");
     }
 
-    message_.resize(static_cast<std::size_t>(messageSize_));
-    constexpr std::array pattern{'a', 'b', 'c'};
-    for (std::size_t index = 0; index < message_.size(); ++index) {
-        message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+    if (!commonWorkload_) {
+        message_.resize(static_cast<std::size_t>(messageSize_));
+        constexpr std::array pattern{'a', 'b', 'c'};
+        for (std::size_t index = 0; index < message_.size(); ++index) {
+            message_[index] = static_cast<unsigned char>(pattern[index % pattern.size()]);
+        }
     }
     signature_.resize(static_cast<std::size_t>(signatureBytes_));
     if (operation_ == core::BenchmarkOperation::Verify) {
@@ -145,7 +160,7 @@ void SlhDsaAdapter::createPrerequisiteSignature()
     openssl::checkOpenSslReturn(
         EVP_PKEY_sign(
             prerequisiteContext.get(), signature_.data(), &signatureLength,
-            message_.data(), message_.size()),
+            messageInput().data(), messageInput().size()),
         "EVP_PKEY_sign(SLH-DSA prerequisite)");
     if (signatureLength != signature_.size()) {
         throw std::runtime_error("SLH-DSA prerequisite signature length mismatch");
@@ -181,7 +196,7 @@ void SlhDsaAdapter::executeSign()
         "EVP_PKEY_sign_message_init(SLH-DSA)");
     std::size_t signatureLength = signature_.size();
     openssl::checkOpenSslReturn(
-        EVP_PKEY_sign(context_.get(), signature_.data(), &signatureLength, message_.data(), message_.size()),
+        EVP_PKEY_sign(context_.get(), signature_.data(), &signatureLength, messageInput().data(), messageInput().size()),
         "EVP_PKEY_sign(SLH-DSA)");
     if (signatureLength != signature_.size()) {
         throw std::runtime_error("SLH-DSA signature length mismatch");
@@ -194,7 +209,7 @@ void SlhDsaAdapter::executeVerify()
         EVP_PKEY_verify_message_init(context_.get(), signatureAlgorithm_.get(), nullptr),
         "EVP_PKEY_verify_message_init(SLH-DSA)");
     const int result = EVP_PKEY_verify(
-        context_.get(), signature_.data(), signature_.size(), message_.data(), message_.size());
+        context_.get(), signature_.data(), signature_.size(), messageInput().data(), messageInput().size());
     if (result == 1) {
         return;
     }
@@ -206,6 +221,12 @@ void SlhDsaAdapter::executeVerify()
 
 std::span<const unsigned char> SlhDsaAdapter::messageForTesting() const noexcept
 {
+    return messageInput();
+}
+
+std::span<const unsigned char> SlhDsaAdapter::messageInput() const noexcept
+{
+    if (commonWorkload_) return commonWorkload_->bytes();
     return message_;
 }
 

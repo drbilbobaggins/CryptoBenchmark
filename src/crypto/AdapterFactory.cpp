@@ -17,6 +17,197 @@
 
 namespace cryptobench::crypto {
 
+namespace {
+
+std::size_t signatureDigestBytes(core::SignatureDigest digest)
+{
+    switch (digest) {
+    case core::SignatureDigest::Sha256: return 32;
+    case core::SignatureDigest::Sha384: return 48;
+    case core::SignatureDigest::Sha512: return 64;
+    }
+    throw std::logic_error("unknown signature digest");
+}
+
+} // namespace
+
+std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
+    const core::AlgorithmProfile& profile,
+    core::BenchmarkOperation operation,
+    const core::ValidatedBenchmarkConfig& config,
+    core::CommonWorkload&& workload) const
+{
+    const auto& validatedConfig = config.value();
+    if (profile.id != validatedConfig.profile) {
+        throw std::logic_error("AdapterFactory profile does not match validated configuration");
+    }
+    if (operation != validatedConfig.operation) {
+        throw std::logic_error("AdapterFactory operation does not match validated configuration");
+    }
+
+    switch (profile.executionStrategy) {
+    case core::ExecutionStrategyId::Digest: {
+        const auto* parameters = std::get_if<core::DigestParameters>(&profile.parameters);
+        const auto* hashConfig = std::get_if<core::HashConfig>(&validatedConfig.parameters);
+        if (parameters == nullptr || hashConfig == nullptr) {
+            throw std::logic_error("Digest workload path requires matching canonical parameters");
+        }
+        if (workload.size() != static_cast<std::size_t>(hashConfig->inputSize)) {
+            throw std::invalid_argument("Digest common workload size does not match configuration");
+        }
+        return std::make_unique<DigestAdapter>(*parameters, std::move(workload));
+    }
+    case core::ExecutionStrategyId::Xof: {
+        const auto* parameters = std::get_if<core::XofParameters>(&profile.parameters);
+        const auto* hashConfig = std::get_if<core::HashConfig>(&validatedConfig.parameters);
+        if (parameters == nullptr || hashConfig == nullptr) {
+            throw std::logic_error("XOF workload path requires matching canonical parameters");
+        }
+        if (workload.size() != static_cast<std::size_t>(hashConfig->inputSize)) {
+            throw std::invalid_argument("XOF common workload size does not match configuration");
+        }
+        return std::make_unique<XofAdapter>(*parameters, std::move(workload));
+    }
+    case core::ExecutionStrategyId::Aead: {
+        const auto* aeadConfig = std::get_if<core::AeadConfig>(&validatedConfig.parameters);
+        if (aeadConfig == nullptr) {
+            throw std::logic_error("AEAD workload path requires AeadConfig");
+        }
+        if (workload.size() != static_cast<std::size_t>(aeadConfig->plaintextSize)) {
+            throw std::invalid_argument("AEAD common workload size does not match configuration");
+        }
+        if (profile.family == core::AlgorithmFamily::AesGcm) {
+            const auto* parameters = std::get_if<core::AesGcmParameters>(&profile.parameters);
+            if (parameters == nullptr) {
+                throw std::logic_error("AES-GCM profile requires AesGcmParameters");
+            }
+            return std::make_unique<AeadAdapter>(*parameters, operation, std::move(workload));
+        }
+        if (profile.family == core::AlgorithmFamily::ChaCha20Poly1305) {
+            const auto* parameters = std::get_if<core::ChaCha20Poly1305Parameters>(&profile.parameters);
+            if (parameters == nullptr) {
+                throw std::logic_error("ChaCha20-Poly1305 profile requires ChaCha20Poly1305Parameters");
+            }
+            return std::make_unique<AeadAdapter>(*parameters, operation, std::move(workload));
+        }
+        throw std::logic_error("AEAD workload path requires matching parameters");
+    }
+    case core::ExecutionStrategyId::Ecdh:
+    case core::ExecutionStrategyId::Xdh:
+    case core::ExecutionStrategyId::MlKem:
+        if (!workload.empty()) {
+            throw std::invalid_argument("Key-establishment strategies require an empty common workload");
+        }
+        return create(profile, operation, config);
+    case core::ExecutionStrategyId::RsaPssSignature: {
+        const auto* signatureConfig = std::get_if<core::SignatureConfig>(&validatedConfig.parameters);
+        const auto* characteristics = std::get_if<core::SignatureCharacteristics>(&profile.characteristics);
+        if (signatureConfig == nullptr || characteristics == nullptr || !characteristics->signatureSize) {
+            throw std::logic_error("RSA-PSS workload path requires matching signature configuration");
+        }
+        if (const auto* keyGen = std::get_if<core::RsaKeyGenParameters>(&profile.parameters)) {
+            if (operation != core::BenchmarkOperation::KeyGen ||
+                !std::holds_alternative<core::NoSignatureInput>(signatureConfig->input)) {
+                throw std::logic_error("RSA KeyGen requires KeyGen and NoSignatureInput");
+            }
+            if (!workload.empty()) throw std::invalid_argument("RSA KeyGen requires an empty common workload");
+            return create(profile, operation, config);
+        }
+        const auto* parameters = std::get_if<core::RsaPssParameters>(&profile.parameters);
+        if (parameters == nullptr || (operation != core::BenchmarkOperation::Sign && operation != core::BenchmarkOperation::Verify)) {
+            throw std::logic_error("RSA-PSS workload path requires Sign or Verify parameters");
+        }
+        if (std::holds_alternative<core::PrehashedInput>(signatureConfig->input)) {
+            if (workload.size() != signatureDigestBytes(parameters->digest)) {
+                throw std::invalid_argument("RSA-PSS prehashed workload size does not match digest");
+            }
+            return std::make_unique<RsaPssAdapter>(
+                *parameters, operation, RsaPssAdapter::InputMode::Prehashed,
+                characteristics->signatureSize->bytes, std::move(workload));
+        }
+        const auto* message = std::get_if<core::MessageInput>(&signatureConfig->input);
+        if (message == nullptr || workload.size() != static_cast<std::size_t>(message->messageSize)) {
+            throw std::invalid_argument("RSA-PSS message workload size does not match configuration");
+        }
+        return std::make_unique<RsaPssAdapter>(
+            *parameters, operation, RsaPssAdapter::InputMode::Message,
+            characteristics->signatureSize->bytes, std::move(workload));
+    }
+    case core::ExecutionStrategyId::EcdsaSignature: {
+        const auto* signatureConfig = std::get_if<core::SignatureConfig>(&validatedConfig.parameters);
+        const auto* characteristics = std::get_if<core::SignatureCharacteristics>(&profile.characteristics);
+        if (signatureConfig == nullptr || characteristics == nullptr || !characteristics->signatureSize) {
+            throw std::logic_error("ECDSA workload path requires matching signature configuration");
+        }
+        if (const auto* keyGen = std::get_if<core::EcKeyGenParameters>(&profile.parameters)) {
+            if (operation != core::BenchmarkOperation::KeyGen ||
+                !std::holds_alternative<core::NoSignatureInput>(signatureConfig->input)) {
+                throw std::logic_error("ECDSA KeyGen requires KeyGen and NoSignatureInput");
+            }
+            if (!workload.empty()) throw std::invalid_argument("ECDSA KeyGen requires an empty common workload");
+            return create(profile, operation, config);
+        }
+        const auto* parameters = std::get_if<core::EcdsaParameters>(&profile.parameters);
+        if (parameters == nullptr || (operation != core::BenchmarkOperation::Sign && operation != core::BenchmarkOperation::Verify)) {
+            throw std::logic_error("ECDSA workload path requires Sign or Verify parameters");
+        }
+        if (std::holds_alternative<core::PrehashedInput>(signatureConfig->input)) {
+            if (workload.size() != signatureDigestBytes(parameters->digest)) {
+                throw std::invalid_argument("ECDSA prehashed workload size does not match digest");
+            }
+            return std::make_unique<EcdsaAdapter>(
+                *parameters, operation, EcdsaAdapter::InputMode::Prehashed,
+                characteristics->signatureSize->bytes, std::move(workload));
+        }
+        const auto* message = std::get_if<core::MessageInput>(&signatureConfig->input);
+        if (message == nullptr || workload.size() != static_cast<std::size_t>(message->messageSize)) {
+            throw std::invalid_argument("ECDSA message workload size does not match configuration");
+        }
+        return std::make_unique<EcdsaAdapter>(
+            *parameters, operation, EcdsaAdapter::InputMode::Message,
+            characteristics->signatureSize->bytes, std::move(workload));
+    }
+    case core::ExecutionStrategyId::EdDsaSignature:
+    case core::ExecutionStrategyId::MlDsaSignature:
+    case core::ExecutionStrategyId::SlhDsaSignature: {
+        const auto* signatureConfig = std::get_if<core::SignatureConfig>(&validatedConfig.parameters);
+        const auto* characteristics = std::get_if<core::SignatureCharacteristics>(&profile.characteristics);
+        if (signatureConfig == nullptr || characteristics == nullptr || !characteristics->signatureSize) {
+            throw std::logic_error("signature workload path requires matching signature configuration");
+        }
+        if (operation == core::BenchmarkOperation::KeyGen) {
+            if (!std::holds_alternative<core::NoSignatureInput>(signatureConfig->input)) {
+                throw std::logic_error("signature KeyGen requires NoSignatureInput");
+            }
+            if (!workload.empty()) throw std::invalid_argument("signature KeyGen requires an empty common workload");
+            return create(profile, operation, config);
+        }
+        const auto* message = std::get_if<core::MessageInput>(&signatureConfig->input);
+        if (message == nullptr || workload.size() != static_cast<std::size_t>(message->messageSize)) {
+            throw std::invalid_argument("signature message workload size does not match configuration");
+        }
+        if (profile.executionStrategy == core::ExecutionStrategyId::EdDsaSignature) {
+            const auto* parameters = std::get_if<core::EdDsaParameters>(&profile.parameters);
+            if (parameters == nullptr) throw std::logic_error("EdDSA workload path requires EdDsaParameters");
+            return std::make_unique<EdDsaAdapter>(*parameters, operation, EdDsaAdapter::InputMode::Message,
+                characteristics->signatureSize->bytes, std::move(workload));
+        }
+        if (profile.executionStrategy == core::ExecutionStrategyId::MlDsaSignature) {
+            const auto* parameters = std::get_if<core::MlDsaParameters>(&profile.parameters);
+            if (parameters == nullptr) throw std::logic_error("ML-DSA workload path requires MlDsaParameters");
+            return std::make_unique<MlDsaAdapter>(*parameters, operation, MlDsaAdapter::InputMode::Message,
+                characteristics->signatureSize->bytes, std::move(workload));
+        }
+        const auto* parameters = std::get_if<core::SlhDsaParameters>(&profile.parameters);
+        if (parameters == nullptr) throw std::logic_error("SLH-DSA workload path requires SlhDsaParameters");
+        return std::make_unique<SlhDsaAdapter>(*parameters, operation, SlhDsaAdapter::InputMode::Message,
+            characteristics->signatureSize->bytes, std::move(workload));
+    }
+    default:
+        throw std::logic_error("Common workload path encountered an unknown execution strategy");
+    }
+}
+
 std::unique_ptr<core::AlgorithmAdapter> AdapterFactory::create(
     const core::AlgorithmProfile& profile,
     core::BenchmarkOperation operation,
