@@ -116,10 +116,10 @@ void testFramingAndControlPayloads()
     require(partialNextParser.append(frame + frame.left(3)).size() == 1, "complete frame plus partial next frame failed");
     require(partialNextParser.append(frame.mid(3)).size() == 1, "partial next frame was not completed");
     ipc::FrameParser unknownTypeParser;
-    requireRejected([&] { unknownTypeParser.append(header(10, 0)); }, "unknown message type accepted");
+    requireRejected([&] { unknownTypeParser.append(header(14, 0)); }, "unknown message type accepted");
     ipc::FrameParser oversizedParser;
     requireRejected([&] { oversizedParser.append(header(1, ipc::kMaxIpcPayload + 1)); }, "oversized parser header accepted");
-    requireRejected([&] { ipc::decodeFrame(header(10, 0)); }, "unknown decoded message type accepted");
+    requireRejected([&] { ipc::decodeFrame(header(14, 0)); }, "unknown decoded message type accepted");
     requireRejected([] { ipc::encodeFrame(static_cast<ipc::MessageType>(0), {}); }, "invalid message type encoded");
     requireRejected([] { ipc::encodeFrame(ipc::MessageType::WorkerReady, QByteArray(static_cast<qsizetype>(ipc::kMaxIpcPayload) + 1, '\0')); }, "oversized encoder payload accepted");
 }
@@ -181,6 +181,84 @@ void testStrictJsonRejection()
     requireRejected([] { ipc::decodeBenchmarkRequest(QByteArray("{\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":\"18446744073709551616\",\"runs\":1,\"parameters\":{\"type\":\"hash\",\"inputSize\":\"1\"}}")); }, "uint64 overflow accepted");
 }
 
+void testV2WireAndRequest()
+{
+    require(ipc::kProtocolVersion == 1 && ipc::kProtocolVersionV2 == 2, "protocol version identities changed");
+    const std::array v2Types{
+        ipc::MessageType::BenchmarkRunRequest,
+        ipc::MessageType::BaselineReady,
+        ipc::MessageType::StartAlgorithmPreparation,
+        ipc::MessageType::AlgorithmReady
+    };
+    for (std::size_t index = 0; index < v2Types.size(); ++index) {
+        const auto frame = ipc::encodeFrame(v2Types[index], {});
+        require(static_cast<unsigned char>(frame[0]) == 0 &&
+                    static_cast<unsigned char>(frame[1]) == 10 + index,
+                "v2 message type wire ID mismatch");
+        require(ipc::decodeFrame(frame).messageType == v2Types[index], "v2 message type roundtrip failed");
+    }
+    for (const auto type : {ipc::MessageType::BaselineReady, ipc::MessageType::StartAlgorithmPreparation, ipc::MessageType::AlgorithmReady}) {
+        for (const auto runIndex : {0U, 7U, 0xffffffffU}) {
+            const auto payload = ipc::encodeRunIndexPayload(runIndex);
+            require(ipc::decodeRunIndexPayload(ipc::decodeFrame(ipc::encodeFrame(type, payload)).payload) == runIndex,
+                    "v2 boundary runIndex roundtrip failed");
+        }
+    }
+    requireRejected([] { ipc::encodeFrame(static_cast<ipc::MessageType>(14), {}); }, "unallocated v2 message type encoded");
+    requireRejected([] { ipc::decodeFrame(header(14, 0)); }, "unallocated v2 message type decoded");
+    ipc::FrameParser unknownV2TypeParser;
+    requireRejected([&] { unknownV2TypeParser.append(header(14, 0)); }, "unallocated v2 message type parsed");
+    requireRejected([] { ipc::decodeRunIndexPayload(QByteArray(5, '\0')); }, "v2 boundary payload with extra byte accepted");
+
+    const core::BenchmarkConfig expectedConfig{
+        core::AlgorithmProfileId::Sha256,
+        core::BenchmarkOperation::Hash,
+        0xffffffffffffffffULL,
+        4,
+        core::HashConfig{0xffffffffffffffffULL}
+    };
+    const ipc::BenchmarkRunRequest expected{2, expectedConfig};
+    const auto encoded = ipc::encodeBenchmarkRunRequest(expected);
+    require(!encoded.contains('\n'), "v2 request JSON is not Compact");
+    const auto actual = ipc::decodeBenchmarkRunRequest(encoded);
+    require(actual.logicalRunIndex == 2, "logicalRunIndex roundtrip failed");
+    requireConfigEqual(actual.config, expectedConfig);
+    const QByteArray validConfig = "{\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":\"1\",\"runs\":4,\"parameters\":{\"type\":\"hash\",\"inputSize\":\"1\"}}";
+    const auto requestWithIndex = [&](const QByteArray& index) {
+        return QByteArray("{\"logicalRunIndex\":") + index + ",\"config\":" + validConfig + "}";
+    };
+    requireRejected([&] { ipc::decodeBenchmarkRunRequest(QByteArray("{\"config\":") + validConfig + "}"); }, "missing logicalRunIndex accepted");
+    requireRejected([&] { ipc::decodeBenchmarkRunRequest(requestWithIndex("-1")); }, "negative logicalRunIndex accepted");
+    requireRejected([&] { ipc::decodeBenchmarkRunRequest(requestWithIndex("1.5")); }, "floating logicalRunIndex accepted");
+    requireRejected([&] { ipc::decodeBenchmarkRunRequest(requestWithIndex("\"1\"")); }, "string logicalRunIndex accepted");
+    requireRejected([&] { ipc::decodeBenchmarkRunRequest(requestWithIndex("4294967296")); }, "oversized logicalRunIndex accepted");
+    requireRejected([&] { ipc::decodeBenchmarkRunRequest(requestWithIndex("4")); }, "logicalRunIndex equal to config.runs accepted");
+    requireRejected([&] { ipc::decodeBenchmarkRunRequest(requestWithIndex("5")); }, "logicalRunIndex greater than config.runs accepted");
+    const QByteArray zeroRunsConfig = "{\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":\"1\",\"runs\":0,\"parameters\":{\"type\":\"hash\",\"inputSize\":\"1\"}}";
+    requireRejected([&] { ipc::decodeBenchmarkRunRequest(QByteArray("{\"logicalRunIndex\":0,\"config\":") + zeroRunsConfig + "}"); }, "zero-run request accepted");
+    requireRejected([&] { ipc::decodeBenchmarkRunRequest(QByteArray("{\"logicalRunIndex\":0,\"config\":") + validConfig + ",\"extra\":true}"); }, "unknown v2 request field accepted");
+    requireRejected([] { ipc::decodeBenchmarkRunRequest(QByteArray("[]")); }, "v2 request array root accepted");
+    requireRejected([] { ipc::decodeBenchmarkRunRequest(QByteArray("{\"logicalRunIndex\":0,\"config\":[]}")); }, "v2 request array config accepted");
+    requireRejected([&] { ipc::encodeBenchmarkRunRequest({4, expectedConfig}); }, "invalid encoded logicalRunIndex accepted");
+
+    const std::array signatureConfigs{
+        core::BenchmarkConfig{core::AlgorithmProfileId::RsaPss2048Sha256, core::BenchmarkOperation::Sign, 7, 4, core::SignatureConfig{core::NoSignatureInput{}}},
+        core::BenchmarkConfig{core::AlgorithmProfileId::RsaPss2048Sha256, core::BenchmarkOperation::Sign, 7, 4, core::SignatureConfig{core::PrehashedInput{}}},
+        core::BenchmarkConfig{core::AlgorithmProfileId::RsaPss2048Sha256, core::BenchmarkOperation::Sign, 7, 4, core::SignatureConfig{core::MessageInput{123}}}
+    };
+    for (const auto& config : signatureConfigs) {
+        const auto request = ipc::decodeBenchmarkRunRequest(ipc::encodeBenchmarkRunRequest({1, config}));
+        require(request.logicalRunIndex == 1, "signature logicalRunIndex roundtrip failed");
+        requireConfigEqual(request.config, config);
+    }
+
+    const auto legacy = ipc::encodeBenchmarkRequest({expectedConfig});
+    require(!legacy.contains("logicalRunIndex"), "legacy BenchmarkRequest acquired v2 field");
+    const auto measurementReady = ipc::encodeFrame(ipc::MessageType::MeasurementReady, ipc::encodeRunIndexPayload(2));
+    require(ipc::decodeFrame(measurementReady).messageType == ipc::MessageType::MeasurementReady,
+            "legacy MeasurementReady identity changed");
+}
+
 int main()
 {
     try {
@@ -188,7 +266,8 @@ int main()
         testJsonDtos();
         testBenchmarkConfigRoundtrips();
         testStrictJsonRejection();
-        std::cout << "PASS ipc codec total=4\n";
+        testV2WireAndRequest();
+        std::cout << "PASS ipc codec total=5\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';

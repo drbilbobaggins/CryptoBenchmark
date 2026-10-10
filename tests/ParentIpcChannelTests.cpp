@@ -170,6 +170,21 @@ void testWrongDirectionIsObservableError()
     channel.close();
 }
 
+void testV2FrameIsNotAcceptedAsLegacyEvent()
+{
+    ipc::ParentIpcChannel channel;
+    const auto name = endpoint();
+    channel.startListening(name);
+    auto socket = connectWorker(channel, name);
+    QString error;
+    channel.connect(&channel, &ipc::ParentIpcChannel::transportError, [&](const QString& value) { error = value; });
+
+    sendBytes(*socket, ipc::encodeFrame(ipc::MessageType::BaselineReady, ipc::encodeRunIndexPayload(0)));
+    waitUntil([&] { return !error.isEmpty(); }, "v2-only frame did not report an error to the v1 parent channel");
+    require(error.contains(QStringLiteral("unsupported")), "v2-only frame was treated as a legacy event");
+    channel.close();
+}
+
 void testRemoteDisconnectCanCloseReentrantly()
 {
     ipc::ParentIpcChannel channel;
@@ -226,6 +241,7 @@ int main(int argc, char* argv[])
         testConnectionAndParentMessages();
         testWorkerMessagesAndStreamHandling();
         testWrongDirectionIsObservableError();
+        testV2FrameIsNotAcceptedAsLegacyEvent();
         testRemoteDisconnectCanCloseReentrantly();
         testSequentialSessionReuseDoesNotLeakOldSocketEvents();
         std::cout << "Parent IPC channel tests passed\n";

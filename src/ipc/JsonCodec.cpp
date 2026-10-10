@@ -176,6 +176,11 @@ BenchmarkConfig config(const QJsonObject& value)
     return result;
 }
 
+void validateLogicalRunIndex(std::uint32_t logicalRunIndex, const BenchmarkConfig& config)
+{
+    if (config.runs == 0 || logicalRunIndex >= config.runs) fail("logicalRunIndex is outside config.runs");
+}
+
 QByteArray compact(const QJsonObject& value) { return QJsonDocument(value).toJson(QJsonDocument::Compact); }
 
 } // namespace
@@ -184,6 +189,21 @@ QByteArray encodeWorkerReady(const WorkerReady& value) { return compact({{"proto
 WorkerReady decodeWorkerReady(const QByteArray& payload) { const auto v = object(payload); strictKeys(v, {"protocolVersion"}); return {uint32Number(required(v, "protocolVersion"))}; }
 QByteArray encodeBenchmarkRequest(const BenchmarkRequest& value) { return compact(configObject(value.config)); }
 BenchmarkRequest decodeBenchmarkRequest(const QByteArray& payload) { return {config(object(payload))}; }
+QByteArray encodeBenchmarkRunRequest(const BenchmarkRunRequest& value)
+{
+    validateLogicalRunIndex(value.logicalRunIndex, value.config);
+    return compact({{"logicalRunIndex", static_cast<qint64>(value.logicalRunIndex)}, {"config", configObject(value.config)}});
+}
+BenchmarkRunRequest decodeBenchmarkRunRequest(const QByteArray& payload)
+{
+    const auto value = object(payload);
+    strictKeys(value, {"logicalRunIndex", "config"});
+    const auto configValue = required(value, "config");
+    if (!configValue.isObject()) fail("config must be an object");
+    const auto result = BenchmarkRunRequest{uint32Number(required(value, "logicalRunIndex")), config(configValue.toObject())};
+    validateLogicalRunIndex(result.logicalRunIndex, result.config);
+    return result;
+}
 QByteArray encodeProgress(const Progress& value) { if (value.phase == BenchmarkPhase::Warmup && !value.runIndex) fail("warmup progress requires runIndex"); if (value.phase != BenchmarkPhase::Warmup && value.runIndex) fail("non-warmup progress cannot contain runIndex"); QString phase; switch (value.phase) { case BenchmarkPhase::Preparing: phase = "preparing"; break; case BenchmarkPhase::Warmup: phase = "warmup"; break; case BenchmarkPhase::Finalizing: phase = "finalizing"; break; case BenchmarkPhase::Measuring: fail("measuring progress is not a wire phase"); default: fail("unsupported progress phase"); } QJsonObject v{{"phase", phase}, {"totalRuns", static_cast<qint64>(value.totalRuns)}}; if (value.runIndex) v["runIndex"] = static_cast<qint64>(*value.runIndex); return compact(v); }
 Progress decodeProgress(const QByteArray& payload) { const auto v = object(payload); strictKeys(v, {"phase", "runIndex", "totalRuns"}); const auto phase = required(v, "phase").toString(); BenchmarkPhase p; if (phase == "preparing") p = BenchmarkPhase::Preparing; else if (phase == "warmup") p = BenchmarkPhase::Warmup; else if (phase == "finalizing") p = BenchmarkPhase::Finalizing; else fail("unknown progress phase"); std::optional<std::uint32_t> index; if (v.contains("runIndex")) index = uint32Number(v.value("runIndex")); if (p == BenchmarkPhase::Warmup && !index) fail("warmup progress requires runIndex"); if (p != BenchmarkPhase::Warmup && index) fail("non-warmup progress cannot contain runIndex"); return {p, index, uint32Number(required(v, "totalRuns"))}; }
 QByteArray encodeWorkerRunMeasurement(const WorkerRunMeasurement& value) { return compact({{"runIndex", static_cast<qint64>(value.runIndex)}, {"elapsedNanoseconds", QString::number(value.elapsedNanoseconds)}, {"processCpuNanoseconds", QString::number(value.processCpuNanoseconds)}}); }

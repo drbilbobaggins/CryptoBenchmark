@@ -29,10 +29,17 @@ std::uint32_t read32(const char* data)
     return value;
 }
 
+void validateType(MessageType value);
+
 MessageType parseType(std::uint16_t value)
 {
-    if (value < 1 || value > 9) throw std::runtime_error("unknown IPC message type");
-    return static_cast<MessageType>(value);
+    const auto type = static_cast<MessageType>(value);
+    try {
+        validateType(type);
+    } catch (const std::invalid_argument&) {
+        throw std::runtime_error("unknown IPC message type");
+    }
+    return type;
 }
 
 void validateType(MessageType value)
@@ -47,6 +54,10 @@ void validateType(MessageType value)
         case MessageType::MemoryWindowClosed:
         case MessageType::WorkerRunMeasurement:
         case MessageType::WorkerOutcome:
+        case MessageType::BenchmarkRunRequest:
+        case MessageType::BaselineReady:
+        case MessageType::StartAlgorithmPreparation:
+        case MessageType::AlgorithmReady:
             return;
     }
     throw std::invalid_argument("unsupported IPC message type");
