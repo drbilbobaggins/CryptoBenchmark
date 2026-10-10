@@ -168,6 +168,19 @@ public:
         runner.run();
     }
 
+    void prepare(std::uint32_t logicalRunIndex)
+    {
+        BenchmarkRunner runner(*task_, progress_, coordinator_, cpu_);
+        runner.prepareLogicalRun(logicalRunIndex);
+    }
+
+    void prepareAndMeasure(std::uint32_t logicalRunIndex)
+    {
+        BenchmarkRunner runner(*task_, progress_, coordinator_, cpu_);
+        runner.prepareLogicalRun(logicalRunIndex);
+        static_cast<void>(runner.measureLogicalRun(logicalRunIndex));
+    }
+
     std::uint32_t beforeMeasurementCalls() const
     {
         return coordinator_.beforeMeasurementCalls;
@@ -192,6 +205,22 @@ void expectRunnerFailure(
     } catch (const RunnerFailure& failure) {
         require(failure.stage() == stage, message);
         require(failure.runIndex() == runIndex, "runner failure run index mismatch");
+    }
+}
+
+template <typename Callable>
+void expectExplicitRunnerFailure(
+    Callable&& callable,
+    FailureStage stage,
+    std::optional<std::uint32_t> runIndex,
+    std::string_view message)
+{
+    try {
+        callable();
+        throw std::runtime_error("runner did not fail");
+    } catch (const RunnerFailure& failure) {
+        require(failure.stage() == stage, message);
+        require(failure.runIndex() == runIndex, "explicit runner failure run index mismatch");
     }
 }
 
@@ -265,6 +294,46 @@ void testProgressStageContext()
             "measurement began after warmup progress failure");
 }
 
+void testSingleLogicalRunErrorContext()
+{
+    RunnerFixture series(FakeAdapter::Failure::Series);
+    expectExplicitRunnerFailure([&] { series.prepare(1); }, FailureStage::SeriesPreparation, 1,
+                                "explicit series stage mismatch");
+    RunnerFixture runPreparation(FakeAdapter::Failure::RunPreparation, 0);
+    expectExplicitRunnerFailure([&] { runPreparation.prepare(1); }, FailureStage::RunPreparation, 1,
+                                "explicit run preparation stage mismatch");
+    RunnerFixture warmup(FakeAdapter::Failure::Warmup, 0);
+    expectExplicitRunnerFailure([&] { warmup.prepare(1); }, FailureStage::Warmup, 1,
+                                "explicit warmup stage mismatch");
+    RunnerFixture before(FakeAdapter::Failure::None, 0, std::nullopt, false, true);
+    expectExplicitRunnerFailure([&] { before.prepareAndMeasure(1); }, FailureStage::WorkerCommunication, 1,
+                                "explicit before stage mismatch");
+    RunnerFixture measurement(FakeAdapter::Failure::Measurement, 0);
+    expectExplicitRunnerFailure([&] { measurement.prepareAndMeasure(1); }, FailureStage::Measurement, 1,
+                                "explicit measurement stage mismatch");
+    RunnerFixture cpu(FakeAdapter::Failure::None, 0, std::nullopt, true);
+    expectExplicitRunnerFailure([&] { cpu.prepareAndMeasure(1); }, FailureStage::Measurement, 1,
+                                "explicit CPU stage mismatch");
+    RunnerFixture after(FakeAdapter::Failure::None, 0, std::nullopt, false, false, true);
+    expectExplicitRunnerFailure([&] { after.prepareAndMeasure(1); }, FailureStage::WorkerCommunication, 1,
+                                "explicit after stage mismatch");
+
+    RunnerFixture nested(FakeAdapter::Failure::Warmup, 0);
+    try {
+        nested.prepare(1);
+        throw std::runtime_error("runner did not fail");
+    } catch (const RunnerFailure& failure) {
+        bool nestedRecovered = false;
+        try {
+            std::rethrow_if_nested(failure);
+        } catch (const std::logic_error& error) {
+            nestedRecovered = true;
+            require(std::string(error.what()) == "warmup diagnostic", "explicit nested diagnostic mismatch");
+        }
+        require(nestedRecovered, "explicit original nested exception was not recovered");
+    }
+}
+
 } // namespace
 
 int runRunnerErrorContextTests()
@@ -274,7 +343,8 @@ int runRunnerErrorContextTests()
         std::pair{"adapter stage context", &testAdapterStageContext},
         std::pair{"dependency stage context", &testDependencyStageContext},
         std::pair{"nested original exception", &testNestedOriginalException},
-        std::pair{"progress stage context", &testProgressStageContext}
+        std::pair{"progress stage context", &testProgressStageContext},
+        std::pair{"single logical run error context", &testSingleLogicalRunErrorContext}
     };
 
     for (const auto& [name, test] : tests) {
