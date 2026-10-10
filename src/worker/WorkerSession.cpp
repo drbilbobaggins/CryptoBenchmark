@@ -68,15 +68,124 @@ ErrorInfo errorInfoFor(const core::RunnerFailure& failure)
     };
 }
 
-ErrorInfo errorInfoForTaskFailure(const std::exception& error, bool unsupportedStrategy)
+ErrorInfo errorInfoForTaskFailure(
+    const std::exception& error,
+    bool unsupportedStrategy,
+    std::optional<std::uint32_t> runIndex = std::nullopt)
 {
     return {
         unsupportedStrategy ? ErrorCode::UnknownExecutionStrategy : ErrorCode::InternalError,
         FailureStage::TaskCreation,
-        std::nullopt,
+        runIndex,
         error.what(),
         std::nullopt
     };
+}
+
+void trySendFailure(ipc::WorkerIpcChannel& channel, const ErrorInfo& error);
+
+int runSingleRunV2Session(const QString& endpoint)
+{
+    ipc::WorkerIpcChannel channel(10'000, ipc::WorkerIpcMode::SingleRunV2);
+    bool connected = false;
+    std::optional<std::uint32_t> logicalRunIndex;
+
+    try {
+        channel.connectToServer(endpoint);
+        connected = true;
+        channel.sendWorkerReady();
+
+        ipc::BenchmarkRunRequest request;
+        try {
+            request = channel.receiveBenchmarkRunRequest();
+        } catch (const ipc::BenchmarkRequestDecodeError& error) {
+            trySendFailure(channel, {
+                ErrorCode::WorkerCommunicationFailed,
+                FailureStage::ConfigDeserialization,
+                std::nullopt,
+                error.what(),
+                std::nullopt
+            });
+            return 1;
+        }
+        logicalRunIndex = request.logicalRunIndex;
+
+        core::ConfigValidator validator;
+        core::ValidationResult validation;
+        auto validated = validator.validateAndCreate(request.config, validation);
+        if (!validated) {
+            trySendFailure(channel, {
+                ErrorCode::InvalidConfiguration,
+                FailureStage::ConfigValidation,
+                logicalRunIndex,
+                validationMessage(validation),
+                std::nullopt
+            });
+            return 1;
+        }
+
+        const auto* profile = core::AlgorithmRegistry::find(validated->value().profile);
+        if (profile == nullptr) {
+            const std::logic_error error("validated profile is missing from AlgorithmRegistry");
+            trySendFailure(channel, errorInfoForTaskFailure(error, false, logicalRunIndex));
+            return 1;
+        }
+
+        crypto::AdapterFactory factory;
+        std::optional<core::CommonWorkload> workload;
+        try {
+            crypto::initializeGenericOpenSslRuntime();
+            workload.emplace(core::buildCommonWorkload(*validated, *profile));
+        } catch (const std::exception& error) {
+            trySendFailure(channel, errorInfoForTaskFailure(error, false, logicalRunIndex));
+            return 1;
+        }
+
+        channel.beginAlgorithmPreparation(*logicalRunIndex);
+
+        std::unique_ptr<core::AlgorithmAdapter> adapter;
+        try {
+            adapter = factory.create(
+                *profile, validated->value().operation, *validated, std::move(*workload));
+        } catch (const std::invalid_argument& error) {
+            trySendFailure(channel, errorInfoForTaskFailure(error, true, logicalRunIndex));
+            return 1;
+        } catch (const std::exception& error) {
+            trySendFailure(channel, errorInfoForTaskFailure(error, false, logicalRunIndex));
+            return 1;
+        }
+
+        std::optional<core::BenchmarkTask> task;
+        try {
+            task.emplace(std::move(*validated), *profile, std::move(adapter));
+        } catch (const std::exception& error) {
+            trySendFailure(channel, errorInfoForTaskFailure(error, false, logicalRunIndex));
+            return 1;
+        }
+
+        platform::windows::WindowsProcessCpuTimeSource cpuTimeSource;
+        core::BenchmarkRunner runner(*task, channel, channel, cpuTimeSource);
+        runner.prepareLogicalRun(*logicalRunIndex);
+        channel.finishAlgorithmPreparation(*logicalRunIndex);
+        static_cast<void>(runner.measureLogicalRun(*logicalRunIndex));
+
+        channel.sendWorkerOutcome({ipc::WorkerOutcomeStatus::Completed, std::nullopt});
+        return 0;
+    } catch (const core::RunnerFailure& failure) {
+        const auto error = errorInfoFor(failure);
+        if (connected) trySendFailure(channel, error);
+        return 1;
+    } catch (const std::exception& error) {
+        const ErrorInfo info{
+            ErrorCode::WorkerCommunicationFailed,
+            FailureStage::WorkerCommunication,
+            logicalRunIndex,
+            error.what(),
+            std::nullopt
+        };
+        if (connected) trySendFailure(channel, info);
+        return 1;
+    }
 }
 
 void trySendFailure(ipc::WorkerIpcChannel& channel, const ErrorInfo& error)
@@ -184,6 +293,11 @@ int runWorkerSession(const QString& endpoint)
         if (connected) trySendFailure(channel, info);
         return 1;
     }
+}
+
+int runWorkerSessionV2(const QString& endpoint)
+{
+    return runSingleRunV2Session(endpoint);
 }
 
 } // namespace cryptobench::worker

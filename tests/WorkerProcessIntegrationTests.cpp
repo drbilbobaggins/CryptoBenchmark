@@ -187,6 +187,77 @@ void testRealWorkerProcess()
     require(worker.exitCode() == 0, "worker exit code was not zero");
 }
 
+void testRealWorkerProcessV2()
+{
+    QLocalServer server;
+    server.setSocketOptions(QLocalServer::UserAccessOption);
+    const auto endpoint = makeEndpoint();
+    require(server.listen(endpoint), "v2 parent failed to listen on the local endpoint");
+
+    QProcess worker;
+    WorkerCleanup cleanup(worker);
+    const auto workerPath = QCoreApplication::applicationDirPath() + QStringLiteral("/CryptoBenchmarkWorker.exe");
+    require(QFileInfo::exists(workerPath),
+            "CryptoBenchmarkWorker.exe was not found beside the integration test executable");
+
+    worker.start(workerPath, {QStringLiteral("--ipc-endpoint"), endpoint, QStringLiteral("--ipc-v2")});
+    require(worker.waitForStarted(kTimeoutMilliseconds),
+            "v2 CryptoBenchmarkWorker failed to start: " + worker.errorString().toStdString());
+    require(worker.processId() != 0 && worker.processId() != QCoreApplication::applicationPid(),
+            "v2 worker process identity was invalid");
+    require(server.waitForNewConnection(kTimeoutMilliseconds),
+            "v2 CryptoBenchmarkWorker did not connect to the local endpoint");
+    std::unique_ptr<QLocalSocket> socket(server.nextPendingConnection());
+    require(socket != nullptr, "v2 local server accepted a null worker socket");
+    server.close();
+
+    FrameReader reader;
+    const auto ready = receiveFrame(*socket, reader, "v2 WorkerReady");
+    require(ready.messageType == ipc::MessageType::WorkerReady &&
+                ipc::decodeWorkerReady(ready.payload).protocolVersion == 2,
+            "v2 worker protocol version was not 2");
+    const core::BenchmarkConfig config{
+        core::AlgorithmProfileId::Sha256,
+        core::BenchmarkOperation::Hash,
+        2,
+        4,
+        core::HashConfig{8}
+    };
+    sendFrame(*socket, ipc::MessageType::BenchmarkRunRequest,
+              ipc::encodeBenchmarkRunRequest({2, config}));
+
+    const auto baseline = receiveFrame(*socket, reader, "BaselineReady");
+    require(baseline.messageType == ipc::MessageType::BaselineReady &&
+                ipc::decodeRunIndexPayload(baseline.payload) == 2,
+            "v2 BaselineReady mismatch");
+    sendFrame(*socket, ipc::MessageType::StartAlgorithmPreparation,
+              ipc::encodeRunIndexPayload(2));
+    requireProgress(*socket, reader, core::BenchmarkPhase::Warmup, 2);
+    const auto algorithmReady = receiveFrame(*socket, reader, "AlgorithmReady");
+    require(algorithmReady.messageType == ipc::MessageType::AlgorithmReady &&
+                ipc::decodeRunIndexPayload(algorithmReady.payload) == 2,
+            "v2 AlgorithmReady mismatch");
+    sendFrame(*socket, ipc::MessageType::StartMeasurement,
+              ipc::encodeRunIndexPayload(2));
+    const auto finished = receiveFrame(*socket, reader, "MeasurementFinished");
+    require(finished.messageType == ipc::MessageType::MeasurementFinished &&
+                ipc::decodeRunIndexPayload(finished.payload) == 2,
+            "v2 MeasurementFinished mismatch");
+    sendFrame(*socket, ipc::MessageType::MemoryWindowClosed,
+              ipc::encodeRunIndexPayload(2));
+    const auto measurement = receiveFrame(*socket, reader, "WorkerRunMeasurement");
+    require(measurement.messageType == ipc::MessageType::WorkerRunMeasurement &&
+                ipc::decodeWorkerRunMeasurement(measurement.payload).runIndex == 2,
+            "v2 measurement mismatch");
+    const auto outcome = receiveFrame(*socket, reader, "v2 WorkerOutcome");
+    require(outcome.messageType == ipc::MessageType::WorkerOutcome &&
+                ipc::decodeWorkerOutcome(outcome.payload).status == ipc::WorkerOutcomeStatus::Completed,
+            "v2 worker outcome was not Completed");
+    require(worker.waitForFinished(kTimeoutMilliseconds), "v2 worker did not exit");
+    require(worker.exitStatus() == QProcess::NormalExit && worker.exitCode() == 0,
+            "v2 worker did not exit normally");
+}
+
 } // namespace
 
 
@@ -195,6 +266,7 @@ int main(int argc, char* argv[])
     QCoreApplication application(argc, argv);
     try {
         testRealWorkerProcess();
+        testRealWorkerProcessV2();
         std::cout << "Worker process integration test passed\n";
         return 0;
     } catch (const std::exception& error) {
