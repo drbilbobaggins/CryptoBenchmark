@@ -99,7 +99,7 @@ void testMappingAndFieldMatrix()
             "completed entry environment was not preserved");
     require(document.entries[0].statistics->elapsedNanosecondsPerOperation.mean == 1.25 &&
                 document.entries[0].statistics->cpuNanosecondsPerOperation.stddev == 0.225 &&
-                document.entries[0].statistics->peakDeltaBytes.max == 6.25,
+                std::get<Statistics<double>>(document.entries[0].statistics->memory).max == 6.25,
             "completed entry statistics were not preserved");
     require(document.entries[1].error.has_value() && !document.entries[1].statistics.has_value() &&
                 document.entries[1].environment.has_value(),

@@ -253,8 +253,23 @@ void testNonFiniteStatisticsRejected()
     requireNonFiniteRejected(positiveInfinityStatistics, "positive infinity statistics were accepted");
 
     auto negativeInfinityStatistics = finiteStatistics();
-    negativeInfinityStatistics.peakDeltaBytes.min = -std::numeric_limits<double>::infinity();
+    std::get<Statistics<double>>(negativeInfinityStatistics.memory).min =
+        -std::numeric_limits<double>::infinity();
     requireNonFiniteRejected(negativeInfinityStatistics, "negative infinity statistics were accepted");
+}
+
+void testMemoryV2StatisticsRejectedBySchemaV1Mapping()
+{
+    const BenchmarkStatistics statistics{
+        Statistics<double>{1.0, 1.0, 1.0, 1.0, 0.0},
+        Statistics<double>{2.0, 2.0, 2.0, 2.0, 0.0},
+        MemoryV2Statistics{
+            Statistics<double>{-1.0, -1.0, -2.0, 0.0, 0.0},
+            Statistics<double>{1.0, 1.0, 1.0, 1.0, 0.0},
+            Statistics<double>{2.0, 2.0, 2.0, 2.0, 0.0},
+            Statistics<double>{3.0, 3.0, 3.0, 3.0, 0.0}}
+    };
+    requireNonFiniteRejected(statistics, "Memory v2 statistics were serialized through schema v1");
 }
 
 void testErrorMappings()
@@ -299,6 +314,8 @@ int main()
         std::cout << "PASS statistics mapping\n";
         cryptobench::tests::testNonFiniteStatisticsRejected();
         std::cout << "PASS non-finite statistics rejection\n";
+        cryptobench::tests::testMemoryV2StatisticsRejectedBySchemaV1Mapping();
+        std::cout << "PASS Memory v2 schema v1 rejection\n";
         cryptobench::tests::testErrorMappings();
         std::cout << "PASS error mappings\n";
         return 0;

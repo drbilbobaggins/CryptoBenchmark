@@ -50,7 +50,8 @@ BenchmarkStatistics sampleStatistics()
 RunResult sampleRun(std::uint32_t index)
 {
     return {index, std::chrono::nanoseconds{100}, MeanOperationDuration{1.25},
-            std::chrono::nanoseconds{80}, MeanOperationDuration{1.0}, {100, 120, 20}};
+            std::chrono::nanoseconds{80}, MeanOperationDuration{1.0},
+            MemoryRunMeasurement{100, 120, 20}};
 }
 
 BenchmarkResult completedResult()
@@ -100,7 +101,8 @@ void requireStatisticsEqual(const BenchmarkStatistics& actual, const BenchmarkSt
                                expected.elapsedNanosecondsPerOperation, message);
     requireStatisticGroupEqual(actual.cpuNanosecondsPerOperation,
                                expected.cpuNanosecondsPerOperation, message);
-    requireStatisticGroupEqual(actual.peakDeltaBytes, expected.peakDeltaBytes, message);
+    requireStatisticGroupEqual(std::get<Statistics<double>>(actual.memory),
+                               std::get<Statistics<double>>(expected.memory), message);
 }
 
 void requireErrorStateEqual(const std::optional<ErrorInfo>& actual,
@@ -119,15 +121,17 @@ void requireErrorStateEqual(const std::optional<ErrorInfo>& actual,
 
 void requireRunEqual(const RunResult& actual, const RunResult& expected, std::string_view message)
 {
+    const auto& actualMemory = std::get<MemoryRunMeasurement>(actual.memory);
+    const auto& expectedMemory = std::get<MemoryRunMeasurement>(expected.memory);
     require(actual.runIndex == expected.runIndex
                 && actual.totalElapsedTime == expected.totalElapsedTime
                 && actual.meanElapsedTimePerOperation.count()
                     == expected.meanElapsedTimePerOperation.count()
                 && actual.totalCpuTime == expected.totalCpuTime
                 && actual.meanCpuTimePerOperation.count() == expected.meanCpuTimePerOperation.count()
-                && actual.memory.baselineBytes == expected.memory.baselineBytes
-                && actual.memory.peakSampledBytes == expected.memory.peakSampledBytes
-                && actual.memory.peakDeltaBytes == expected.memory.peakDeltaBytes,
+                && actualMemory.baselineBytes == expectedMemory.baselineBytes
+                && actualMemory.peakSampledBytes == expectedMemory.peakSampledBytes
+                && actualMemory.peakDeltaBytes == expectedMemory.peakDeltaBytes,
             message);
 }
 

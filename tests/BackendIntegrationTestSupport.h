@@ -158,6 +158,7 @@ inline void assertCompletedResult(
     requireCharacteristicsMatch(result.characteristics, expectedProfile->characteristics);
 
     for (const auto& run : result.runs) {
+        const auto& memory = std::get<core::MemoryRunMeasurement>(run.memory);
         const auto expectedElapsed = static_cast<double>(run.totalElapsedTime.count()) /
                                      static_cast<double>(expectedConfig.iterationsPerRun);
         const auto expectedCpu = static_cast<double>(run.totalCpuTime.count()) /
@@ -166,10 +167,9 @@ inline void assertCompletedResult(
                     "elapsed mean does not match total time");
         requireNear(run.meanCpuTimePerOperation.count(), expectedCpu,
                     "CPU mean does not match total time");
-        require(run.memory.peakSampledBytes >= run.memory.baselineBytes,
+        require(memory.peakSampledBytes >= memory.baselineBytes,
                 "run memory peak is below baseline");
-        require(run.memory.peakDeltaBytes ==
-                    run.memory.peakSampledBytes - run.memory.baselineBytes,
+        require(memory.peakDeltaBytes == memory.peakSampledBytes - memory.baselineBytes,
                 "run memory delta is inconsistent");
     }
 
@@ -183,8 +183,10 @@ inline void assertCompletedResult(
         result.runs[0].meanCpuTimePerOperation.count(),
         result.runs[1].meanCpuTimePerOperation.count(), "CPU statistics mismatch");
     requireTwoValueStatistics(
-        statistics.peakDeltaBytes, static_cast<double>(result.runs[0].memory.peakDeltaBytes),
-        static_cast<double>(result.runs[1].memory.peakDeltaBytes), "memory statistics mismatch");
+        std::get<core::Statistics<double>>(statistics.memory),
+        static_cast<double>(std::get<core::MemoryRunMeasurement>(result.runs[0].memory).peakDeltaBytes),
+        static_cast<double>(std::get<core::MemoryRunMeasurement>(result.runs[1].memory).peakDeltaBytes),
+        "memory statistics mismatch");
 }
 
 } // namespace cryptobench::test_support

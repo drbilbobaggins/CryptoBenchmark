@@ -64,7 +64,8 @@ RunResult run(std::uint32_t index, std::uint64_t elapsed, std::uint64_t cpu, std
     return {index, std::chrono::nanoseconds{static_cast<std::int64_t>(elapsed)},
             MeanOperationDuration{static_cast<double>(elapsed) / 4.0},
             std::chrono::nanoseconds{static_cast<std::int64_t>(cpu)},
-            MeanOperationDuration{static_cast<double>(cpu) / 4.0}, {100, 100 + peakDelta, peakDelta}};
+            MeanOperationDuration{static_cast<double>(cpu) / 4.0},
+            MemoryRunMeasurement{100, 100 + peakDelta, peakDelta}};
 }
 
 BenchmarkResult completedResult(const BenchmarkConfig& benchmarkConfig,
@@ -179,7 +180,8 @@ void requireSourceUnchanged(const BenchmarkResult& result, BenchmarkStatus statu
                 && std::get<HashConfig>(result.config.parameters).inputSize == 128,
             "benchmark config changed");
     require(result.runs.size() == 2 && result.runs[0].runIndex == 0 && result.runs[0].totalElapsedTime.count() == 40
-                && result.runs[1].runIndex == 1 && result.runs[1].memory.peakDeltaBytes == 20,
+                && result.runs[1].runIndex == 1
+                && std::get<MemoryRunMeasurement>(result.runs[1].memory).peakDeltaBytes == 20,
             "benchmark runs changed");
     require(result.statistics.has_value()
                 && result.statistics->elapsedNanosecondsPerOperation.mean == statisticsMean,

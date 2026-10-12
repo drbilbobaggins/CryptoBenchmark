@@ -73,7 +73,7 @@ BenchmarkResult resultFor(const BatchEntryDefinition& entry, BenchmarkStatus sta
         ? std::optional<BenchmarkStatistics>{BenchmarkStatistics{
               {1.0, 1.1, 0.9, 1.2, 0.1},
               {2.0, 2.1, 1.9, 2.2, 0.2},
-              {3.0, 3.1, 2.9, 3.2, 0.3}}}
+              Statistics<double>{3.0, 3.1, 2.9, 3.2, 0.3}}}
         : std::nullopt;
     return {entry.config,
             {},

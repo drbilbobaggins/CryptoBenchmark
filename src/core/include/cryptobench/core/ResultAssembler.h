@@ -8,6 +8,7 @@
 
 #include <cryptobench/core/BenchmarkResult.h>
 #include <cryptobench/core/MemoryRunMeasurement.h>
+#include <cryptobench/core/MemoryV2.h>
 #include <cryptobench/core/WorkerRunMeasurement.h>
 
 namespace cryptobench::core {
@@ -25,6 +26,12 @@ public:
     static RunResult assembleRun(
         const WorkerRunMeasurement& worker,
         const ParentRunMemoryMeasurement& memory,
+        std::uint64_t iterationsPerRun);
+
+    static RunResult assembleRun(
+        const WorkerRunMeasurement& worker,
+        const MemoryV2RawObservations& memory,
+        std::uint32_t expectedLogicalRunIndex,
         std::uint64_t iterationsPerRun);
 
     static BenchmarkResult completed(

@@ -174,10 +174,14 @@ QJsonObject environmentInfoToJson(const core::EnvironmentInfo& environment)
 
 QJsonObject benchmarkStatisticsToJson(const core::BenchmarkStatistics& statistics)
 {
+    const auto* legacyMemory = std::get_if<core::Statistics<double>>(&statistics.memory);
+    if (legacyMemory == nullptr) {
+        throw std::invalid_argument("Memory v2 statistics require result schema v2");
+    }
     return {
         {"wallClockNanosecondsPerOperation", statisticToJson(statistics.elapsedNanosecondsPerOperation)},
         {"processCpuNanosecondsPerOperation", statisticToJson(statistics.cpuNanosecondsPerOperation)},
-        {"peakPrivateUsageDeltaBytes", statisticToJson(statistics.peakDeltaBytes)}
+        {"peakPrivateUsageDeltaBytes", statisticToJson(*legacyMemory)}
     };
 }
 
