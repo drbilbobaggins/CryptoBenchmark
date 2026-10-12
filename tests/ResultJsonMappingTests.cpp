@@ -192,17 +192,31 @@ void testStatisticsMapping()
     const BenchmarkStatistics statistics{
         Statistics<double>{1523.42, 1511.78, 1470.11, 1602.91, 42.31},
         Statistics<double>{1488.12, 1480.55, 1432.70, 1551.40, 37.82},
-        Statistics<double>{65536.0, 65536.0, 65535.5, 65536.5, 0.25}
+        MemoryV2Statistics{
+            Statistics<double>{-2.0, -2.0, -4.0, 0.0, 1.0},
+            Statistics<double>{65536.0, 65536.0, 65535.5, 65536.5, 0.25},
+            Statistics<double>{65537.0, 65537.0, 65536.5, 65537.5, 0.25},
+            Statistics<double>{65538.0, 65538.0, 65537.5, 65538.5, 0.25}}
     };
     const auto value = benchmarkStatisticsToJson(statistics);
     requireKeys(value, {"wallClockNanosecondsPerOperation", "processCpuNanosecondsPerOperation",
-                        "peakPrivateUsageDeltaBytes"});
+                        "memory"});
     const auto wallClock = value.value("wallClockNanosecondsPerOperation").toObject();
     const auto processCpu = value.value("processCpuNanosecondsPerOperation").toObject();
-    const auto peakPrivateUsage = value.value("peakPrivateUsageDeltaBytes").toObject();
+    const auto memory = value.value("memory").toObject();
+    requireKeys(memory, {"unit", "readyStateDelta", "preparationPeakDelta",
+                         "executionPeakDelta", "operationalPeakDelta"});
+    requireString(memory, "unit", "bytes");
+    const auto readyState = memory.value("readyStateDelta").toObject();
+    const auto preparation = memory.value("preparationPeakDelta").toObject();
+    const auto execution = memory.value("executionPeakDelta").toObject();
+    const auto operational = memory.value("operationalPeakDelta").toObject();
     requireKeys(wallClock, {"mean", "median", "min", "max", "stddev"});
     requireKeys(processCpu, {"mean", "median", "min", "max", "stddev"});
-    requireKeys(peakPrivateUsage, {"mean", "median", "min", "max", "stddev"});
+    requireKeys(readyState, {"mean", "median", "min", "max", "stddev"});
+    requireKeys(preparation, {"mean", "median", "min", "max", "stddev"});
+    requireKeys(execution, {"mean", "median", "min", "max", "stddev"});
+    requireKeys(operational, {"mean", "median", "min", "max", "stddev"});
     requireNumber(wallClock, "mean", 1523.42);
     requireNumber(wallClock, "median", 1511.78);
     requireNumber(wallClock, "min", 1470.11);
@@ -213,12 +227,12 @@ void testStatisticsMapping()
     requireNumber(processCpu, "min", 1432.70);
     requireNumber(processCpu, "max", 1551.40);
     requireNumber(processCpu, "stddev", 37.82);
-    requireNumber(peakPrivateUsage, "mean", 65536.0);
-    requireNumber(peakPrivateUsage, "median", 65536.0);
-    requireNumber(peakPrivateUsage, "min", 65535.5);
-    requireNumber(peakPrivateUsage, "max", 65536.5);
-    requireNumber(peakPrivateUsage, "stddev", 0.25);
-    require(!value.contains("elapsedNanosecondsPerOperation") && !value.contains("peakDeltaBytes"),
+    requireNumber(readyState, "mean", -2.0);
+    requireNumber(preparation, "mean", 65536.0);
+    requireNumber(execution, "mean", 65537.0);
+    requireNumber(operational, "mean", 65538.0);
+    require(!value.contains("elapsedNanosecondsPerOperation") && !value.contains("peakDeltaBytes") &&
+                !value.contains("peakPrivateUsageDeltaBytes"),
             "core statistics names leaked into JSON");
 }
 
@@ -238,7 +252,11 @@ BenchmarkStatistics finiteStatistics()
     return {
         Statistics<double>{1.0, 2.0, 3.0, 4.0, 5.0},
         Statistics<double>{6.0, 7.0, 8.0, 9.0, 10.0},
-        Statistics<double>{11.0, 12.0, 13.0, 14.0, 15.0}
+        MemoryV2Statistics{
+            Statistics<double>{11.0, 12.0, 13.0, 14.0, 15.0},
+            Statistics<double>{16.0, 17.0, 18.0, 19.0, 20.0},
+            Statistics<double>{21.0, 22.0, 23.0, 24.0, 25.0},
+            Statistics<double>{26.0, 27.0, 28.0, 29.0, 30.0}}
     };
 }
 
@@ -253,12 +271,12 @@ void testNonFiniteStatisticsRejected()
     requireNonFiniteRejected(positiveInfinityStatistics, "positive infinity statistics were accepted");
 
     auto negativeInfinityStatistics = finiteStatistics();
-    std::get<Statistics<double>>(negativeInfinityStatistics.memory).min =
+    std::get<MemoryV2Statistics>(negativeInfinityStatistics.memory).readyStatePrivateUsageDeltaBytes.min =
         -std::numeric_limits<double>::infinity();
     requireNonFiniteRejected(negativeInfinityStatistics, "negative infinity statistics were accepted");
 }
 
-void testMemoryV2StatisticsRejectedBySchemaV1Mapping()
+void testMemoryV2StatisticsMappingAndLegacyRejection()
 {
     const BenchmarkStatistics statistics{
         Statistics<double>{1.0, 1.0, 1.0, 1.0, 0.0},
@@ -269,7 +287,15 @@ void testMemoryV2StatisticsRejectedBySchemaV1Mapping()
             Statistics<double>{2.0, 2.0, 2.0, 2.0, 0.0},
             Statistics<double>{3.0, 3.0, 3.0, 3.0, 0.0}}
     };
-    requireNonFiniteRejected(statistics, "Memory v2 statistics were serialized through schema v1");
+    const auto value = benchmarkStatisticsToJson(statistics);
+    require(value.value("memory").toObject().value("readyStateDelta").toObject().value("mean") == -1.0,
+            "signed ReadyStateDelta was not preserved");
+
+    const BenchmarkStatistics legacy{
+        Statistics<double>{1.0, 1.0, 1.0, 1.0, 0.0},
+        Statistics<double>{2.0, 2.0, 2.0, 2.0, 0.0},
+        Statistics<double>{3.0, 3.0, 3.0, 3.0, 0.0}};
+    requireNonFiniteRejected(legacy, "legacy memory statistics were serialized as v2");
 }
 
 void testErrorMappings()
@@ -314,8 +340,8 @@ int main()
         std::cout << "PASS statistics mapping\n";
         cryptobench::tests::testNonFiniteStatisticsRejected();
         std::cout << "PASS non-finite statistics rejection\n";
-        cryptobench::tests::testMemoryV2StatisticsRejectedBySchemaV1Mapping();
-        std::cout << "PASS Memory v2 schema v1 rejection\n";
+        cryptobench::tests::testMemoryV2StatisticsMappingAndLegacyRejection();
+        std::cout << "PASS Memory v2 mapping and legacy rejection\n";
         cryptobench::tests::testErrorMappings();
         std::cout << "PASS error mappings\n";
         return 0;

@@ -88,6 +88,7 @@ struct BatchExecutionState {
     bool cancelRequested = false;
     std::optional<BatchError> batchError;
     QString outputTarget;
+    std::optional<core::MeasurementSettings> measurementSettings;
 };
 
 struct BatchProgress {

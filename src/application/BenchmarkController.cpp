@@ -270,8 +270,10 @@ void BenchmarkController::finishCompleted()
     try {
         const auto result = core::ResultAssembler::completed(
             *config_, completedRuns_, *characteristics_, *environment_);
+        auto stampedResult = result;
+        stampedResult.measurementSettings = measurementSettings_;
         state_ = State::Idle;
-        emit benchmarkFinished(result);
+        emitBenchmarkFinished(stampedResult);
     } catch (const std::exception& error) {
         pendingError_ = controllerError(core::ErrorCode::InternalError,
                                         core::FailureStage::ResultAssembly,
@@ -287,18 +289,22 @@ void BenchmarkController::finishFailed()
     try {
         const auto result = core::ResultAssembler::failed(
             *config_, completedRuns_, *characteristics_, *environment_, error);
+        auto stampedResult = result;
+        stampedResult.measurementSettings = measurementSettings_;
         pendingError_.reset();
         state_ = State::Idle;
-        emit benchmarkFinished(result);
+        emitBenchmarkFinished(stampedResult);
     } catch (const std::exception& assemblyError) {
         const auto fallbackError = controllerError(
             core::ErrorCode::InternalError, core::FailureStage::ResultAssembly,
             assemblyError.what());
         pendingError_.reset();
         state_ = State::Idle;
-        emit benchmarkFinished({*config_, completedRuns_, std::nullopt,
-                                *characteristics_, *environment_,
-                                core::BenchmarkStatus::Failed, fallbackError});
+        core::BenchmarkResult fallbackResult{*config_, completedRuns_, std::nullopt,
+                             *characteristics_, *environment_,
+                             core::BenchmarkStatus::Failed, fallbackError};
+        fallbackResult.measurementSettings = measurementSettings_;
+        emitBenchmarkFinished(fallbackResult);
     }
 }
 
@@ -308,8 +314,10 @@ void BenchmarkController::finishCancelled()
     try {
         const auto result = core::ResultAssembler::cancelled(
             *config_, completedRuns_, *characteristics_, *environment_);
+        auto stampedResult = result;
+        stampedResult.measurementSettings = measurementSettings_;
         state_ = State::Idle;
-        emit benchmarkFinished(result);
+        emitBenchmarkFinished(stampedResult);
     } catch (const std::exception& error) {
         pendingError_ = controllerError(core::ErrorCode::InternalError,
                                         core::FailureStage::ResultAssembly,

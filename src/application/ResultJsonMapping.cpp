@@ -172,16 +172,38 @@ QJsonObject environmentInfoToJson(const core::EnvironmentInfo& environment)
     };
 }
 
+QJsonObject resultMeasurementMetadataToJson(const core::MeasurementSettings& settings)
+{
+    if (!core::isValidMeasurementSettings(settings)) {
+        throw std::invalid_argument("result measurement settings are invalid");
+    }
+    return {
+        {"memorySamplingIntervalMilliseconds",
+         static_cast<qint64>(settings.memorySamplingIntervalMilliseconds)},
+        {"memoryModel", "memoryV2"},
+        {"workerLifecycle", "freshWorkerPerLogicalRun"}
+    };
+}
+
 QJsonObject benchmarkStatisticsToJson(const core::BenchmarkStatistics& statistics)
 {
-    const auto* legacyMemory = std::get_if<core::Statistics<double>>(&statistics.memory);
-    if (legacyMemory == nullptr) {
+    const auto* memory = std::get_if<core::MemoryV2Statistics>(&statistics.memory);
+    if (memory == nullptr) {
         throw std::invalid_argument("Memory v2 statistics require result schema v2");
     }
+    const auto memoryStatisticsToJson = [](const core::Statistics<double>& value) {
+        return statisticToJson(value);
+    };
     return {
         {"wallClockNanosecondsPerOperation", statisticToJson(statistics.elapsedNanosecondsPerOperation)},
         {"processCpuNanosecondsPerOperation", statisticToJson(statistics.cpuNanosecondsPerOperation)},
-        {"peakPrivateUsageDeltaBytes", statisticToJson(*legacyMemory)}
+        {"memory", QJsonObject{
+            {"unit", "bytes"},
+            {"readyStateDelta", memoryStatisticsToJson(memory->readyStatePrivateUsageDeltaBytes)},
+            {"preparationPeakDelta", memoryStatisticsToJson(memory->preparationPeakPrivateUsageDeltaBytes)},
+            {"executionPeakDelta", memoryStatisticsToJson(memory->executionPeakPrivateUsageDeltaBytes)},
+            {"operationalPeakDelta", memoryStatisticsToJson(memory->operationalPeakPrivateUsageDeltaBytes)}
+        }}
     };
 }
 

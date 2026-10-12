@@ -43,6 +43,10 @@ ExportEntryStatus exportStatus(BatchEntryStatus status)
 
 ResultDocument BatchResultDocumentService::create(const BatchExecutionState& state) const
 {
+    if (!state.measurementSettings.has_value() ||
+        !core::isValidMeasurementSettings(*state.measurementSettings)) {
+        throw std::invalid_argument("batch result is missing valid measurement settings");
+    }
     if (state.batchError.has_value() && state.status != BatchStatus::Failed) {
         throw std::invalid_argument("batch error requires a failed batch state");
     }
@@ -53,6 +57,7 @@ ResultDocument BatchResultDocumentService::create(const BatchExecutionState& sta
         {},
         state.status == BatchStatus::Failed ? state.batchError : std::nullopt
     };
+    document.measurement = ResultMeasurementMetadata{*state.measurementSettings};
     document.entries.reserve(state.entries.size());
 
     for (const auto& entry : state.entries) {
@@ -69,8 +74,18 @@ ResultDocument BatchResultDocumentService::create(const BatchExecutionState& sta
         };
 
         if (entry.result.has_value()) {
+            if (!entry.result->measurementSettings.has_value() ||
+                !core::isValidMeasurementSettings(*entry.result->measurementSettings) ||
+                entry.result->measurementSettings->memorySamplingIntervalMilliseconds !=
+                    state.measurementSettings->memorySamplingIntervalMilliseconds) {
+                throw std::invalid_argument("batch entry measurement settings do not match the batch snapshot");
+            }
             exported.environment = entry.result->environment;
             if (entry.status == BatchEntryStatus::Completed) {
+                if (!entry.result->statistics.has_value() ||
+                    !std::holds_alternative<core::MemoryV2Statistics>(entry.result->statistics->memory)) {
+                    throw std::invalid_argument("completed batch entry is not Memory v2");
+                }
                 exported.statistics = entry.result->statistics;
             } else if (entry.status == BatchEntryStatus::Failed) {
                 exported.error = entry.result->error;

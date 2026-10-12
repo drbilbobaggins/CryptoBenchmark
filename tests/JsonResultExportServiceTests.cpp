@@ -70,8 +70,17 @@ BenchmarkStatistics sampleStatistics()
     return {
         Statistics<double>{1.25, 1.5, 1.0, 2.0, 0.125},
         Statistics<double>{2.0, 2.0, 2.0, 2.0, 0.0},
-        Statistics<double>{3.0, 3.0, 3.0, 3.0, 0.0}
+        MemoryV2Statistics{
+            Statistics<double>{-1.0, -1.0, -2.0, 0.0, 0.0},
+            Statistics<double>{3.0, 3.0, 3.0, 3.0, 0.0},
+            Statistics<double>{4.0, 4.0, 4.0, 4.0, 0.0},
+            Statistics<double>{5.0, 5.0, 5.0, 5.0, 0.0}}
     };
+}
+
+ResultMeasurementMetadata measurement()
+{
+    return {MeasurementSettings{5}};
 }
 
 ErrorInfo sampleError()
@@ -114,14 +123,20 @@ void testSingleCompletedDocument()
     const ResultDocument document{
         ResultMode::Single,
         ResultDocumentStatus::Completed,
-        {entry(1, ExportEntryStatus::Completed, "single-é", sampleEnvironment(), sampleStatistics(), std::nullopt)}};
+        {entry(1, ExportEntryStatus::Completed, "single-é", sampleEnvironment(), sampleStatistics(), std::nullopt)},
+        std::nullopt,
+        measurement()};
 
-    const auto root = parseObject(JsonResultExportService{}.serialize(document));
-    requireKeys(root, {"format", "schemaVersion", "mode", "status", "entries"});
+    const auto serialized = JsonResultExportService{}.serialize(document);
+        require(serialized.contains("\n    \"") && serialized.contains("\n        \""),
+            "JSON was not serialized with indentation");
+    const auto root = parseObject(serialized);
+    requireKeys(root, {"format", "schemaVersion", "mode", "status", "measurement", "entries"});
     requireString(root, "format", "cryptobenchmark-result");
-    requireNumber(root, "schemaVersion", 1.0);
+    requireNumber(root, "schemaVersion", 2.0);
     requireString(root, "mode", "single");
     requireString(root, "status", "completed");
+    requireNumber(root.value("measurement").toObject(), "memorySamplingIntervalMilliseconds", 5.0);
 
     const auto entries = root.value("entries").toArray();
     require(entries.size() == 1, "single document entry count mismatch");
@@ -150,7 +165,9 @@ void testEntryFieldMatricesAndOrder()
             entry(8, ExportEntryStatus::Failed, std::nullopt, sampleEnvironment(), std::nullopt, sampleError()),
             entry(9, ExportEntryStatus::Cancelled, "cancelled", sampleEnvironment(), std::nullopt, std::nullopt),
             entry(10, ExportEntryStatus::NotStarted, std::nullopt, std::nullopt, std::nullopt, std::nullopt)
-        }
+        },
+        std::nullopt,
+        measurement()
     };
 
     const auto root = parseObject(JsonResultExportService{}.serialize(document));
@@ -191,7 +208,8 @@ void testBatchStatuses()
     const auto service = JsonResultExportService{};
     for (const auto status : {ResultDocumentStatus::Completed, ResultDocumentStatus::CompletedWithFailures,
                               ResultDocumentStatus::Cancelled}) {
-        const auto root = parseObject(service.serialize(ResultDocument{ResultMode::Batch, status, {}}));
+        const auto root = parseObject(service.serialize(
+            ResultDocument{ResultMode::Batch, status, {}, std::nullopt, measurement()}));
         require(root.value("status").toString() == QString::fromUtf8(toStableString(status).data(),
                                                                         static_cast<qsizetype>(toStableString(status).size())),
                 "batch status mapping mismatch");
@@ -205,11 +223,12 @@ void testFailedBatchErrorWithEntryError()
         ResultMode::Batch,
         ResultDocumentStatus::Failed,
         {entry(5, ExportEntryStatus::Failed, std::nullopt, sampleEnvironment(), std::nullopt, sampleError())},
-        sampleBatchError()
+        sampleBatchError(),
+        measurement()
     };
 
     const auto root = parseObject(JsonResultExportService{}.serialize(document));
-    requireKeys(root, {"format", "schemaVersion", "mode", "status", "entries", "batchError"});
+    requireKeys(root, {"format", "schemaVersion", "mode", "status", "measurement", "entries", "batchError"});
     const auto batchError = root.value("batchError").toObject();
     requireKeys(batchError, {"code", "stage", "entryIndex", "technicalMessage"});
     requireString(batchError, "code", "outputWriteFailed");
@@ -226,7 +245,7 @@ void testFailedBatchErrorWithEntryError()
 void testFailedBatchErrorWithoutEntryIndex()
 {
     const ResultDocument document{
-        ResultMode::Batch, ResultDocumentStatus::Failed, {}, sampleBatchError(std::nullopt)
+        ResultMode::Batch, ResultDocumentStatus::Failed, {}, sampleBatchError(std::nullopt), measurement()
     };
     const auto batchError = parseObject(JsonResultExportService{}.serialize(document)).value("batchError").toObject();
     requireKeys(batchError, {"code", "stage", "technicalMessage"});
@@ -238,14 +257,15 @@ void testBatchErrorAbsentFromNormalDocuments()
 {
     const auto service = JsonResultExportService{};
     const auto single = parseObject(service.serialize(ResultDocument{
-        ResultMode::Single, ResultDocumentStatus::Completed, {}, std::nullopt
+        ResultMode::Single, ResultDocumentStatus::Completed, {}, std::nullopt, measurement()
     }));
-    requireKeys(single, {"format", "schemaVersion", "mode", "status", "entries"});
+    requireKeys(single, {"format", "schemaVersion", "mode", "status", "measurement", "entries"});
     require(!single.contains("batchError"), "single document unexpectedly contains batch error");
 
     for (const auto status : {ResultDocumentStatus::InProgress, ResultDocumentStatus::Completed,
                               ResultDocumentStatus::CompletedWithFailures, ResultDocumentStatus::Cancelled}) {
-        const auto root = parseObject(service.serialize(ResultDocument{ResultMode::Batch, status, {}, std::nullopt}));
+        const auto root = parseObject(service.serialize(
+            ResultDocument{ResultMode::Batch, status, {}, std::nullopt, measurement()}));
         require(!root.contains("batchError"), "normal batch document unexpectedly contains batch error");
     }
 }

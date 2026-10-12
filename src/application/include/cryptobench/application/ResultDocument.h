@@ -10,6 +10,7 @@
 #include <cryptobench/core/BenchmarkStatistics.h>
 #include <cryptobench/core/EnvironmentInfo.h>
 #include <cryptobench/core/ErrorInfo.h>
+#include <cryptobench/core/MeasurementSettings.h>
 #include <cryptobench/core/StructuralCharacteristics.h>
 
 namespace cryptobench::application {
@@ -70,11 +71,16 @@ struct ExportEntry {
     std::optional<core::ErrorInfo> error;
 };
 
+struct ResultMeasurementMetadata {
+    core::MeasurementSettings measurementSettings;
+};
+
 struct ResultDocument {
     ResultMode mode;
     ResultDocumentStatus status;
     std::vector<ExportEntry> entries;
     std::optional<BatchError> batchError = std::nullopt;
+    std::optional<ResultMeasurementMetadata> measurement = std::nullopt;
 };
 
 } // namespace cryptobench::application

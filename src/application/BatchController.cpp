@@ -10,29 +10,59 @@
 namespace cryptobench::application {
 
 BatchController::BatchController(QObject* parent)
-    : BatchController(std::make_unique<BenchmarkController>(), {}, {}, parent)
+    : QObject(parent),
+      executorFactory_([](const core::MeasurementSettings& settings) {
+          return std::make_unique<BenchmarkController>(nullptr, QString{},
+                                                       WorkerRunSessionTestHooks{}, settings);
+      }),
+      settingsProvider_([] { return core::defaultMeasurementSettings(); })
 {
+    serializer_ = [this](const ResultDocument& document) {
+        return exportService_.serialize(document);
+    };
 }
 
 BatchController::BatchController(
     std::unique_ptr<BenchmarkSessionExecutor> executor,
     SnapshotPersister persister,
     SnapshotSerializer serializer,
+    core::MeasurementSettings executorSettings,
     QObject* parent)
-    : QObject(parent), executor_(std::move(executor)), persister_(std::move(persister)),
-      serializer_(std::move(serializer))
+        : QObject(parent), executor_(BenchmarkSessionExecutor::adopt(std::move(executor))),
+            persister_(std::move(persister)),
+      serializer_(std::move(serializer)), fixedExecutorSettings_(executorSettings)
 {
     if (!executor_) throw std::invalid_argument("BatchController requires an executor");
+    if (!core::isValidMeasurementSettings(*fixedExecutorSettings_)) {
+        throw std::invalid_argument("BatchController executor settings are invalid");
+    }
+    executor_->setParent(nullptr);
+    if (!serializer_) {
+        serializer_ = [this](const ResultDocument& document) {
+            return exportService_.serialize(document);
+        };
+    }
+    executor_->setEmissionLifetimeOwner(executor_);
+    connectExecutor();
+}
+
+BatchController::BatchController(
+    ExecutorFactory executorFactory,
+    SnapshotPersister persister,
+    SnapshotSerializer serializer,
+    MeasurementSettingsProvider settingsProvider,
+    QObject* parent)
+    : QObject(parent), executorFactory_(std::move(executorFactory)),
+      settingsProvider_(std::move(settingsProvider)), persister_(std::move(persister)),
+      serializer_(std::move(serializer))
+{
+    if (!executorFactory_) throw std::invalid_argument("BatchController requires an executor factory");
     if (!serializer_) {
         serializer_ = [this](const ResultDocument& document) {
             return exportService_.serialize(document);
         };
     }
 
-    connect(executor_.get(), &BenchmarkSessionExecutor::progressChanged,
-            this, &BatchController::onExecutorProgress);
-    connect(executor_.get(), &BenchmarkSessionExecutor::benchmarkFinished,
-            this, &BatchController::onExecutorFinished);
 }
 
 bool BatchController::isBusy() const noexcept
@@ -101,10 +131,39 @@ BatchProgress BatchController::progress() const
 
 void BatchController::start(const BatchDefinition& definition, const QString& outputTarget)
 {
-    if (isBusy() || executor_->isBusy()) throw std::logic_error("BatchController is already running");
+    if (isBusy() || (executor_ && executor_->isBusy())) {
+        throw std::logic_error("BatchController is already running");
+    }
     if (definition.entries().empty()) throw std::invalid_argument("batch definition is empty");
 
+    if (!settingsProvider_ && !fixedExecutorSettings_) {
+        throw std::invalid_argument("BatchController has no measurement settings provider");
+    }
+    const auto measurementSettings = settingsProvider_
+        ? settingsProvider_()
+        : *fixedExecutorSettings_;
+    if (!core::isValidMeasurementSettings(measurementSettings)) {
+        throw std::invalid_argument("BatchController measurement settings are invalid");
+    }
+
+    std::unique_ptr<BenchmarkSessionExecutor> nextExecutor;
+    if (executorFactory_) {
+        nextExecutor = executorFactory_(measurementSettings);
+        if (!nextExecutor) throw std::invalid_argument("BatchController executor factory returned null");
+    } else if (!executor_) {
+        throw std::logic_error("BatchController has no executor");
+    }
+
+    if (nextExecutor) {
+        retireExecutor();
+        nextExecutor->setParent(nullptr);
+        executor_ = BenchmarkSessionExecutor::adopt(std::move(nextExecutor));
+        executor_->setEmissionLifetimeOwner(executor_);
+        connectExecutor();
+    }
+
     batchState_ = createBatchExecutionState(definition, outputTarget);
+    batchState_.measurementSettings = measurementSettings;
     startedPositions_.assign(batchState_.entries.size(), false);
     nextPosition_ = 0;
     activePosition_.reset();
@@ -114,6 +173,27 @@ void BatchController::start(const BatchDefinition& definition, const QString& ou
     state_ = State::InitializingOutput;
     emitProgress();
     persistSnapshot(PersistenceIntent::Initial);
+}
+
+void BatchController::connectExecutor()
+{
+    auto* executor = executor_.get();
+    connect(executor, &BenchmarkSessionExecutor::progressChanged, this,
+            [this, executor](const core::ProgressInfo& progress) {
+                if (executor_.get() == executor) onExecutorProgress(progress);
+            });
+    connect(executor, &BenchmarkSessionExecutor::benchmarkFinished, this,
+            [this, executor](const core::BenchmarkResult& result) {
+                if (executor_.get() == executor) onExecutorFinished(result);
+            });
+}
+
+void BatchController::retireExecutor()
+{
+    if (!executor_) return;
+    retiredExecutors_.push_back(std::move(executor_));
+    QMetaObject::invokeMethod(this, [this] { retiredExecutors_.clear(); },
+                              Qt::QueuedConnection);
 }
 
 void BatchController::advance()
@@ -349,7 +429,8 @@ void BatchController::finishTerminal()
 {
     if (terminalEmitted_) return;
     terminalEmitted_ = true;
-    emit batchFinished(batchState_);
+    const auto terminalState = batchState_;
+    emit batchFinished(terminalState);
 }
 
 void BatchController::emitProgress()
