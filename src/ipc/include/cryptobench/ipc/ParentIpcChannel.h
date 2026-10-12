@@ -21,12 +21,15 @@ public:
     ~ParentIpcChannel() override;
 
     void startListening(const QString& endpoint);
+    void startListeningV2(const QString& endpoint);
     void close();
 
     bool isListening() const;
     bool isConnected() const;
 
     void sendBenchmarkRequest(const BenchmarkRequest& request);
+    void sendBenchmarkRunRequest(const BenchmarkRunRequest& request);
+    void sendStartAlgorithmPreparation(std::uint32_t runIndex);
     void sendStartMeasurement(std::uint32_t runIndex);
     void sendMemoryWindowClosed(std::uint32_t runIndex);
 
@@ -37,6 +40,8 @@ signals:
 
     void workerReadyReceived(const cryptobench::ipc::WorkerReady& value);
     void progressReceived(const cryptobench::ipc::Progress& value);
+    void baselineReadyReceived(std::uint32_t runIndex);
+    void algorithmReadyReceived(std::uint32_t runIndex);
     void measurementReadyReceived(std::uint32_t runIndex);
     void measurementFinishedReceived(std::uint32_t runIndex);
     void workerRunMeasurementReceived(const cryptobench::ipc::WorkerRunMeasurement& value);
@@ -55,6 +60,7 @@ private:
     QLocalServer server_;
     QPointer<QLocalSocket> socket_;
     FrameParser parser_;
+    bool v2Mode_ = false;
 };
 
 } // namespace cryptobench::ipc

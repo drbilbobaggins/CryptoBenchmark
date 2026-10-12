@@ -49,6 +49,18 @@ void receiveExpected(QLocalSocket& socket, FrameParser& parser, MessageType expe
     if (frame.messageType != expected) throw std::runtime_error("scripted worker received an unexpected frame");
 }
 
+void receiveExpectedRun(
+    QLocalSocket& socket,
+    FrameParser& parser,
+    MessageType expected,
+    std::uint32_t runIndex)
+{
+    const auto frame = receiveFrame(socket, parser);
+    if (frame.messageType != expected || decodeRunIndexPayload(frame.payload) != runIndex) {
+        throw std::runtime_error("scripted worker received an unexpected run command");
+    }
+}
+
 void signalMarker(const QByteArray& value)
 {
     const auto* pathValue = std::getenv("CRYPTOBENCH_TEST_WORKER_SIGNAL_FILE");
@@ -108,12 +120,50 @@ void completeRun(
     std::uint32_t totalRuns)
 {
     sendProgressAndMeasurementReady(socket, runIndex, totalRuns);
-    receiveExpected(socket, parser, MessageType::StartMeasurement);
+    receiveExpectedRun(socket, parser, MessageType::StartMeasurement, runIndex);
     signalMeasurementStarted(runIndex);
     sendFrame(socket, MessageType::MeasurementFinished, encodeRunIndexPayload(runIndex));
-    receiveExpected(socket, parser, MessageType::MemoryWindowClosed);
+    receiveExpectedRun(socket, parser, MessageType::MemoryWindowClosed, runIndex);
     sendFrame(socket, MessageType::WorkerRunMeasurement,
               encodeWorkerRunMeasurement({runIndex, 1'000, 1'000}));
+}
+
+void completeV2Run(
+    QLocalSocket& socket,
+    FrameParser& parser,
+    std::uint32_t runIndex,
+    std::uint32_t totalRuns)
+{
+    sendFrame(socket, MessageType::BaselineReady, encodeRunIndexPayload(runIndex));
+    receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation, runIndex);
+    sendFrame(socket, MessageType::Progress,
+              encodeProgress({core::BenchmarkPhase::Warmup, runIndex, totalRuns}));
+    sendFrame(socket, MessageType::AlgorithmReady, encodeRunIndexPayload(runIndex));
+    receiveExpectedRun(socket, parser, MessageType::StartMeasurement, runIndex);
+    sendFrame(socket, MessageType::MeasurementFinished, encodeRunIndexPayload(runIndex));
+    receiveExpectedRun(socket, parser, MessageType::MemoryWindowClosed, runIndex);
+    sendFrame(socket, MessageType::WorkerRunMeasurement,
+              encodeWorkerRunMeasurement({runIndex, 1'000, 1'000}));
+    sendFrame(socket, MessageType::WorkerOutcome,
+              encodeWorkerOutcome({WorkerOutcomeStatus::Completed, std::nullopt}));
+}
+
+void completeV2RunAfterPreparation(
+    QLocalSocket& socket,
+    FrameParser& parser,
+    std::uint32_t runIndex,
+    std::uint32_t totalRuns)
+{
+    sendFrame(socket, MessageType::Progress,
+              encodeProgress({core::BenchmarkPhase::Warmup, runIndex, totalRuns}));
+    sendFrame(socket, MessageType::AlgorithmReady, encodeRunIndexPayload(runIndex));
+    receiveExpectedRun(socket, parser, MessageType::StartMeasurement, runIndex);
+    sendFrame(socket, MessageType::MeasurementFinished, encodeRunIndexPayload(runIndex));
+    receiveExpectedRun(socket, parser, MessageType::MemoryWindowClosed, runIndex);
+    sendFrame(socket, MessageType::WorkerRunMeasurement,
+              encodeWorkerRunMeasurement({runIndex, 1'000, 1'000}));
+    sendFrame(socket, MessageType::WorkerOutcome,
+              encodeWorkerOutcome({WorkerOutcomeStatus::Completed, std::nullopt}));
 }
 
 QString argumentValue(int argc, char* argv[], int index)
@@ -129,7 +179,9 @@ int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
 
-    if (argc != 3 || argumentValue(argc, argv, 1) != QStringLiteral("--ipc-endpoint") ||
+    const bool v2 = argc == 4 && argumentValue(argc, argv, 3) == QStringLiteral("--ipc-v2");
+    if ((!v2 && argc != 3) || (v2 && argc != 4) ||
+        argumentValue(argc, argv, 1) != QStringLiteral("--ipc-endpoint") ||
         argumentValue(argc, argv, 2).isEmpty() || argumentValue(argc, argv, 2) == QStringLiteral("<missing>")) {
         return 2;
     }
@@ -152,9 +204,226 @@ int main(int argc, char* argv[])
         }
 
         FrameParser parser;
-        sendFrame(socket, ipc::MessageType::WorkerReady, encodeWorkerReady({kProtocolVersion}));
+        if (v2 && scenario == QStringLiteral("unsupported-protocol")) {
+            signalMarker(QByteArray("pid ") + QByteArray::number(GetCurrentProcessId()));
+            signalMarker("unsupported-protocol-ready");
+            sendFrame(socket, ipc::MessageType::WorkerReady,
+                      encodeWorkerReady({kProtocolVersionV2 + 1}));
+            QElapsedTimer timer;
+            timer.start();
+            while (socket.state() != QLocalSocket::UnconnectedState && timer.elapsed() < 60'000) {
+                if (socket.waitForReadyRead(1'000)) {
+                    signalMarker("unexpected-benchmark-request");
+                    socket.readAll();
+                }
+            }
+            return 0;
+        }
+        sendFrame(socket, ipc::MessageType::WorkerReady,
+                  encodeWorkerReady({v2 ? kProtocolVersionV2 : kProtocolVersion}));
         signalMarker(QByteArray("pid ") + QByteArray::number(GetCurrentProcessId()));
         const auto request = receiveFrame(socket, parser);
+        if (v2) {
+            if (request.messageType != MessageType::BenchmarkRunRequest) return 4;
+            const auto runRequest = decodeBenchmarkRunRequest(request.payload);
+            if (scenario == QStringLiteral("silent-baseline")) {
+                signalMarker("baseline-silent");
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("long-preparation")) {
+                signalMarker("long-preparation-delay-started");
+                int exitCode = 0;
+                QTimer::singleShot(2'200, &application, [&] {
+                    try {
+                        sendFrame(socket, MessageType::BaselineReady,
+                                  encodeRunIndexPayload(runRequest.logicalRunIndex));
+                        signalMarker("long-preparation-baseline-ready");
+                        receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                           runRequest.logicalRunIndex);
+                        completeV2RunAfterPreparation(
+                            socket, parser, runRequest.logicalRunIndex, runRequest.config.runs);
+                    } catch (const std::exception&) {
+                        exitCode = 6;
+                    }
+                    application.quit();
+                });
+                application.exec();
+                return exitCode;
+            }
+            if (scenario == QStringLiteral("early-exit-missing-final")) {
+                return 0;
+            }
+            if (scenario == QStringLiteral("failed-before-measurement") ||
+                scenario == QStringLiteral("failed-immediately") ||
+                scenario == QStringLiteral("failed-graceful") ||
+                scenario == QStringLiteral("failed-stays-alive")) {
+                sendFailureOutcome(socket, runRequest.logicalRunIndex, "scripted v2 worker failure");
+                if (scenario == QStringLiteral("failed-graceful")) {
+                    QTimer::singleShot(100, &application, &QCoreApplication::quit);
+                    application.exec();
+                }
+                if (scenario == QStringLiteral("failed-stays-alive")) {
+                    signalMarker("failure-sent");
+                    QTimer::singleShot(60'000, &application, &QCoreApplication::quit);
+                    application.exec();
+                }
+                return scenario == QStringLiteral("failed-graceful") ? 0 : 9;
+            }
+            if (scenario == QStringLiteral("crash-before-outcome")) return 9;
+            if (scenario == QStringLiteral("invalid-progress-before-preparation")) {
+                sendFrame(socket, MessageType::Progress,
+                          encodeProgress({core::BenchmarkPhase::Preparing,
+                                          runRequest.logicalRunIndex,
+                                          1}));
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("invalid-progress-during-measurement")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpected(socket, parser, MessageType::StartAlgorithmPreparation);
+                sendFrame(socket, MessageType::AlgorithmReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpected(socket, parser, MessageType::StartMeasurement);
+                sendFrame(socket, MessageType::Progress,
+                          encodeProgress({core::BenchmarkPhase::Measuring,
+                                          runRequest.logicalRunIndex,
+                                          1}));
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("wrong-baseline-index")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex + 1));
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("duplicate-baseline")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("v2-measurement-ready")) {
+                sendFrame(socket, MessageType::MeasurementReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("wrong-direction")) {
+                sendFrame(socket, MessageType::StartMeasurement,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("malformed-boundary")) {
+                sendFrame(socket, MessageType::BaselineReady, QByteArray("\x01", 1));
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("observe-b0-command")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                signalMarker("baseline-ready");
+                receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                   runRequest.logicalRunIndex);
+                signalMarker("start-preparation-sent");
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("observe-b1-command")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::AlgorithmReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartMeasurement,
+                                   runRequest.logicalRunIndex);
+                signalMarker("start-measurement-sent");
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("observe-e-command")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::AlgorithmReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartMeasurement,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::MeasurementFinished,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::MemoryWindowClosed,
+                                   runRequest.logicalRunIndex);
+                signalMarker("memory-window-closed-sent");
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("wait-after-memory-window-closed")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::AlgorithmReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartMeasurement,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::MeasurementFinished,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::MemoryWindowClosed,
+                                   runRequest.logicalRunIndex);
+                signalMarker("memory-window-closed-received");
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("wait-preparing")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpected(socket, parser, MessageType::StartAlgorithmPreparation);
+                signalMarker("preparing");
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("wait-measuring")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpected(socket, parser, MessageType::StartAlgorithmPreparation);
+                sendFrame(socket, MessageType::AlgorithmReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpected(socket, parser, MessageType::StartMeasurement);
+                signalMarker("measuring");
+                waitForCancellation(socket);
+                return 0;
+            }
+            completeV2Run(socket, parser, runRequest.logicalRunIndex, runRequest.config.runs);
+            if (scenario == QStringLiteral("completed-before-exit")) {
+                QTimer::singleShot(100, &application, &QCoreApplication::quit);
+                application.exec();
+            }
+            if (scenario == QStringLiteral("exit-before-final-queued")) {
+                socket.disconnectFromServer();
+                socket.waitForDisconnected(1'000);
+            }
+            if (scenario == QStringLiteral("completed-disconnect-stays-alive")) {
+                signalMarker("disconnected-alive");
+                socket.disconnectFromServer();
+                socket.waitForDisconnected(1'000);
+                QTimer::singleShot(60'000, &application, &QCoreApplication::quit);
+                application.exec();
+            }
+            if (scenario == QStringLiteral("duplicate-outcome")) {
+                sendFrame(socket, MessageType::WorkerOutcome,
+                          encodeWorkerOutcome({WorkerOutcomeStatus::Completed, std::nullopt}));
+            }
+            return 0;
+        }
         if (request.messageType != MessageType::BenchmarkRequest) {
             return 4;
         }

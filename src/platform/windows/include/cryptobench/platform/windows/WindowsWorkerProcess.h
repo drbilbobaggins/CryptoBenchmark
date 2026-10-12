@@ -12,6 +12,7 @@ public:
     ~WindowsWorkerProcess() override;
 
     void start(const QString& ipcEndpoint);
+    void startV2(const QString& ipcEndpoint, const QString& workerExecutablePath = {});
 
     QProcess::ProcessState state() const;
     qint64 processId() const;

@@ -43,6 +43,8 @@ add_library(cryptobench_application STATIC
     BenchmarkController.cpp
     include/cryptobench/application/BenchmarkSessionExecutor.h
     include/cryptobench/application/BenchmarkController.h
+    WorkerRunSession.cpp
+    include/cryptobench/application/WorkerRunSession.h
     BenchmarkConfigJson.cpp
     include/cryptobench/application/BenchmarkConfigJson.h
     BatchTypes.cpp
