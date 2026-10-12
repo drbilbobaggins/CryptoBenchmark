@@ -11,12 +11,15 @@
 #include <cryptobench/core/ErrorInfo.h>
 #include <cryptobench/core/MeasurementSettings.h>
 #include <cryptobench/core/MemoryV2.h>
+#include <cryptobench/core/ProgressInfo.h>
 #include <cryptobench/core/WorkerRunMeasurement.h>
 #include <cryptobench/ipc/ParentIpcChannel.h>
 #include <cryptobench/platform/windows/WindowsWorkerProcess.h>
 #include <cryptobench/platform/windows/WorkerMemorySampler.h>
 
 namespace cryptobench::application {
+
+class WorkerRunSession;
 
 struct WorkerRunSessionResult {
     std::uint32_t logicalRunIndex;
@@ -26,6 +29,8 @@ struct WorkerRunSessionResult {
 
 struct WorkerRunSessionTestHooks {
     std::function<void(qint64)> workerStarted;
+    std::function<void(WorkerRunSession*)> sessionCreated;
+    std::function<void()> terminalContinuationQueued;
     std::function<QString()> endpointFactory;
     std::function<void(std::uint32_t, const core::MeasurementSettings&)> startSampler;
     std::function<void()> markExecutionBoundary;
@@ -56,6 +61,7 @@ public:
     bool isActive() const noexcept;
 
 signals:
+    void progressChanged(const cryptobench::core::ProgressInfo& progress);
     void completed(const cryptobench::application::WorkerRunSessionResult& result);
     void failed(const cryptobench::core::ErrorInfo& error);
     void cancelled();

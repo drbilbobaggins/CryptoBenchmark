@@ -254,11 +254,108 @@ int main(int argc, char* argv[])
             if (scenario == QStringLiteral("early-exit-missing-final")) {
                 return 0;
             }
+            if (scenario == QStringLiteral("failed-during-measurement-v2")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::Progress,
+                          encodeProgress({core::BenchmarkPhase::Warmup,
+                                          runRequest.logicalRunIndex,
+                                          runRequest.config.runs}));
+                sendFrame(socket, MessageType::AlgorithmReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartMeasurement,
+                                   runRequest.logicalRunIndex);
+                sendFailureOutcome(socket, runRequest.logicalRunIndex,
+                                   "scripted v2 measurement failure");
+                return 9;
+            }
+            if (scenario == QStringLiteral("failed-after-memory-window-closed-v2")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::Progress,
+                          encodeProgress({core::BenchmarkPhase::Warmup,
+                                          runRequest.logicalRunIndex,
+                                          runRequest.config.runs}));
+                sendFrame(socket, MessageType::AlgorithmReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartMeasurement,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::MeasurementFinished,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::MemoryWindowClosed,
+                                   runRequest.logicalRunIndex);
+                sendFailureOutcome(socket, runRequest.logicalRunIndex,
+                                   "scripted v2 post-window failure");
+                return 9;
+            }
+            if (scenario == QStringLiteral("completed-abnormal-exit-v2")) {
+                completeV2Run(socket, parser, runRequest.logicalRunIndex,
+                              runRequest.config.runs);
+                return 9;
+            }
+            if (scenario == QStringLiteral("missing-final-outcome-v2")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::Progress,
+                          encodeProgress({core::BenchmarkPhase::Warmup,
+                                          runRequest.logicalRunIndex,
+                                          runRequest.config.runs}));
+                sendFrame(socket, MessageType::AlgorithmReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartMeasurement,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::MeasurementFinished,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::MemoryWindowClosed,
+                                   runRequest.logicalRunIndex);
+                sendFrame(socket, MessageType::WorkerRunMeasurement,
+                          encodeWorkerRunMeasurement({runRequest.logicalRunIndex, 1'000, 1'000}));
+                waitForCancellation(socket);
+                return 0;
+            }
+            if (scenario == QStringLiteral("complete-prefix-then-fail-v2") &&
+                runRequest.logicalRunIndex == 0) {
+                completeV2Run(socket, parser, runRequest.logicalRunIndex,
+                              runRequest.config.runs);
+                return 0;
+            }
+            if (scenario == QStringLiteral("complete-prefix-then-fail-v2")) {
+                sendFailureOutcome(socket, runRequest.logicalRunIndex,
+                                   "scripted v2 prefix failure");
+                return 9;
+            }
+            if (scenario == QStringLiteral("complete-prefix-then-wait-v2") &&
+                runRequest.logicalRunIndex == 0) {
+                completeV2Run(socket, parser, runRequest.logicalRunIndex,
+                              runRequest.config.runs);
+                return 0;
+            }
+            if (scenario == QStringLiteral("complete-prefix-then-wait-v2")) {
+                sendFrame(socket, MessageType::BaselineReady,
+                          encodeRunIndexPayload(runRequest.logicalRunIndex));
+                receiveExpectedRun(socket, parser, MessageType::StartAlgorithmPreparation,
+                                   runRequest.logicalRunIndex);
+                signalMarker("prefix-next-preparing");
+                waitForCancellation(socket);
+                return 0;
+            }
             if (scenario == QStringLiteral("failed-before-measurement") ||
                 scenario == QStringLiteral("failed-immediately") ||
                 scenario == QStringLiteral("failed-graceful") ||
-                scenario == QStringLiteral("failed-stays-alive")) {
+                scenario == QStringLiteral("failed-stays-alive") ||
+                scenario == QStringLiteral("failed-disconnect-immediately-v2")) {
                 sendFailureOutcome(socket, runRequest.logicalRunIndex, "scripted v2 worker failure");
+                if (scenario == QStringLiteral("failed-disconnect-immediately-v2")) {
+                    socket.disconnectFromServer();
+                    socket.waitForDisconnected(1'000);
+                    return 9;
+                }
                 if (scenario == QStringLiteral("failed-graceful")) {
                     QTimer::singleShot(100, &application, &QCoreApplication::quit);
                     application.exec();

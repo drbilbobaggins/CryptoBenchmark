@@ -188,7 +188,9 @@ void WorkerRunSession::onProgress(const ipc::Progress& value)
         fail(sessionError(core::ErrorCode::WorkerCommunicationFailed,
                           core::FailureStage::WorkerCommunication,
                           QStringLiteral("Progress did not match the active v2 session")));
+        return;
     }
+    emit progressChanged({core::BenchmarkPhase::Warmup, logicalRunIndex_, config_->runs});
 }
 
 void WorkerRunSession::onBaselineReady(std::uint32_t runIndex)
@@ -218,6 +220,7 @@ void WorkerRunSession::onBaselineReady(std::uint32_t runIndex)
     }
     try {
         ipcChannel_.sendStartAlgorithmPreparation(runIndex);
+        emit progressChanged({core::BenchmarkPhase::Preparing, logicalRunIndex_, config_->runs});
     } catch (const std::exception& error) {
         fail(sessionError(core::ErrorCode::WorkerCommunicationFailed,
                           core::FailureStage::WorkerCommunication,
@@ -244,6 +247,7 @@ void WorkerRunSession::onAlgorithmReady(std::uint32_t runIndex)
     }
     try {
         ipcChannel_.sendStartMeasurement(runIndex);
+        emit progressChanged({core::BenchmarkPhase::Measuring, logicalRunIndex_, config_->runs});
     } catch (const std::exception& error) {
         fail(sessionError(core::ErrorCode::WorkerCommunicationFailed,
                           core::FailureStage::WorkerCommunication,
@@ -270,6 +274,7 @@ void WorkerRunSession::onMeasurementFinished(std::uint32_t runIndex)
     }
     try {
         ipcChannel_.sendMemoryWindowClosed(runIndex);
+        emit progressChanged({core::BenchmarkPhase::Finalizing, logicalRunIndex_, config_->runs});
         armTechnicalTimeout();
     } catch (const std::exception& error) {
         fail(sessionError(core::ErrorCode::WorkerCommunicationFailed,

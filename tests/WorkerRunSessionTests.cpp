@@ -111,7 +111,10 @@ void testSingleV2Run()
     bool failed = false;
     application::WorkerRunSessionResult result{};
     core::ErrorInfo failure{};
+    std::vector<core::BenchmarkPhase> phases;
 
+    QObject::connect(&session, &application::WorkerRunSession::progressChanged,
+                     [&](const core::ProgressInfo& progress) { phases.push_back(progress.phase); });
     QObject::connect(&session, &application::WorkerRunSession::completed,
                      [&](const application::WorkerRunSessionResult& value) {
                          result = value;
@@ -138,6 +141,11 @@ void testSingleV2Run()
     require(result.memory.readyPrivateUsageBytes > 0, "B1 was not collected");
     require(result.memory.finalPrivateUsageBytes > 0, "E was not collected");
     require(!session.isActive(), "session remained active after completion");
+    require(phases.size() >= 4 && phases[0] == core::BenchmarkPhase::Preparing &&
+                phases[1] == core::BenchmarkPhase::Warmup &&
+                phases[phases.size() - 2] == core::BenchmarkPhase::Measuring &&
+                phases.back() == core::BenchmarkPhase::Finalizing,
+            "v2 session phases were not forwarded in lifecycle order");
 }
 
 void testExitBeforeFinalQueuedFramesDoesNotFalseFail()
@@ -530,6 +538,51 @@ void testEarlyNormalExitMissingFinalFramesFails()
             "early normal exit with missing final frames did not fail exactly once");
 }
 
+void testV2FailureScenario(const char* scenario, const char* expectedMessage)
+{
+    setScenario(scenario);
+    application::WorkerRunSession session;
+    bool failed = false;
+    bool completed = false;
+    int terminalSignals = 0;
+    core::ErrorInfo error{};
+    QObject::connect(&session, &application::WorkerRunSession::failed,
+                     [&](const core::ErrorInfo& value) {
+                         failed = true;
+                         error = value;
+                         ++terminalSignals;
+                     });
+    QObject::connect(&session, &application::WorkerRunSession::completed,
+                     [&](const application::WorkerRunSessionResult&) {
+                         completed = true;
+                         ++terminalSignals;
+                     });
+    session.start(testConfig(), 0, {1});
+    waitUntil([&] { return !session.isActive(); }, "v2 failure scenario did not terminate");
+    clearScenario();
+    require(failed && !completed && terminalSignals == 1,
+            "v2 failure scenario produced an invalid terminal signal set");
+    require(error.technicalMessage == expectedMessage,
+            "v2 failure scenario did not preserve its authoritative ErrorInfo");
+}
+
+void testV2CompletedOutcomeWithAbnormalExitFails()
+{
+    setScenario("completed-abnormal-exit-v2");
+    application::WorkerRunSession session;
+    bool failed = false;
+    bool completed = false;
+    QObject::connect(&session, &application::WorkerRunSession::failed,
+                     [&](const core::ErrorInfo&) { failed = true; });
+    QObject::connect(&session, &application::WorkerRunSession::completed,
+                     [&](const application::WorkerRunSessionResult&) { completed = true; });
+    session.start(testConfig(), 0, {1});
+    waitUntil([&] { return !session.isActive(); }, "completed abnormal-exit scenario did not terminate");
+    clearScenario();
+    require(failed && !completed,
+            "completed outcome followed by abnormal exit produced Completed");
+}
+
 void testWorkerFailureGracefulExit()
 {
     setScenario("failed-graceful");
@@ -859,6 +912,15 @@ int main(int argc, char* argv[])
         testGenuineProductionWorkerV2Run(0);
         testGenuineProductionWorkerV2Run(1);
         testEarlyNormalExitMissingFinalFramesFails();
+        testV2FailureScenario("failed-during-measurement-v2",
+                      "scripted v2 measurement failure");
+        testV2FailureScenario("failed-after-memory-window-closed-v2",
+                      "scripted v2 post-window failure");
+        testV2FailureScenario("failed-disconnect-immediately-v2",
+                      "scripted v2 worker failure");
+        testV2FailureScenario("missing-final-outcome-v2",
+                      "worker session technical timeout");
+        testV2CompletedOutcomeWithAbnormalExitFails();
         testWorkerFailureGracefulExit();
         testWorkerFailureGraceExpiryKillsWorker();
         testZeroSamplesAndMeasurementSettings();
