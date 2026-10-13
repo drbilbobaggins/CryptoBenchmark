@@ -3,6 +3,7 @@
 #include <cryptobench/core/ConfigValidator.h>
 
 #include <QUuid>
+#include <QMetaObject>
 
 #include <stdexcept>
 #include <string>
@@ -73,6 +74,12 @@ WorkerRunSession::WorkerRunSession(QObject* parent,
             this, &WorkerRunSession::onProcessError);
     connect(&workerProcess_, &platform::windows::WindowsWorkerProcess::finished,
             this, &WorkerRunSession::onProcessFinished);
+    connect(&workerProcess_, &platform::windows::WindowsWorkerProcess::stateChanged,
+            this, [this](QProcess::ProcessState state) {
+                if (state != QProcess::NotRunning) return;
+                processExitObserved_ = true;
+                if (state_ == State::CleaningUp) queueCleanupReevaluation();
+            });
     connect(&workerProcess_, &platform::windows::WindowsWorkerProcess::started, this, [this] {
         if (testHooks_.workerStarted) testHooks_.workerStarted(workerProcess_.processId());
     });
@@ -112,7 +119,6 @@ void WorkerRunSession::start(const core::BenchmarkConfig& config,
     workerOutcomeCompleted_ = false;
     workerFailureGracePending_ = false;
     finalDrainExpired_ = false;
-    cleanupEscalated_ = false;
     terminalSignalled_ = false;
     terminalKind_ = TerminalKind::None;
     terminalError_.reset();
@@ -398,15 +404,16 @@ void WorkerRunSession::onWorkerFailureGraceTimeout()
 {
     if (state_ != State::CleaningUp || !workerFailureGracePending_) return;
     workerFailureGracePending_ = false;
-    if (processExitObserved_ && !workerProcess_.isRunning()) {
+    refreshProcessExitObservation();
+    if (processExitObserved_ && !processIsRunning()) {
         finalizeTerminal();
         return;
     }
-    if (!workerProcess_.isRunning()) {
+    if (!processIsRunning()) {
         armCleanupTimeout();
         return;
     }
-    workerProcess_.kill();
+    killWorkerProcess();
     armCleanupTimeout();
 }
 
@@ -455,13 +462,14 @@ void WorkerRunSession::onFinalDrainTimeout()
 void WorkerRunSession::onCleanupTimeout()
 {
     if (state_ != State::CleaningUp) return;
-    if (workerProcess_.isRunning()) {
-        cleanupEscalated_ = true;
-        cleanupTimer_.stop();
+    refreshProcessExitObservation();
+    if (processIsRunning()) {
+        killWorkerProcess();
+        armCleanupTimeout();
         return;
     }
     if (workerLaunchAttempted_ && !processExitObserved_) {
-        cleanupTimer_.start(kCleanupTimeoutMilliseconds);
+        armCleanupTimeout();
         return;
     }
     finalizeTerminal();
@@ -503,12 +511,14 @@ void WorkerRunSession::beginCleanup()
     workerFailureGraceTimer_.stop();
     cleanupTimer_.stop();
     cleanup();
-    if (workerProcess_.isRunning()) {
+    if (testHooks_.cleanupStarted) testHooks_.cleanupStarted();
+    refreshProcessExitObservation();
+    if (processIsRunning()) {
         if (workerFailureGracePending_) {
             workerFailureGraceTimer_.start(kWorkerFailureGraceTimeoutMilliseconds);
             return;
         }
-        workerProcess_.kill();
+        killWorkerProcess();
         armCleanupTimeout();
         return;
     }
@@ -522,7 +532,8 @@ void WorkerRunSession::beginCleanup()
 void WorkerRunSession::finalizeTerminal()
 {
     if (terminalSignalled_) return;
-    if (workerProcess_.isRunning() ||
+    refreshProcessExitObservation();
+    if (processIsRunning() ||
         (workerLaunchAttempted_ && !processExitObserved_)) return;
     terminalSignalled_ = true;
     state_ = State::Terminal;
@@ -590,7 +601,11 @@ void WorkerRunSession::armFinalDrainTimeout()
 
 void WorkerRunSession::armCleanupTimeout()
 {
-    cleanupTimer_.start(kCleanupTimeoutMilliseconds);
+    const auto timeout = testHooks_.cleanupTimeoutMilliseconds
+        ? testHooks_.cleanupTimeoutMilliseconds()
+        : kCleanupTimeoutMilliseconds;
+    cleanupTimer_.start(timeout);
+    if (testHooks_.cleanupTimeoutArmed) testHooks_.cleanupTimeoutArmed();
 }
 
 void WorkerRunSession::startSamplerV2(std::uint32_t processId)
@@ -634,6 +649,35 @@ bool WorkerRunSession::samplerIsActive() const noexcept
         return testHooks_.samplerIsActive();
     }
     return memorySampler_.isActive();
+}
+
+bool WorkerRunSession::processIsRunning() const noexcept
+{
+    return testHooks_.processState
+        ? testHooks_.processState() != QProcess::NotRunning
+        : workerProcess_.isRunning();
+}
+
+void WorkerRunSession::refreshProcessExitObservation() noexcept
+{
+    if (!processIsRunning()) processExitObserved_ = true;
+}
+
+void WorkerRunSession::killWorkerProcess()
+{
+    if (testHooks_.killProcess) testHooks_.killProcess();
+    workerProcess_.kill();
+}
+
+void WorkerRunSession::queueCleanupReevaluation()
+{
+    QMetaObject::invokeMethod(this, [this] {
+        if (terminalSignalled_ || state_ != State::CleaningUp) return;
+        refreshProcessExitObservation();
+        if (!processIsRunning() && (!workerLaunchAttempted_ || processExitObserved_)) {
+            finalizeTerminal();
+        }
+    }, Qt::QueuedConnection);
 }
 
 QString WorkerRunSession::endpoint() const

@@ -37,6 +37,11 @@ struct WorkerRunSessionTestHooks {
     std::function<core::MemoryV2RawObservations()> stopAndCollectSampler;
     std::function<void()> stopAndDiscardSampler;
     std::function<bool()> samplerIsActive;
+    std::function<QProcess::ProcessState()> processState;
+    std::function<void()> cleanupStarted;
+    std::function<void()> killProcess;
+    std::function<void()> cleanupTimeoutArmed;
+    std::function<int()> cleanupTimeoutMilliseconds;
 };
 
 // The caller retains this single-use object until a terminal signal confirms
@@ -103,8 +108,10 @@ private:
     void onWorkerExitTimeout();
     void onFinalDrainTimeout();
     void onWorkerFailureGraceTimeout();
+private slots:
     void onCleanupTimeout();
 
+private:
     void fail(core::ErrorInfo error);
     void finishCancellation();
     void beginCompletion();
@@ -125,6 +132,10 @@ private:
     core::MemoryV2RawObservations stopAndCollectSamplerV2();
     void stopAndDiscardSampler() noexcept;
     bool samplerIsActive() const noexcept;
+    bool processIsRunning() const noexcept;
+    void refreshProcessExitObservation() noexcept;
+    void killWorkerProcess();
+    void queueCleanupReevaluation();
     QString endpoint() const;
 
     State state_ = State::Idle;
@@ -138,7 +149,6 @@ private:
     bool workerOutcomeCompleted_ = false;
     bool workerFailureGracePending_ = false;
     bool finalDrainExpired_ = false;
-    bool cleanupEscalated_ = false;
     std::uint32_t logicalRunIndex_ = 0;
     std::optional<core::BenchmarkConfig> config_;
     core::MeasurementSettings settings_ = core::defaultMeasurementSettings();

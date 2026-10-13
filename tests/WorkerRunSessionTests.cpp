@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QDir>
 #include <QFileInfo>
+#include <QMetaObject>
 
 #include <windows.h>
 
@@ -85,6 +86,16 @@ bool processIsRunning(DWORD pid)
     const auto result = WaitForSingleObject(handle, 0);
     CloseHandle(handle);
     return result == WAIT_TIMEOUT;
+}
+
+void terminateProcess(DWORD pid)
+{
+    const auto handle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    require(handle != nullptr, "could not open worker for deterministic termination");
+    require(TerminateProcess(handle, 1) != FALSE, "could not terminate worker deterministically");
+    require(WaitForSingleObject(handle, 2'000) == WAIT_OBJECT_0,
+            "worker did not terminate deterministically");
+    CloseHandle(handle);
 }
 
 void clearScenario()
@@ -249,6 +260,104 @@ void testCancellationWaitingForBaselineReadyCleansUp()
         "BaselineReady cancellation did not produce one cancellation");
     require(pid > 0 && !processIsRunning(static_cast<DWORD>(pid)),
         "BaselineReady cancellation left the worker alive");
+}
+
+void testCleanupWatchdogRearmsWhileWorkerRemainsActive()
+{
+    setScenario("wait-preparing");
+    QProcess::ProcessState simulatedState = QProcess::Running;
+    qint64 workerPid = 0;
+    int killRequests = 0;
+    int cleanupTimeoutsArmed = 0;
+    int terminalSignals = 0;
+    application::WorkerRunSessionTestHooks hooks;
+    hooks.workerStarted = [&](qint64 pid) { workerPid = pid; };
+    hooks.processState = [&] { return simulatedState; };
+    hooks.killProcess = [&] { ++killRequests; };
+    hooks.cleanupTimeoutArmed = [&] { ++cleanupTimeoutsArmed; };
+    hooks.cleanupTimeoutMilliseconds = [] { return 1; };
+    application::WorkerRunSession session(nullptr, {}, std::move(hooks));
+    bool cancelled = false;
+    QObject::connect(&session, &application::WorkerRunSession::cancelled,
+             [&] { cancelled = true; ++terminalSignals; });
+    QObject::connect(&session, &application::WorkerRunSession::failed,
+             [&](const core::ErrorInfo&) { ++terminalSignals; });
+    session.start(testConfig(), 0, {1});
+    waitForMarker("preparing");
+    session.cancel();
+
+    QMetaObject::invokeMethod(&session, "onCleanupTimeout", Qt::DirectConnection);
+    require(killRequests >= 2 && cleanupTimeoutsArmed >= 2 && !cancelled && session.isActive(),
+        "active cleanup did not rearm termination attempts without finalizing");
+
+        waitUntil([&] { return workerPid > 0 && !processIsRunning(static_cast<DWORD>(workerPid)); },
+              "active cleanup test worker did not terminate after kill");
+    simulatedState = QProcess::NotRunning;
+    QMetaObject::invokeMethod(&session, "onCleanupTimeout", Qt::DirectConnection);
+    waitUntil([&] { return !session.isActive(); },
+          "cleanup did not finalize after simulated NotRunning state");
+    clearScenario();
+    require(cancelled && terminalSignals == 1,
+        "active cleanup did not emit exactly one cancellation after termination");
+    require(workerPid > 0 && !processIsRunning(static_cast<DWORD>(workerPid)),
+        "active cleanup regression left the worker alive");
+}
+
+void testCleanupRefreshesAlreadyObservedNotRunningState()
+{
+    setScenario("wait-preparing");
+    QProcess::ProcessState simulatedState = QProcess::Running;
+    qint64 workerPid = 0;
+    int terminalSignals = 0;
+    application::WorkerRunSessionTestHooks hooks;
+    hooks.workerStarted = [&](qint64 pid) { workerPid = pid; };
+    hooks.processState = [&] { return simulatedState; };
+    hooks.cleanupStarted = [&] {
+    require(workerPid > 0, "cleanup began before worker PID was available");
+    terminateProcess(static_cast<DWORD>(workerPid));
+    simulatedState = QProcess::NotRunning;
+    };
+    application::WorkerRunSession session(nullptr, {}, std::move(hooks));
+    bool cancelled = false;
+    QObject::connect(&session, &application::WorkerRunSession::cancelled,
+             [&] { cancelled = true; ++terminalSignals; });
+    QObject::connect(&session, &application::WorkerRunSession::failed,
+             [&](const core::ErrorInfo&) { ++terminalSignals; });
+    session.start(testConfig(), 0, {1});
+    waitForMarker("preparing");
+    session.cancel();
+    waitUntil([&] { return !session.isActive(); },
+          "cleanup did not refresh the already observed NotRunning state");
+    clearScenario();
+    require(cancelled && terminalSignals == 1,
+        "already observed NotRunning state did not produce one cancellation");
+    require(workerPid > 0 && !processIsRunning(static_cast<DWORD>(workerPid)),
+        "already observed NotRunning regression left the worker alive");
+}
+
+void testNotRunningObservationCannotCompleteBeforeFinished()
+{
+    setScenario("completed-before-exit");
+    application::WorkerRunSessionTestHooks hooks;
+    hooks.processState = [] { return QProcess::NotRunning; };
+    application::WorkerRunSession session(nullptr, {}, std::move(hooks));
+    bool completed = false;
+    bool failed = false;
+    QObject::connect(&session, &application::WorkerRunSession::completed,
+             [&](const application::WorkerRunSessionResult&) { completed = true; });
+    QObject::connect(&session, &application::WorkerRunSession::failed,
+             [&](const core::ErrorInfo&) { failed = true; });
+    session.start(testConfig(), 0, {1});
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 20) QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+    require(!completed && !failed,
+        "NotRunning observation synthesized a terminal result before finished");
+    waitUntil([&] { return completed || failed; },
+          "finished exit information did not resolve the completed run");
+    clearScenario();
+    require(completed && !failed,
+        "completed run did not require and receive successful finished information");
 }
 
 void testInjectedBoundaryFailure(
@@ -904,6 +1013,9 @@ int main(int argc, char* argv[])
         testProgressBeforePreparationIsRejected();
         testProgressDuringMeasurementIsRejected();
         testCancellationWaitingForBaselineReadyCleansUp();
+        testCleanupWatchdogRearmsWhileWorkerRemainsActive();
+        testCleanupRefreshesAlreadyObservedNotRunningState();
+        testNotRunningObservationCannotCompleteBeforeFinished();
         testBoundaryFailuresAreTerminalAndClean();
         testNegativeV2FramesAreRejected();
         testUnsupportedWorkerProtocolIsRejectedBeforeBenchmarkRequest();
