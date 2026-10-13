@@ -52,7 +52,18 @@ BenchmarkStatistics statistics()
 {
     return {Statistics<double>{1.25, 1.5, 0.75, 2.25, 0.125},
             Statistics<double>{3.25, 3.5, 2.75, 4.25, 0.225},
-            Statistics<double>{5.25, 5.5, 4.75, 6.25, 0.325}};
+            MemoryV2Statistics{
+                Statistics<double>{-1.25, -1.5, -2.25, -0.25, 0.125},
+                Statistics<double>{5.25, 5.5, 4.75, 6.25, 0.325},
+                Statistics<double>{7.25, 7.5, 6.75, 8.25, 0.425},
+                Statistics<double>{9.25, 9.5, 8.75, 10.25, 0.525}}};
+}
+
+BatchExecutionState state()
+{
+    auto value = createBatchExecutionState(definition(), {});
+    value.measurementSettings = MeasurementSettings{3};
+    return value;
 }
 
 bool sameEnvironment(const EnvironmentInfo& left, const EnvironmentInfo& right)
@@ -72,19 +83,20 @@ BenchmarkResult resultFor(const BatchEntryDefinition& entry, BenchmarkStatus sta
     const auto resultStatistics = status == BenchmarkStatus::Completed
         ? std::optional<BenchmarkStatistics>{statistics()}
         : std::nullopt;
-    return {entry.config, {}, resultStatistics, entry.characteristics, environment(), status, error};
+    return {entry.config, {}, resultStatistics, entry.characteristics, environment(), status, error,
+            MeasurementSettings{3}};
 }
 
 void testMappingAndFieldMatrix()
 {
-    auto state = createBatchExecutionState(definition(), {});
-    state.entries[0].status = BatchEntryStatus::Completed;
-    state.entries[0].result = resultFor(state.entries[0].definition, BenchmarkStatus::Completed);
-    state.entries[1].status = BatchEntryStatus::Failed;
-    state.entries[1].result = resultFor(state.entries[1].definition, BenchmarkStatus::Failed);
-    state.status = BatchStatus::CompletedWithFailures;
+    auto batchState = state();
+    batchState.entries[0].status = BatchEntryStatus::Completed;
+    batchState.entries[0].result = resultFor(batchState.entries[0].definition, BenchmarkStatus::Completed);
+    batchState.entries[1].status = BatchEntryStatus::Failed;
+    batchState.entries[1].result = resultFor(batchState.entries[1].definition, BenchmarkStatus::Failed);
+    batchState.status = BatchStatus::CompletedWithFailures;
 
-    const auto document = BatchResultDocumentService{}.create(state);
+    const auto document = BatchResultDocumentService{}.create(batchState);
     require(document.mode == ResultMode::Batch &&
                 document.status == ResultDocumentStatus::CompletedWithFailures,
             "top-level batch mapping is incorrect");
@@ -99,7 +111,8 @@ void testMappingAndFieldMatrix()
             "completed entry environment was not preserved");
     require(document.entries[0].statistics->elapsedNanosecondsPerOperation.mean == 1.25 &&
                 document.entries[0].statistics->cpuNanosecondsPerOperation.stddev == 0.225 &&
-                document.entries[0].statistics->peakDeltaBytes.max == 6.25,
+                std::get<MemoryV2Statistics>(document.entries[0].statistics->memory)
+                    .preparationPeakPrivateUsageDeltaBytes.max == 6.25,
             "completed entry statistics were not preserved");
     require(document.entries[1].error.has_value() && !document.entries[1].statistics.has_value() &&
                 document.entries[1].environment.has_value(),
@@ -117,7 +130,7 @@ void testMappingAndFieldMatrix()
 void testInitialAndSuccessfulBatchMapping()
 {
     const auto initial = BatchResultDocumentService{}.create(
-        createBatchExecutionState(definition(), {}));
+        state());
     require(initial.mode == ResultMode::Batch && initial.status == ResultDocumentStatus::InProgress,
             "initial batch status mapping is incorrect");
     require(initial.entries.size() == 2 && initial.entries[0].status == ExportEntryStatus::NotStarted &&
@@ -129,13 +142,13 @@ void testInitialAndSuccessfulBatchMapping()
                 "initial entry contains runtime fields");
     }
 
-    auto state = createBatchExecutionState(definition(), {});
-    for (auto& entry : state.entries) {
+    auto batchState = state();
+    for (auto& entry : batchState.entries) {
         entry.status = BatchEntryStatus::Completed;
         entry.result = resultFor(entry.definition, BenchmarkStatus::Completed);
     }
-    state.status = BatchStatus::Completed;
-    const auto completed = BatchResultDocumentService{}.create(state);
+    batchState.status = BatchStatus::Completed;
+    const auto completed = BatchResultDocumentService{}.create(batchState);
     require(completed.status == ResultDocumentStatus::Completed &&
                 completed.entries[0].status == ExportEntryStatus::Completed &&
                 completed.entries[1].status == ExportEntryStatus::Completed,
@@ -144,11 +157,11 @@ void testInitialAndSuccessfulBatchMapping()
 
 void testCancelledAndNotStartedMapping()
 {
-    auto state = createBatchExecutionState(definition(), {});
-    state.entries[0].status = BatchEntryStatus::Cancelled;
-    state.entries[0].result = resultFor(state.entries[0].definition, BenchmarkStatus::Cancelled);
-    state.status = BatchStatus::Cancelled;
-    const auto document = BatchResultDocumentService{}.create(state);
+    auto batchState = state();
+    batchState.entries[0].status = BatchEntryStatus::Cancelled;
+    batchState.entries[0].result = resultFor(batchState.entries[0].definition, BenchmarkStatus::Cancelled);
+    batchState.status = BatchStatus::Cancelled;
+    const auto document = BatchResultDocumentService{}.create(batchState);
     require(document.entries[0].environment.has_value() &&
                 !document.entries[0].statistics.has_value() && !document.entries[0].error.has_value(),
             "cancelled entry field matrix is incorrect");
@@ -160,18 +173,18 @@ void testCancelledAndNotStartedMapping()
 
 void testFailedBatchErrorAndInvalidState()
 {
-    auto state = createBatchExecutionState(definition(), {});
-    state.status = BatchStatus::Failed;
-    state.batchError = BatchError{BatchErrorCode::OutputWriteFailed,
+    auto batchState = state();
+    batchState.status = BatchStatus::Failed;
+    batchState.batchError = BatchError{BatchErrorCode::OutputWriteFailed,
                                   BatchErrorStage::SnapshotPersistence, 1, "write failed"};
-    const auto document = BatchResultDocumentService{}.create(state);
+    const auto document = BatchResultDocumentService{}.create(batchState);
     require(document.batchError.has_value() && document.batchError->entryIndex == 1,
             "failed batch error was not mapped");
 
-    state.status = BatchStatus::InProgress;
+    batchState.status = BatchStatus::InProgress;
     bool rejected = false;
     try {
-        static_cast<void>(BatchResultDocumentService{}.create(state));
+        static_cast<void>(BatchResultDocumentService{}.create(batchState));
     } catch (const std::invalid_argument&) {
         rejected = true;
     }
@@ -180,12 +193,12 @@ void testFailedBatchErrorAndInvalidState()
 
 void testImpossibleEntryCombinationRejected()
 {
-    auto state = createBatchExecutionState(definition(), {});
-    state.entries[0].status = BatchEntryStatus::Completed;
-    state.entries[0].result = resultFor(state.entries[0].definition, BenchmarkStatus::Failed);
+    auto batchState = state();
+    batchState.entries[0].status = BatchEntryStatus::Completed;
+    batchState.entries[0].result = resultFor(batchState.entries[0].definition, BenchmarkStatus::Failed);
     bool rejected = false;
     try {
-        static_cast<void>(BatchResultDocumentService{}.create(state));
+        static_cast<void>(BatchResultDocumentService{}.create(batchState));
     } catch (const std::invalid_argument&) {
         rejected = true;
     }
@@ -194,7 +207,7 @@ void testImpossibleEntryCombinationRejected()
 
 void testMismatchedCanonicalResultRejected()
 {
-    auto configState = createBatchExecutionState(definition(), {});
+    auto configState = state();
     configState.entries[0].status = BatchEntryStatus::Completed;
     configState.entries[0].result = resultFor(configState.entries[0].definition,
                                                BenchmarkStatus::Completed);
@@ -207,7 +220,7 @@ void testMismatchedCanonicalResultRejected()
     }
     require(configRejected, "mismatched benchmark config was accepted");
 
-    auto characteristicsState = createBatchExecutionState(definition(), {});
+    auto characteristicsState = state();
     characteristicsState.entries[0].status = BatchEntryStatus::Cancelled;
     characteristicsState.entries[0].result = resultFor(characteristicsState.entries[0].definition,
                                                         BenchmarkStatus::Cancelled);
@@ -223,6 +236,45 @@ void testMismatchedCanonicalResultRejected()
     require(characteristicsRejected, "mismatched structural characteristics were accepted");
 }
 
+void testMeasurementProvenanceRejected()
+{
+    auto missingBatchSettings = state();
+    missingBatchSettings.measurementSettings.reset();
+    bool missingBatchRejected = false;
+    try {
+        static_cast<void>(BatchResultDocumentService{}.create(missingBatchSettings));
+    } catch (const std::invalid_argument&) {
+        missingBatchRejected = true;
+    }
+    require(missingBatchRejected, "batch document without measurement settings was accepted");
+
+    auto missingEntrySettings = state();
+    missingEntrySettings.entries[0].status = BatchEntryStatus::Completed;
+    missingEntrySettings.entries[0].result = resultFor(
+        missingEntrySettings.entries[0].definition, BenchmarkStatus::Completed);
+    missingEntrySettings.entries[0].result->measurementSettings.reset();
+    bool missingEntryRejected = false;
+    try {
+        static_cast<void>(BatchResultDocumentService{}.create(missingEntrySettings));
+    } catch (const std::invalid_argument&) {
+        missingEntryRejected = true;
+    }
+    require(missingEntryRejected, "batch entry without measurement settings was accepted");
+
+    auto mismatchedEntrySettings = state();
+    mismatchedEntrySettings.entries[0].status = BatchEntryStatus::Completed;
+    mismatchedEntrySettings.entries[0].result = resultFor(
+        mismatchedEntrySettings.entries[0].definition, BenchmarkStatus::Completed);
+    mismatchedEntrySettings.entries[0].result->measurementSettings = MeasurementSettings{4};
+    bool mismatchedEntryRejected = false;
+    try {
+        static_cast<void>(BatchResultDocumentService{}.create(mismatchedEntrySettings));
+    } catch (const std::invalid_argument&) {
+        mismatchedEntryRejected = true;
+    }
+    require(mismatchedEntryRejected, "mismatched batch entry settings were accepted");
+}
+
 } // namespace
 
 int main()
@@ -234,6 +286,7 @@ int main()
         testFailedBatchErrorAndInvalidState();
         testImpossibleEntryCombinationRejected();
         testMismatchedCanonicalResultRejected();
+        testMeasurementProvenanceRejected();
         std::cout << "PASS BatchResultDocumentService\n";
         return 0;
     } catch (const std::exception& error) {

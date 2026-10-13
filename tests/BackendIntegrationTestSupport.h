@@ -158,6 +158,8 @@ inline void assertCompletedResult(
     requireCharacteristicsMatch(result.characteristics, expectedProfile->characteristics);
 
     for (const auto& run : result.runs) {
+        const auto* memory = std::get_if<core::MemoryV2RunMeasurement>(&run.memory);
+        require(memory != nullptr, "completed result does not contain Memory v2 measurements");
         const auto expectedElapsed = static_cast<double>(run.totalElapsedTime.count()) /
                                      static_cast<double>(expectedConfig.iterationsPerRun);
         const auto expectedCpu = static_cast<double>(run.totalCpuTime.count()) /
@@ -166,11 +168,12 @@ inline void assertCompletedResult(
                     "elapsed mean does not match total time");
         requireNear(run.meanCpuTimePerOperation.count(), expectedCpu,
                     "CPU mean does not match total time");
-        require(run.memory.peakSampledBytes >= run.memory.baselineBytes,
-                "run memory peak is below baseline");
-        require(run.memory.peakDeltaBytes ==
-                    run.memory.peakSampledBytes - run.memory.baselineBytes,
-                "run memory delta is inconsistent");
+        require(memory->derived.readyStateDelta ==
+                static_cast<std::int64_t>(memory->raw.readyPrivateUsageBytes) -
+                static_cast<std::int64_t>(memory->raw.baselinePrivateUsageBytes),
+            "ready-state memory delta is inconsistent");
+        require(memory->derived.operationalPeakDelta >= memory->derived.readyStateDelta,
+            "operational memory peak is below the ready-state delta");
     }
 
     const auto& statistics = *result.statistics;
@@ -182,9 +185,26 @@ inline void assertCompletedResult(
         statistics.cpuNanosecondsPerOperation,
         result.runs[0].meanCpuTimePerOperation.count(),
         result.runs[1].meanCpuTimePerOperation.count(), "CPU statistics mismatch");
-    requireTwoValueStatistics(
-        statistics.peakDeltaBytes, static_cast<double>(result.runs[0].memory.peakDeltaBytes),
-        static_cast<double>(result.runs[1].memory.peakDeltaBytes), "memory statistics mismatch");
+    const auto* memoryStatistics = std::get_if<core::MemoryV2Statistics>(&statistics.memory);
+    require(memoryStatistics != nullptr, "completed result has non-v2 memory statistics");
+    const auto& memory0 = std::get<core::MemoryV2RunMeasurement>(result.runs[0].memory);
+    const auto& memory1 = std::get<core::MemoryV2RunMeasurement>(result.runs[1].memory);
+    requireTwoValueStatistics(memoryStatistics->readyStatePrivateUsageDeltaBytes,
+                              static_cast<double>(memory0.derived.readyStateDelta),
+                              static_cast<double>(memory1.derived.readyStateDelta),
+                              "ready-state memory statistics mismatch");
+    requireTwoValueStatistics(memoryStatistics->preparationPeakPrivateUsageDeltaBytes,
+                              static_cast<double>(memory0.derived.preparationPeakDelta),
+                              static_cast<double>(memory1.derived.preparationPeakDelta),
+                              "preparation memory statistics mismatch");
+    requireTwoValueStatistics(memoryStatistics->executionPeakPrivateUsageDeltaBytes,
+                              static_cast<double>(memory0.derived.executionPeakDelta),
+                              static_cast<double>(memory1.derived.executionPeakDelta),
+                              "execution memory statistics mismatch");
+    requireTwoValueStatistics(memoryStatistics->operationalPeakPrivateUsageDeltaBytes,
+                              static_cast<double>(memory0.derived.operationalPeakDelta),
+                              static_cast<double>(memory1.derived.operationalPeakDelta),
+                              "operational memory statistics mismatch");
 }
 
 } // namespace cryptobench::test_support

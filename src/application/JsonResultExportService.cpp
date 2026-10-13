@@ -64,6 +64,10 @@ QByteArray JsonResultExportService::serialize(const ResultDocument& document) co
         && (document.mode != ResultMode::Batch || document.status != ResultDocumentStatus::Failed)) {
         throw std::invalid_argument("batch error requires a failed batch result document");
     }
+    if (!document.measurement.has_value() ||
+        !core::isValidMeasurementSettings(document.measurement->measurementSettings)) {
+        throw std::invalid_argument("result document is missing valid measurement metadata");
+    }
 
     QJsonArray entries;
     for (const auto& entry : document.entries) {
@@ -72,9 +76,10 @@ QByteArray JsonResultExportService::serialize(const ResultDocument& document) co
 
     QJsonObject result{
         {"format", "cryptobenchmark-result"},
-        {"schemaVersion", 1},
+        {"schemaVersion", 2},
         {"mode", stableString(toStableString(document.mode))},
         {"status", stableString(toStableString(document.status))},
+        {"measurement", resultMeasurementMetadataToJson(document.measurement->measurementSettings)},
         {"entries", entries}
     };
 
@@ -82,7 +87,7 @@ QByteArray JsonResultExportService::serialize(const ResultDocument& document) co
         result["batchError"] = batchErrorToJson(*document.batchError);
     }
 
-    return QJsonDocument(result).toJson(QJsonDocument::Compact);
+    return QJsonDocument(result).toJson(QJsonDocument::Indented);
 }
 
 } // namespace cryptobench::application

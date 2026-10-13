@@ -187,7 +187,7 @@ void requireBatchSnapshot(const QByteArray& payload, const BatchExecutionState& 
     const auto root = persistedRoot(payload);
     require(root.value("format").toString() == "cryptobenchmark-result",
             "snapshot has the wrong format");
-    require(root.value("schemaVersion").toInt() == 1, "snapshot has the wrong schema version");
+    require(root.value("schemaVersion").toInt() == 2, "snapshot has the wrong schema version");
     require(root.value("mode").toString() == "batch", "snapshot has the wrong mode");
     require(root.value("status").toString() == expectedTopLevelStatus,
             "snapshot has the wrong top-level status");
@@ -249,7 +249,8 @@ void testNaturalBatch()
     auto persister = [&observer](const QString& path, const QByteArray& payload) {
         return observer(path, payload);
     };
-    BatchController controller(std::make_unique<application::BenchmarkController>(), persister);
+    BatchController controller(std::make_unique<application::BenchmarkController>(), persister, {},
+                               core::MeasurementSettings{5});
     std::size_t finishCount = 0;
     std::optional<BatchExecutionState> finishedState;
 
@@ -308,7 +309,8 @@ void testCancellationAndReuse()
     auto persister = [&observer](const QString& path, const QByteArray& payload) {
         return observer(path, payload);
     };
-    BatchController controller(std::make_unique<application::BenchmarkController>(), persister);
+    BatchController controller(std::make_unique<application::BenchmarkController>(), persister, {},
+                               core::MeasurementSettings{5});
     bool cancelArmed = true;
     bool secondEntryObserved = false;
     QObject::connect(&controller, &BatchController::progressChanged,

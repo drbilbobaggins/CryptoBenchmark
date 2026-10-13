@@ -3,70 +3,46 @@
 #include <cryptobench/application/EnvironmentInfoProvider.h>
 #include <cryptobench/core/AlgorithmRegistry.h>
 #include <cryptobench/core/ConfigValidator.h>
-#include <cryptobench/ipc/WireProtocol.h>
 
-#include <QUuid>
+#include <QMetaObject>
 
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 namespace cryptobench::application {
-namespace {
 
-constexpr int kTechnicalTimeoutMilliseconds = 10'000;
-
-std::string validationMessage(const core::ValidationResult& validation)
+BenchmarkController::BenchmarkController(
+    QObject* parent,
+    QString workerExecutablePath,
+    WorkerRunSessionTestHooks sessionTestHooks,
+    core::MeasurementSettings measurementSettings)
+    : BenchmarkSessionExecutor(parent),
+      measurementSettings_(measurementSettings),
+      workerExecutablePath_(std::move(workerExecutablePath)),
+      sessionTestHooks_(std::move(sessionTestHooks))
 {
-    if (validation.errors.empty()) return "benchmark configuration is invalid";
-    return validation.errors.front().technicalMessage;
-}
-
-core::ErrorInfo parentError(
-    core::ErrorCode code,
-    core::FailureStage stage,
-    std::string message,
-    std::optional<std::uint32_t> runIndex = std::nullopt)
-{
-    return {code, stage, runIndex, std::move(message), std::nullopt};
-}
-
-} // namespace
-
-BenchmarkController::BenchmarkController(QObject* parent)
-    : BenchmarkSessionExecutor(parent)
-{
-    technicalTimer_.setSingleShot(true);
-    connect(&technicalTimer_, &QTimer::timeout, this, &BenchmarkController::onTimeout);
-    connect(&ipcChannel_, &ipc::ParentIpcChannel::workerReadyReceived,
-            this, &BenchmarkController::onWorkerReady);
-    connect(&ipcChannel_, &ipc::ParentIpcChannel::progressReceived,
-            this, &BenchmarkController::onProgress);
-    connect(&ipcChannel_, &ipc::ParentIpcChannel::measurementReadyReceived,
-            this, &BenchmarkController::onMeasurementReady);
-    connect(&ipcChannel_, &ipc::ParentIpcChannel::measurementFinishedReceived,
-            this, &BenchmarkController::onMeasurementFinished);
-    connect(&ipcChannel_, &ipc::ParentIpcChannel::workerRunMeasurementReceived,
-            this, &BenchmarkController::onWorkerRunMeasurement);
-    connect(&ipcChannel_, &ipc::ParentIpcChannel::workerOutcomeReceived,
-            this, &BenchmarkController::onWorkerOutcome);
-    connect(&ipcChannel_, &ipc::ParentIpcChannel::transportError,
-            this, &BenchmarkController::onTransportError);
-    connect(&ipcChannel_, &ipc::ParentIpcChannel::disconnected,
-            this, &BenchmarkController::onDisconnected);
-    connect(&workerProcess_, &platform::windows::WindowsWorkerProcess::errorOccurred,
-            this, &BenchmarkController::onWorkerError);
-    connect(&workerProcess_, &platform::windows::WindowsWorkerProcess::finished,
-            this, &BenchmarkController::onWorkerFinished);
+    if (!core::isValidMeasurementSettings(measurementSettings_)) {
+        throw std::invalid_argument("BenchmarkController measurement settings are invalid");
+    }
 }
 
 BenchmarkController::~BenchmarkController()
 {
-    technicalTimer_.stop();
-    memorySampler_.stopAndDiscard();
-    workerProcess_.kill();
-    ipcChannel_.close();
+    if (!currentSession_) return;
+
+    auto* session = currentSession_.release();
+    session->setParent(nullptr);
+    if (!session->isActive()) {
+        QMetaObject::invokeMethod(session, &QObject::deleteLater, Qt::QueuedConnection);
+        return;
+    }
+
+    const auto deleteSession = [session](auto&&...) { session->deleteLater(); };
+    connect(session, &WorkerRunSession::completed, session, deleteSession);
+    connect(session, &WorkerRunSession::failed, session, deleteSession);
+    connect(session, &WorkerRunSession::cancelled, session, deleteSession);
+    session->cancel();
 }
 
 bool BenchmarkController::isBusy() const noexcept
@@ -76,14 +52,12 @@ bool BenchmarkController::isBusy() const noexcept
 
 void BenchmarkController::requestCancel()
 {
-    if (!sessionActive_ || state_ == State::Cancelling || state_ == State::Aborting) return;
+    if (!isBusy()) return;
 
+    cancelRequested_ = true;
+    if (state_ == State::Terminalizing || state_ == State::BetweenRuns) return;
     state_ = State::Cancelling;
-    technicalTimer_.stop();
-    memorySampler_.stopAndDiscard();
-    pendingMemory_.reset();
-    workerProcess_.kill();
-    if (!workerProcess_.isRunning()) finishCancelled();
+    if (currentSession_ && currentSession_->isActive()) currentSession_->cancel();
 }
 
 void BenchmarkController::start(const core::BenchmarkConfig& config)
@@ -92,12 +66,17 @@ void BenchmarkController::start(const core::BenchmarkConfig& config)
 
     core::ValidationResult validation;
     if (!core::ConfigValidator{}.validateAndCreate(config, validation)) {
-        throw std::invalid_argument(validationMessage(validation));
+        const auto message = validation.errors.empty()
+            ? "benchmark configuration is invalid"
+            : validation.errors.front().technicalMessage;
+        throw std::invalid_argument(message);
     }
-
     const auto* profile = core::AlgorithmRegistry::find(config.profile);
     if (profile == nullptr) {
         throw std::invalid_argument("benchmark configuration references an unknown profile");
+    }
+    if (!core::isValidMeasurementSettings(measurementSettings_)) {
+        throw std::invalid_argument("BenchmarkController measurement settings are invalid");
     }
 
     config_ = config;
@@ -105,418 +84,253 @@ void BenchmarkController::start(const core::BenchmarkConfig& config)
     environment_ = collectEnvironmentInfo();
     expectedRunIndex_ = 0;
     completedRuns_.clear();
-    pendingMemory_.reset();
-    failureError_.reset();
-    failureErrorAuthoritative_ = false;
-    failureDrainActive_ = false;
-    failureIpcDisconnected_ = false;
-    failureKillRequested_ = false;
-    terminalResultEmitted_ = false;
-    processExited_ = false;
-    sessionActive_ = true;
-
-    const auto endpoint = QStringLiteral("CryptoBenchmark_%1")
-        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
-    try {
-        ipcChannel_.startListening(endpoint);
-        state_ = State::WaitingForWorkerReady;
-        armTimeout();
-        workerProcess_.start(endpoint);
-    } catch (const std::exception& error) {
-        enterFailure(parentError(
-            core::ErrorCode::WorkerStartupFailed,
-            core::FailureStage::WorkerStartup,
-            error.what()));
-    }
+    cancelRequested_ = false;
+    pendingTerminalKind_ = PendingTerminalKind::None;
+    pendingRun_.reset();
+    pendingError_.reset();
+    ++generation_;
+    state_ = State::StartingRun;
+    startRun();
 }
 
-void BenchmarkController::onWorkerReady(const ipc::WorkerReady& value)
+void BenchmarkController::startRun()
 {
-    if (!sessionActive_ || state_ == State::Cancelling) return;
-    if (state_ != State::WaitingForWorkerReady) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "WorkerReady arrived in an invalid session state"));
-        return;
-    }
-    if (value.protocolVersion != ipc::kProtocolVersion) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "Worker protocol version is unsupported"));
-        return;
-    }
-
-    try {
-        ipcChannel_.sendBenchmarkRequest({*config_});
-        state_ = State::WaitingForMeasurementReady;
-        technicalTimer_.stop();
-    } catch (const std::exception& error) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 error.what()));
-    }
-}
-
-void BenchmarkController::onProgress(const core::ProgressInfo& value)
-{
-    if (!sessionActive_ || state_ == State::Cancelling) return;
-    if (state_ == State::Measuring) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "Progress arrived during a measured memory window",
-                                 expectedRunIndex_));
-        return;
-    }
-    if (config_ && value.totalRuns != config_->runs) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "Progress total does not match the configured run count"));
-        return;
-    }
-    if (value.runIndex && config_ && *value.runIndex >= config_->runs) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "Progress run index is outside the configured run range"));
-        return;
-    }
-    emit progressChanged(value);
-}
-
-void BenchmarkController::onMeasurementReady(std::uint32_t runIndex)
-{
-    if (!sessionActive_ || state_ == State::Cancelling) return;
-    if (state_ != State::WaitingForMeasurementReady || !config_ ||
-        runIndex != expectedRunIndex_ || runIndex >= config_->runs) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "MeasurementReady did not match the expected run",
-                                 runIndex));
-        return;
-    }
-
-    const auto processId = workerProcess_.processId();
-    if (processId <= 0 || static_cast<std::uint64_t>(processId) >
-                              std::numeric_limits<std::uint32_t>::max()) {
-        enterFailure(parentError(core::ErrorCode::MemoryMeasurementFailed,
-                                 core::FailureStage::MemoryMeasurement,
-                                 "Worker process ID is invalid", runIndex));
-        return;
-    }
-
-    emit progressChanged({core::BenchmarkPhase::Measuring, runIndex, config_->runs});
-
-    try {
-        memorySampler_.start(static_cast<std::uint32_t>(processId), runIndex);
-        state_ = State::Measuring;
-        ipcChannel_.sendStartMeasurement(runIndex);
-    } catch (const std::exception& error) {
-        enterFailure(parentError(core::ErrorCode::MemoryMeasurementFailed,
-                                 core::FailureStage::MemoryMeasurement,
-                                 error.what(), runIndex));
-    }
-}
-
-void BenchmarkController::onMeasurementFinished(std::uint32_t runIndex)
-{
-    if (!sessionActive_ || state_ == State::Cancelling) return;
-    if (state_ != State::Measuring || runIndex != expectedRunIndex_ ||
-        !memorySampler_.isActive()) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "MeasurementFinished did not match the active run",
-                                 runIndex));
-        return;
-    }
-
-    try {
-        pendingMemory_ = memorySampler_.stopAndCollect();
-        if (pendingMemory_->runIndex != runIndex) {
-            throw std::logic_error("parent memory measurement run index mismatch");
-        }
-        ipcChannel_.sendMemoryWindowClosed(runIndex);
-        state_ = State::WaitingForWorkerRunMeasurement;
-        armTimeout();
-    } catch (const std::exception& error) {
-        enterFailure(parentError(core::ErrorCode::MemoryMeasurementFailed,
-                                 core::FailureStage::MemoryMeasurement,
-                                 error.what(), runIndex));
-    }
-}
-
-void BenchmarkController::onWorkerRunMeasurement(const core::WorkerRunMeasurement& value)
-{
-    if (!sessionActive_ || state_ == State::Cancelling) return;
-    if (state_ != State::WaitingForWorkerRunMeasurement || !config_ ||
-        !pendingMemory_ || value.runIndex != expectedRunIndex_ ||
-        pendingMemory_->runIndex != value.runIndex) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "Worker run measurement did not match the pending run",
-                                 value.runIndex));
-        return;
-    }
-
-    try {
-        completedRuns_.push_back(core::ResultAssembler::assembleRun(
-            value, *pendingMemory_, config_->iterationsPerRun));
-        pendingMemory_.reset();
-        ++expectedRunIndex_;
-        if (expectedRunIndex_ < config_->runs) {
-            if (processExited_) {
-                enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                         core::FailureStage::WorkerCommunication,
-                                         "Worker exited before the final run was assembled",
-                                         value.runIndex));
-                return;
-            }
-            state_ = State::WaitingForMeasurementReady;
-            technicalTimer_.stop();
-        } else {
-            state_ = State::WaitingForWorkerOutcome;
-            armTimeout();
-        }
-    } catch (const std::exception& error) {
-        enterFailure(parentError(core::ErrorCode::InternalError,
-                                 core::FailureStage::ResultAssembly,
-                                 error.what(), value.runIndex));
-    }
-}
-
-void BenchmarkController::onWorkerOutcome(const ipc::WorkerOutcome& value)
-{
-    if (!sessionActive_ || state_ == State::Cancelling) return;
-    if (value.status == ipc::WorkerOutcomeStatus::Failed) {
-        if (!value.error) {
-            enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                     core::FailureStage::WorkerCommunication,
-                                     "Worker failure outcome did not contain ErrorInfo"));
-        } else {
-            enterFailure(*value.error, FailureOrigin::Worker);
-        }
-        return;
-    }
-    if (state_ != State::WaitingForWorkerOutcome || !config_ ||
-        expectedRunIndex_ != config_->runs || completedRuns_.size() != config_->runs ||
-        pendingMemory_ || memorySampler_.isActive() || value.error) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "Completed outcome arrived before the session was complete"));
-        return;
-    }
-    if (processExited_) {
-        finishSuccessfully();
-        return;
-    }
-    state_ = State::WaitingForWorkerExit;
-    armTimeout();
-}
-
-void BenchmarkController::onTransportError(const QString& message)
-{
-    if (sessionActive_ && state_ != State::Aborting && state_ != State::Cancelling) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 message.toStdString()));
-    }
-}
-
-void BenchmarkController::onDisconnected()
-{
-    if (!sessionActive_ || state_ == State::WaitingForWorkerExit ||
-        state_ == State::Cancelling || state_ == State::Aborting) return;
-    const auto error = parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                   core::FailureStage::WorkerCommunication,
-                                   "Worker IPC channel disconnected unexpectedly");
-    if (workerProcess_.isRunning()) {
-        failureIpcDisconnected_ = true;
-        enterFailure(error, FailureOrigin::ProcessExit);
-    } else {
-        enterFailure(error, FailureOrigin::Parent);
-    }
-}
-
-void BenchmarkController::onWorkerError(QProcess::ProcessError error, const QString& message)
-{
-    if (!sessionActive_ || state_ == State::Aborting || state_ == State::Cancelling) return;
-
-    const auto startupFailure = state_ == State::WaitingForWorkerReady;
-    const auto failure = parentError(startupFailure
-                                         ? core::ErrorCode::WorkerStartupFailed
-                                         : core::ErrorCode::WorkerCommunicationFailed,
-                                     startupFailure
-                                         ? core::FailureStage::WorkerStartup
-                                         : core::FailureStage::WorkerCommunication,
-                                     message.toStdString());
-    enterFailure(failure, error == QProcess::Crashed
-                              ? FailureOrigin::ProcessExit
-                              : FailureOrigin::Parent);
-}
-
-void BenchmarkController::onWorkerFinished(int exitCode, QProcess::ExitStatus exitStatus)
-{
-    if (!sessionActive_) return;
-    if (state_ == State::Cancelling) {
-        processExited_ = true;
+    if (cancelRequested_ || state_ == State::Cancelling || state_ == State::Terminalizing) {
         finishCancelled();
         return;
     }
-
-    processExited_ = true;
-    if (state_ == State::Aborting) {
-        if (failureDrainActive_ && exitStatus == QProcess::CrashExit) {
-            failureError_ = parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                        core::FailureStage::WorkerCommunication,
-                                        "Worker process crashed");
-        }
-        if (failureErrorAuthoritative_ || !failureDrainActive_ || failureIpcDisconnected_) {
-            finalizeFailure();
-        }
+    if (!config_ || !characteristics_ || !environment_ ||
+        expectedRunIndex_ >= config_->runs || currentSession_) {
+        pendingError_ = controllerError(core::ErrorCode::InternalError,
+                                        core::FailureStage::ResultAssembly,
+                                        "BenchmarkController cannot start the next logical run",
+                                        expectedRunIndex_);
+        pendingTerminalKind_ = PendingTerminalKind::Failed;
+        finishFailed();
         return;
     }
 
-    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 exitStatus == QProcess::CrashExit
-                                     ? "Worker process crashed"
-                                     : "Worker did not exit normally"),
-                     FailureOrigin::ProcessExit);
-        return;
-    }
-
-    if (state_ == State::WaitingForWorkerExit) {
-        finishSuccessfully();
-    } else if (state_ == State::WaitingForWorkerRunMeasurement ||
-               state_ == State::WaitingForWorkerOutcome) {
-        armTimeout();
-    } else {
-        enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                                 core::FailureStage::WorkerCommunication,
-                                 "Worker exited before the terminal IPC drain"),
-                     FailureOrigin::ProcessExit);
-    }
-}
-
-void BenchmarkController::onTimeout()
-{
-    if (!sessionActive_ || state_ == State::Cancelling) return;
-    if (state_ == State::Aborting) {
-        if (processExited_) {
-            finalizeFailure();
-        } else if (!failureKillRequested_) {
-            workerProcess_.kill();
-            failureKillRequested_ = true;
-            armTimeout();
-        }
-        return;
-    }
-    enterFailure(parentError(core::ErrorCode::WorkerCommunicationFailed,
-                             core::FailureStage::WorkerCommunication,
-                             "Worker session timed out", expectedRunIndex_));
-}
-
-void BenchmarkController::armTimeout()
-{
-    if (state_ == State::WaitingForWorkerReady ||
-        state_ == State::WaitingForWorkerRunMeasurement ||
-        state_ == State::WaitingForWorkerOutcome ||
-        state_ == State::WaitingForWorkerExit ||
-        state_ == State::Aborting) {
-        technicalTimer_.start(kTechnicalTimeoutMilliseconds);
-    } else {
-        technicalTimer_.stop();
-    }
-}
-
-void BenchmarkController::enterFailure(core::ErrorInfo error, FailureOrigin origin)
-{
-    if (!sessionActive_ || terminalResultEmitted_) return;
-
-    if (state_ == State::Aborting) {
-        if (origin == FailureOrigin::Worker && failureDrainActive_) {
-            failureError_ = std::move(error);
-            failureErrorAuthoritative_ = true;
-            failureDrainActive_ = false;
-            if (processExited_) finalizeFailure();
-        }
-        return;
-    }
-
-    state_ = State::Aborting;
-    technicalTimer_.stop();
-    memorySampler_.stopAndDiscard();
-    pendingMemory_.reset();
-    failureError_ = std::move(error);
-    failureErrorAuthoritative_ = origin == FailureOrigin::Worker;
-    failureDrainActive_ = origin == FailureOrigin::ProcessExit;
-
-    if (processExited_ || !workerProcess_.isRunning()) {
-        if (failureErrorAuthoritative_ || !failureDrainActive_) finalizeFailure();
-        else armTimeout();
-        return;
-    }
-
-    if (!failureErrorAuthoritative_) {
-        workerProcess_.kill();
-        failureKillRequested_ = true;
-    }
-    armTimeout();
-}
-
-void BenchmarkController::finalizeFailure()
-{
-    if (!sessionActive_ || state_ != State::Aborting || terminalResultEmitted_ ||
-        !failureError_ || workerProcess_.isRunning() || memorySampler_.isActive() ||
-        pendingMemory_) {
-        return;
-    }
-
-    const auto result = core::ResultAssembler::failed(
-        *config_, completedRuns_, *characteristics_, *environment_, *failureError_);
-    terminalResultEmitted_ = true;
-    technicalTimer_.stop();
-    ipcChannel_.close();
-    sessionActive_ = false;
-    state_ = State::Idle;
-    emit benchmarkFinished(result);
-}
-
-void BenchmarkController::finishSuccessfully()
-{
-    if (!sessionActive_ || terminalResultEmitted_) return;
-    core::BenchmarkResult result;
+    const auto generation = generation_;
+    std::unique_ptr<WorkerRunSession> session;
     try {
-        result = core::ResultAssembler::completed(
-            *config_, completedRuns_, *characteristics_, *environment_);
+        session = std::make_unique<WorkerRunSession>(this, workerExecutablePath_, sessionTestHooks_);
     } catch (const std::exception& error) {
-        enterFailure(parentError(core::ErrorCode::InternalError,
-                                 core::FailureStage::ResultAssembly,
-                                 error.what()));
+        pendingError_ = controllerError(core::ErrorCode::InternalError,
+                                        core::FailureStage::ResultAssembly,
+                                        error.what(), expectedRunIndex_);
+        pendingTerminalKind_ = PendingTerminalKind::Failed;
+        finishFailed();
         return;
     }
-    terminalResultEmitted_ = true;
-    technicalTimer_.stop();
-    ipcChannel_.close();
-    sessionActive_ = false;
-    state_ = State::Idle;
-    emit benchmarkFinished(result);
+    auto* sessionPointer = session.get();
+    currentSession_ = std::move(session);
+    state_ = State::StartingRun;
+    if (sessionTestHooks_.sessionCreated) sessionTestHooks_.sessionCreated(sessionPointer);
+
+    connect(sessionPointer, &WorkerRunSession::progressChanged, this,
+            [this, sessionPointer, generation](const core::ProgressInfo& progress) {
+                onSessionProgress(sessionPointer, generation, progress);
+            });
+    connect(sessionPointer, &WorkerRunSession::completed, this,
+            [this, sessionPointer, generation](const WorkerRunSessionResult& result) {
+                onSessionCompleted(sessionPointer, generation, result);
+            });
+    connect(sessionPointer, &WorkerRunSession::failed, this,
+            [this, sessionPointer, generation](const core::ErrorInfo& error) {
+                onSessionFailed(sessionPointer, generation, error);
+            });
+    connect(sessionPointer, &WorkerRunSession::cancelled, this,
+            [this, sessionPointer, generation] {
+                onSessionCancelled(sessionPointer, generation);
+            });
+
+    try {
+        currentSession_->start(*config_, expectedRunIndex_, measurementSettings_);
+    } catch (const std::exception& error) {
+        pendingError_ = controllerError(core::ErrorCode::WorkerStartupFailed,
+                                        core::FailureStage::WorkerStartup,
+                                        error.what(), expectedRunIndex_);
+        pendingTerminalKind_ = PendingTerminalKind::Failed;
+        queueTerminalContinuation(sessionPointer, generation);
+    }
+}
+
+void BenchmarkController::onSessionProgress(
+    WorkerRunSession* session, std::uint64_t generation,
+    const core::ProgressInfo& progress)
+{
+    if (generation != generation_ || currentSession_.get() != session || !config_ ||
+        state_ == State::Cancelling || state_ == State::Terminalizing) return;
+    if (progress.totalRuns != config_->runs || !progress.runIndex ||
+        *progress.runIndex != expectedRunIndex_) return;
+    emit progressChanged(progress);
+}
+
+void BenchmarkController::onSessionCompleted(
+    WorkerRunSession* session, std::uint64_t generation,
+    const WorkerRunSessionResult& result)
+{
+    if (generation != generation_ || currentSession_.get() != session || !config_ ||
+        pendingTerminalKind_ != PendingTerminalKind::None) return;
+    try {
+        if (result.logicalRunIndex != expectedRunIndex_ ||
+            result.workerMeasurement.runIndex != expectedRunIndex_) {
+            throw core::ResultAssemblyError("WorkerRunSession returned an unexpected logical run");
+        }
+        pendingRun_ = core::ResultAssembler::assembleRun(
+            result.workerMeasurement, result.memory, expectedRunIndex_,
+            config_->iterationsPerRun);
+        pendingTerminalKind_ = PendingTerminalKind::Completed;
+    } catch (const std::exception& error) {
+        pendingError_ = controllerError(core::ErrorCode::InternalError,
+                                        core::FailureStage::ResultAssembly,
+                                        error.what(), expectedRunIndex_);
+        pendingTerminalKind_ = PendingTerminalKind::Failed;
+    }
+    queueTerminalContinuation(session, generation);
+}
+
+void BenchmarkController::onSessionFailed(
+    WorkerRunSession* session, std::uint64_t generation, const core::ErrorInfo& error)
+{
+    if (generation != generation_ || currentSession_.get() != session ||
+        pendingTerminalKind_ != PendingTerminalKind::None) return;
+    pendingError_ = error;
+    pendingTerminalKind_ = PendingTerminalKind::Failed;
+    queueTerminalContinuation(session, generation);
+}
+
+void BenchmarkController::onSessionCancelled(WorkerRunSession* session, std::uint64_t generation)
+{
+    if (generation != generation_ || currentSession_.get() != session ||
+        pendingTerminalKind_ != PendingTerminalKind::None) return;
+    pendingTerminalKind_ = PendingTerminalKind::Cancelled;
+    queueTerminalContinuation(session, generation);
+}
+
+void BenchmarkController::queueTerminalContinuation(
+    WorkerRunSession* session, std::uint64_t generation)
+{
+    if (pendingTerminalKind_ == PendingTerminalKind::None) return;
+    state_ = State::Terminalizing;
+    if (sessionTestHooks_.terminalContinuationQueued) {
+        sessionTestHooks_.terminalContinuationQueued();
+    }
+    QMetaObject::invokeMethod(this, [this, session, generation] {
+        if (generation != generation_ || currentSession_.get() != session ||
+            pendingTerminalKind_ == PendingTerminalKind::None) return;
+
+        const auto terminalKind = pendingTerminalKind_;
+        const auto pendingRun = pendingRun_;
+        const auto pendingError = pendingError_;
+        currentSession_.reset();
+        pendingRun_.reset();
+        pendingError_.reset();
+        pendingTerminalKind_ = PendingTerminalKind::None;
+
+        if (terminalKind == PendingTerminalKind::Completed && pendingRun.has_value()) {
+            completedRuns_.push_back(*pendingRun);
+            ++expectedRunIndex_;
+        }
+
+        if (terminalKind == PendingTerminalKind::Failed || pendingError.has_value()) {
+            pendingError_ = pendingError;
+            finishFailed();
+        } else if (cancelRequested_ || terminalKind == PendingTerminalKind::Cancelled) {
+            finishCancelled();
+        } else if (config_ && expectedRunIndex_ == config_->runs) {
+            finishCompleted();
+        } else {
+            state_ = State::BetweenRuns;
+            const auto nextGeneration = generation_;
+            QMetaObject::invokeMethod(this, [this, nextGeneration] {
+                if (nextGeneration != generation_ ||
+                    (state_ != State::BetweenRuns && state_ != State::Cancelling)) return;
+                if (state_ == State::Cancelling) {
+                    finishCancelled();
+                    return;
+                }
+                state_ = State::StartingRun;
+                startRun();
+            }, Qt::QueuedConnection);
+        }
+    }, Qt::QueuedConnection);
+}
+
+void BenchmarkController::finishCompleted()
+{
+    if (!config_ || !characteristics_ || !environment_ ||
+        completedRuns_.size() != config_->runs) {
+        pendingError_ = controllerError(core::ErrorCode::InternalError,
+                                        core::FailureStage::ResultAssembly,
+                                        "BenchmarkController completed with an incomplete run set");
+        finishFailed();
+        return;
+    }
+    try {
+        const auto result = core::ResultAssembler::completed(
+            *config_, completedRuns_, *characteristics_, *environment_);
+        auto stampedResult = result;
+        stampedResult.measurementSettings = measurementSettings_;
+        state_ = State::Idle;
+        emitBenchmarkFinished(stampedResult);
+    } catch (const std::exception& error) {
+        pendingError_ = controllerError(core::ErrorCode::InternalError,
+                                        core::FailureStage::ResultAssembly,
+                                        error.what());
+        finishFailed();
+    }
+}
+
+void BenchmarkController::finishFailed()
+{
+    if (!config_ || !characteristics_ || !environment_ || !pendingError_) return;
+    const auto error = *pendingError_;
+    try {
+        const auto result = core::ResultAssembler::failed(
+            *config_, completedRuns_, *characteristics_, *environment_, error);
+        auto stampedResult = result;
+        stampedResult.measurementSettings = measurementSettings_;
+        pendingError_.reset();
+        state_ = State::Idle;
+        emitBenchmarkFinished(stampedResult);
+    } catch (const std::exception& assemblyError) {
+        const auto fallbackError = controllerError(
+            core::ErrorCode::InternalError, core::FailureStage::ResultAssembly,
+            assemblyError.what());
+        pendingError_.reset();
+        state_ = State::Idle;
+        core::BenchmarkResult fallbackResult{*config_, completedRuns_, std::nullopt,
+                             *characteristics_, *environment_,
+                             core::BenchmarkStatus::Failed, fallbackError};
+        fallbackResult.measurementSettings = measurementSettings_;
+        emitBenchmarkFinished(fallbackResult);
+    }
 }
 
 void BenchmarkController::finishCancelled()
 {
-    if (!sessionActive_ || state_ != State::Cancelling || terminalResultEmitted_ ||
-        workerProcess_.isRunning() || memorySampler_.isActive() || pendingMemory_) {
-        return;
+    if (!config_ || !characteristics_ || !environment_) return;
+    try {
+        const auto result = core::ResultAssembler::cancelled(
+            *config_, completedRuns_, *characteristics_, *environment_);
+        auto stampedResult = result;
+        stampedResult.measurementSettings = measurementSettings_;
+        state_ = State::Idle;
+        emitBenchmarkFinished(stampedResult);
+    } catch (const std::exception& error) {
+        pendingError_ = controllerError(core::ErrorCode::InternalError,
+                                        core::FailureStage::ResultAssembly,
+                                        error.what());
+        finishFailed();
     }
+}
 
-    const auto result = core::ResultAssembler::cancelled(
-        *config_, completedRuns_, *characteristics_, *environment_);
-    terminalResultEmitted_ = true;
-    technicalTimer_.stop();
-    ipcChannel_.close();
-    sessionActive_ = false;
-    state_ = State::Idle;
-    emit benchmarkFinished(result);
+core::ErrorInfo BenchmarkController::controllerError(
+    core::ErrorCode code, core::FailureStage stage, std::string message,
+    std::optional<std::uint32_t> runIndex)
+{
+    return {code, stage, runIndex, std::move(message), std::nullopt};
 }
 
 } // namespace cryptobench::application

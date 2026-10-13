@@ -6,8 +6,8 @@
 
 namespace cryptobench::ipc {
 
-WorkerIpcChannel::WorkerIpcChannel(int timeoutMilliseconds)
-    : timeoutMilliseconds_(timeoutMilliseconds)
+WorkerIpcChannel::WorkerIpcChannel(int timeoutMilliseconds, WorkerIpcMode mode)
+    : timeoutMilliseconds_(timeoutMilliseconds), mode_(mode)
 {
     if (timeoutMilliseconds_ <= 0) {
         throw std::invalid_argument("WorkerIpcChannel timeout must be positive");
@@ -34,7 +34,9 @@ void WorkerIpcChannel::connectToServer(const QString& endpoint)
 
 void WorkerIpcChannel::sendWorkerReady()
 {
-    sendFrame(MessageType::WorkerReady, encodeWorkerReady({kProtocolVersion}));
+    sendFrame(
+        MessageType::WorkerReady,
+        encodeWorkerReady({mode_ == WorkerIpcMode::SingleRunV2 ? kProtocolVersionV2 : kProtocolVersion}));
 }
 
 BenchmarkRequest WorkerIpcChannel::receiveBenchmarkRequest()
@@ -42,6 +44,16 @@ BenchmarkRequest WorkerIpcChannel::receiveBenchmarkRequest()
     const auto frame = receiveExpected(MessageType::BenchmarkRequest);
     try {
         return decodeBenchmarkRequest(frame.payload);
+    } catch (const std::invalid_argument& error) {
+        throw BenchmarkRequestDecodeError(error.what());
+    }
+}
+
+BenchmarkRunRequest WorkerIpcChannel::receiveBenchmarkRunRequest()
+{
+    const auto frame = receiveExpected(MessageType::BenchmarkRunRequest);
+    try {
+        return decodeBenchmarkRunRequest(frame.payload);
     } catch (const std::invalid_argument& error) {
         throw BenchmarkRequestDecodeError(error.what());
     }
@@ -57,8 +69,42 @@ void WorkerIpcChannel::reportProgress(const core::ProgressInfo& info)
     sendFrame(MessageType::Progress, encodeProgress(info));
 }
 
+void WorkerIpcChannel::beginAlgorithmPreparation(std::uint32_t runIndex)
+{
+    if (mode_ != WorkerIpcMode::SingleRunV2 || preparationRunIndex_ || algorithmReadyRunIndex_ || activeRunIndex_) {
+        throw std::logic_error("invalid WorkerIpcChannel algorithm preparation sequence");
+    }
+    sendFrame(MessageType::BaselineReady, encodeRunIndexPayload(runIndex));
+    const auto receivedRunIndex = receiveRunIndex(MessageType::StartAlgorithmPreparation);
+    if (receivedRunIndex != runIndex) {
+        throw std::runtime_error("StartAlgorithmPreparation runIndex mismatch");
+    }
+    preparationRunIndex_ = runIndex;
+}
+
+void WorkerIpcChannel::finishAlgorithmPreparation(std::uint32_t runIndex)
+{
+    if (mode_ != WorkerIpcMode::SingleRunV2 || !preparationRunIndex_ || *preparationRunIndex_ != runIndex || algorithmReadyRunIndex_ || activeRunIndex_) {
+        throw std::logic_error("invalid WorkerIpcChannel algorithm preparation completion sequence");
+    }
+    sendFrame(MessageType::AlgorithmReady, encodeRunIndexPayload(runIndex));
+    algorithmReadyRunIndex_ = runIndex;
+    preparationRunIndex_.reset();
+}
+
 void WorkerIpcChannel::beforeMeasurement(std::uint32_t runIndex)
 {
+    if (mode_ == WorkerIpcMode::SingleRunV2) {
+        if (!algorithmReadyRunIndex_ || *algorithmReadyRunIndex_ != runIndex || activeRunIndex_) {
+            throw std::logic_error("invalid WorkerIpcChannel v2 measurement sequence");
+        }
+        const auto receivedRunIndex = receiveRunIndex(MessageType::StartMeasurement);
+        if (receivedRunIndex != runIndex) {
+            throw std::runtime_error("StartMeasurement runIndex mismatch");
+        }
+        activeRunIndex_ = runIndex;
+        return;
+    }
     if (activeRunIndex_ || runIndex != nextRunIndex_) {
         throw std::logic_error("invalid WorkerIpcChannel beforeMeasurement sequence");
     }
@@ -82,6 +128,10 @@ void WorkerIpcChannel::afterMeasurement(const core::WorkerRunMeasurement& measur
     }
     sendFrame(MessageType::WorkerRunMeasurement, encodeWorkerRunMeasurement(measurement));
     activeRunIndex_.reset();
+    if (mode_ == WorkerIpcMode::SingleRunV2) {
+        algorithmReadyRunIndex_.reset();
+        return;
+    }
     ++nextRunIndex_;
 }
 

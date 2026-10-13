@@ -6,6 +6,7 @@
 #include <utility>
 
 #include <cryptobench/core/BenchmarkStatisticsCalculator.h>
+#include <cryptobench/core/MemoryV2Calculator.h>
 
 namespace cryptobench::core {
 namespace {
@@ -37,6 +38,24 @@ void validateMemory(const MemoryRunMeasurement& memory)
     }
 }
 
+MemoryV2RunMeasurement validateMemoryV2(
+    const MemoryV2RawObservations& raw,
+    const MemoryV2DerivedMetrics* expectedDerived = nullptr)
+{
+    const auto derived = calculateMemoryV2DerivedMetrics(raw);
+    if (!derived.has_value()) {
+        fail("Memory v2 observations are invalid");
+    }
+    if (expectedDerived != nullptr &&
+        (expectedDerived->readyStateDelta != derived->readyStateDelta ||
+         expectedDerived->preparationPeakDelta != derived->preparationPeakDelta ||
+         expectedDerived->executionPeakDelta != derived->executionPeakDelta ||
+         expectedDerived->operationalPeakDelta != derived->operationalPeakDelta)) {
+        fail("Memory v2 derived metrics do not match raw observations");
+    }
+    return {raw, *derived};
+}
+
 void validateConfig(const BenchmarkConfig& config)
 {
     if (config.iterationsPerRun == 0) {
@@ -46,12 +65,22 @@ void validateConfig(const BenchmarkConfig& config)
 
 void validateRunSequence(const BenchmarkConfig& config, std::span<const RunResult> runs)
 {
+    const bool v2 = !runs.empty() &&
+        std::holds_alternative<MemoryV2RunMeasurement>(runs.front().memory);
     for (std::size_t position = 0; position < runs.size(); ++position) {
         const auto& run = runs[position];
         if (position >= config.runs || run.runIndex != position) {
             fail("Run results do not form a sequential configured prefix");
         }
-        validateMemory(run.memory);
+        if (std::holds_alternative<MemoryV2RunMeasurement>(run.memory) != v2) {
+            fail("Run results cannot mix legacy and Memory v2 measurements");
+        }
+        if (v2) {
+            const auto& memory = std::get<MemoryV2RunMeasurement>(run.memory);
+            static_cast<void>(validateMemoryV2(memory.raw, &memory.derived));
+        } else {
+            validateMemory(std::get<MemoryRunMeasurement>(run.memory));
+        }
     }
 }
 
@@ -80,6 +109,33 @@ RunResult ResultAssembler::assembleRun(
         RunDuration{static_cast<RunDuration::rep>(worker.processCpuNanoseconds)},
         MeanOperationDuration{static_cast<double>(worker.processCpuNanoseconds) / static_cast<double>(iterationsPerRun)},
         memory.memory
+    };
+}
+
+RunResult ResultAssembler::assembleRun(
+    const WorkerRunMeasurement& worker,
+    const MemoryV2RawObservations& memory,
+    std::uint32_t expectedLogicalRunIndex,
+    std::uint64_t iterationsPerRun)
+{
+    if (worker.runIndex != expectedLogicalRunIndex) {
+        fail("Worker measurement has an unexpected logical run index");
+    }
+    if (iterationsPerRun == 0) {
+        fail("Iterations per run must be non-zero");
+    }
+    if (!fitsRunDuration(worker.elapsedNanoseconds) || !fitsRunDuration(worker.processCpuNanoseconds)) {
+        fail("Worker duration does not fit RunDuration");
+    }
+
+    const auto memoryV2 = validateMemoryV2(memory);
+    return {
+        worker.runIndex,
+        RunDuration{static_cast<RunDuration::rep>(worker.elapsedNanoseconds)},
+        MeanOperationDuration{static_cast<double>(worker.elapsedNanoseconds) / static_cast<double>(iterationsPerRun)},
+        RunDuration{static_cast<RunDuration::rep>(worker.processCpuNanoseconds)},
+        MeanOperationDuration{static_cast<double>(worker.processCpuNanoseconds) / static_cast<double>(iterationsPerRun)},
+        memoryV2
     };
 }
 

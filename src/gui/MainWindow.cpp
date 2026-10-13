@@ -162,9 +162,17 @@ void displayCompletedResults(Ui::MainWindow* ui, const cryptobench::core::Benchm
     }
 
     const auto& statistics = *result.statistics;
+    const auto* legacyMemory =
+        std::get_if<cryptobench::core::Statistics<double>>(&statistics.memory);
+    if (legacyMemory == nullptr) {
+        clearDisplayedResults(ui);
+        ui->statusLabel->setText(QStringLiteral(
+            "Completed; Memory v2 statistics are not supported by this view."));
+        return;
+    }
     const auto elapsedUnit = timeUnit(statistics.elapsedNanosecondsPerOperation.mean);
     const auto cpuUnit = timeUnit(statistics.cpuNanosecondsPerOperation.mean);
-    const auto memoryDisplayUnit = memoryUnit(statistics.peakDeltaBytes.mean);
+    const auto memoryDisplayUnit = memoryUnit(legacyMemory->mean);
 
     ui->resultsTable->setRowCount(3);
     setStatisticRow(ui->resultsTable, 0, QStringLiteral("Wall-clock / operation"),
@@ -172,7 +180,7 @@ void displayCompletedResults(Ui::MainWindow* ui, const cryptobench::core::Benchm
     setStatisticRow(ui->resultsTable, 1, QStringLiteral("Process CPU time / operation"),
                     statistics.cpuNanosecondsPerOperation, cpuUnit);
     setStatisticRow(ui->resultsTable, 2, QStringLiteral("Peak PrivateUsage delta"),
-                    statistics.peakDeltaBytes, memoryDisplayUnit);
+                    *legacyMemory, memoryDisplayUnit);
     ui->resultsPlaceholderLabel->setVisible(false);
 }
 

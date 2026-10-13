@@ -12,6 +12,9 @@ WorkerReady decodeWorkerReady(const QByteArray& payload);
 QByteArray encodeBenchmarkRequest(const BenchmarkRequest& value);
 BenchmarkRequest decodeBenchmarkRequest(const QByteArray& payload);
 
+QByteArray encodeBenchmarkRunRequest(const BenchmarkRunRequest& value);
+BenchmarkRunRequest decodeBenchmarkRunRequest(const QByteArray& payload);
+
 QByteArray encodeProgress(const Progress& value);
 Progress decodeProgress(const QByteArray& payload);
 

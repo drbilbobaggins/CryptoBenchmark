@@ -6,6 +6,7 @@
 namespace cryptobench::ipc {
 
 constexpr std::uint32_t kProtocolVersion = 1;
+constexpr std::uint32_t kProtocolVersionV2 = 2;
 constexpr std::uint32_t kMaxIpcPayload = 1024U * 1024U;
 constexpr std::size_t kFrameHeaderSize = 6;
 
@@ -18,7 +19,11 @@ enum class MessageType : std::uint16_t {
     MeasurementFinished = 6,
     MemoryWindowClosed = 7,
     WorkerRunMeasurement = 8,
-    WorkerOutcome = 9
+    WorkerOutcome = 9,
+    BenchmarkRunRequest = 10,
+    BaselineReady = 11,
+    StartAlgorithmPreparation = 12,
+    AlgorithmReady = 13
 };
 
 } // namespace cryptobench::ipc

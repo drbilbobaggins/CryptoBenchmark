@@ -2,8 +2,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
+#include <variant>
 
 #include <cryptobench/core/MemoryRunMeasurement.h>
+#include <cryptobench/core/MemoryV2.h>
 
 namespace cryptobench::core {
 
@@ -19,7 +22,7 @@ struct RunResult {
     RunDuration totalCpuTime;
     MeanOperationDuration meanCpuTimePerOperation;
 
-    MemoryRunMeasurement memory;
+    std::variant<MemoryRunMeasurement, MemoryV2RunMeasurement> memory;
 };
 
 } // namespace cryptobench::core

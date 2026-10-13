@@ -55,7 +55,13 @@ BenchmarkStatistics statistics(double wallMean, double cpuMean, double peakMean)
     return {
         Statistics<double>{wallMean, wallMean + 0.25, wallMean - 0.25, wallMean + 0.5, 0.125},
         Statistics<double>{cpuMean, cpuMean + 0.25, cpuMean - 0.25, cpuMean + 0.5, 0.25},
-        Statistics<double>{peakMean, peakMean + 0.5, peakMean - 0.5, peakMean + 1.0, 0.5}
+        MemoryV2Statistics{
+            Statistics<double>{-peakMean, -peakMean, -peakMean - 1.0, 0.0, 0.5},
+            Statistics<double>{peakMean, peakMean + 0.5, peakMean - 0.5, peakMean + 1.0, 0.5},
+            Statistics<double>{peakMean + 1.0, peakMean + 1.5, peakMean + 0.5,
+                               peakMean + 2.0, 0.5},
+            Statistics<double>{peakMean + 2.0, peakMean + 2.5, peakMean + 1.5,
+                               peakMean + 3.0, 0.5}}
     };
 }
 
@@ -64,7 +70,8 @@ RunResult run(std::uint32_t index, std::uint64_t elapsed, std::uint64_t cpu, std
     return {index, std::chrono::nanoseconds{static_cast<std::int64_t>(elapsed)},
             MeanOperationDuration{static_cast<double>(elapsed) / 4.0},
             std::chrono::nanoseconds{static_cast<std::int64_t>(cpu)},
-            MeanOperationDuration{static_cast<double>(cpu) / 4.0}, {100, 100 + peakDelta, peakDelta}};
+            MeanOperationDuration{static_cast<double>(cpu) / 4.0},
+            MemoryRunMeasurement{100, 100 + peakDelta, peakDelta}};
 }
 
 BenchmarkResult completedResult(const BenchmarkConfig& benchmarkConfig,
@@ -73,7 +80,8 @@ BenchmarkResult completedResult(const BenchmarkConfig& benchmarkConfig,
                                 const BenchmarkStatistics& benchmarkStatistics)
 {
     return {benchmarkConfig, {run(0, 40, 8, 10), run(1, 80, 16, 20)}, benchmarkStatistics,
-            benchmarkCharacteristics, benchmarkEnvironment, BenchmarkStatus::Completed, std::nullopt};
+            benchmarkCharacteristics, benchmarkEnvironment, BenchmarkStatus::Completed, std::nullopt,
+            MeasurementSettings{5}};
 }
 
 BenchmarkResult resultA()
@@ -140,7 +148,9 @@ void requireStatistics(const QJsonObject& entry, double wallMean, double cpuMean
     const auto statisticsObject = statisticsValue.toObject();
     requireNumber(statisticsObject.value("wallClockNanosecondsPerOperation").toObject(), "mean", wallMean);
     requireNumber(statisticsObject.value("processCpuNanosecondsPerOperation").toObject(), "mean", cpuMean);
-    requireNumber(statisticsObject.value("peakPrivateUsageDeltaBytes").toObject(), "mean", peakMean);
+    const auto memory = statisticsObject.value("memory").toObject();
+    requireString(memory, "unit", "bytes");
+    requireNumber(memory.value("operationalPeakDelta").toObject(), "mean", peakMean + 2.0);
 }
 
 void requireEnvironment(const QJsonObject& entry, std::string_view applicationVersion,
@@ -179,7 +189,8 @@ void requireSourceUnchanged(const BenchmarkResult& result, BenchmarkStatus statu
                 && std::get<HashConfig>(result.config.parameters).inputSize == 128,
             "benchmark config changed");
     require(result.runs.size() == 2 && result.runs[0].runIndex == 0 && result.runs[0].totalElapsedTime.count() == 40
-                && result.runs[1].runIndex == 1 && result.runs[1].memory.peakDeltaBytes == 20,
+                && result.runs[1].runIndex == 1
+                && std::get<MemoryRunMeasurement>(result.runs[1].memory).peakDeltaBytes == 20,
             "benchmark runs changed");
     require(result.statistics.has_value()
                 && result.statistics->elapsedNanosecondsPerOperation.mean == statisticsMean,
@@ -208,9 +219,11 @@ void testNewTargetEndToEnd()
 
     const auto root = parseObject(persisted);
     requireString(root, "format", "cryptobenchmark-result");
-    requireNumber(root, "schemaVersion", 1.0);
+    requireNumber(root, "schemaVersion", 2.0);
     requireString(root, "mode", "single");
     requireString(root, "status", "completed");
+    requireNumber(root.value("measurement").toObject(),
+                  "memorySamplingIntervalMilliseconds", 5.0);
 
     const auto entry = singleEntry(persisted);
     requireNumber(entry, "entryIndex", 1.0);
@@ -252,7 +265,7 @@ void testReplacementHasOnlySecondPayload()
     requireNumber(entry.value("structuralCharacteristics").toObject(), "outputBytes", 32.0);
     requireStatistics(entry, 11.25, 12.75, 13.5);
     require(!persisted.contains(QByteArray("0.1.0")), "replacement retained result A data");
-    require(!persisted.endsWith(QByteArray("\n")), "replacement contains trailing bytes");
+    require(persisted.endsWith(QByteArray("\n")), "pretty JSON newline is missing");
 }
 
 void testSameResultCanWriteTwoTargets()

@@ -43,20 +43,25 @@ BenchmarkStatistics sampleStatistics()
     return {
         Statistics<double>{1.25, 1.5, 1.0, 2.0, 0.125},
         Statistics<double>{2.75, 2.5, 2.0, 3.0, 0.25},
-        Statistics<double>{3.5, 3.25, 3.0, 4.0, 0.5}
+        MemoryV2Statistics{
+            Statistics<double>{-1.0, -1.0, -2.0, 0.0, 0.5},
+            Statistics<double>{3.5, 3.25, 3.0, 4.0, 0.5},
+            Statistics<double>{5.5, 5.25, 5.0, 6.0, 0.5},
+            Statistics<double>{6.5, 6.25, 6.0, 7.0, 0.5}}
     };
 }
 
 RunResult sampleRun(std::uint32_t index)
 {
     return {index, std::chrono::nanoseconds{100}, MeanOperationDuration{1.25},
-            std::chrono::nanoseconds{80}, MeanOperationDuration{1.0}, {100, 120, 20}};
+            std::chrono::nanoseconds{80}, MeanOperationDuration{1.0},
+            MemoryRunMeasurement{100, 120, 20}};
 }
 
 BenchmarkResult completedResult()
 {
-    return {sampleConfig(), {sampleRun(0), sampleRun(1)}, sampleStatistics(), sampleCharacteristics(),
-            sampleEnvironment(), BenchmarkStatus::Completed, std::nullopt};
+        return {sampleConfig(), {sampleRun(0), sampleRun(1)}, sampleStatistics(), sampleCharacteristics(),
+            sampleEnvironment(), BenchmarkStatus::Completed, std::nullopt, MeasurementSettings{2}};
 }
 
 void requireCharacteristicsEqual(const StructuralCharacteristics& actual,
@@ -100,7 +105,16 @@ void requireStatisticsEqual(const BenchmarkStatistics& actual, const BenchmarkSt
                                expected.elapsedNanosecondsPerOperation, message);
     requireStatisticGroupEqual(actual.cpuNanosecondsPerOperation,
                                expected.cpuNanosecondsPerOperation, message);
-    requireStatisticGroupEqual(actual.peakDeltaBytes, expected.peakDeltaBytes, message);
+    const auto& actualMemory = std::get<MemoryV2Statistics>(actual.memory);
+    const auto& expectedMemory = std::get<MemoryV2Statistics>(expected.memory);
+    requireStatisticGroupEqual(actualMemory.readyStatePrivateUsageDeltaBytes,
+                               expectedMemory.readyStatePrivateUsageDeltaBytes, message);
+    requireStatisticGroupEqual(actualMemory.preparationPeakPrivateUsageDeltaBytes,
+                               expectedMemory.preparationPeakPrivateUsageDeltaBytes, message);
+    requireStatisticGroupEqual(actualMemory.executionPeakPrivateUsageDeltaBytes,
+                               expectedMemory.executionPeakPrivateUsageDeltaBytes, message);
+    requireStatisticGroupEqual(actualMemory.operationalPeakPrivateUsageDeltaBytes,
+                               expectedMemory.operationalPeakPrivateUsageDeltaBytes, message);
 }
 
 void requireErrorStateEqual(const std::optional<ErrorInfo>& actual,
@@ -119,15 +133,17 @@ void requireErrorStateEqual(const std::optional<ErrorInfo>& actual,
 
 void requireRunEqual(const RunResult& actual, const RunResult& expected, std::string_view message)
 {
+    const auto& actualMemory = std::get<MemoryRunMeasurement>(actual.memory);
+    const auto& expectedMemory = std::get<MemoryRunMeasurement>(expected.memory);
     require(actual.runIndex == expected.runIndex
                 && actual.totalElapsedTime == expected.totalElapsedTime
                 && actual.meanElapsedTimePerOperation.count()
                     == expected.meanElapsedTimePerOperation.count()
                 && actual.totalCpuTime == expected.totalCpuTime
                 && actual.meanCpuTimePerOperation.count() == expected.meanCpuTimePerOperation.count()
-                && actual.memory.baselineBytes == expected.memory.baselineBytes
-                && actual.memory.peakSampledBytes == expected.memory.peakSampledBytes
-                && actual.memory.peakDeltaBytes == expected.memory.peakDeltaBytes,
+                && actualMemory.baselineBytes == expectedMemory.baselineBytes
+                && actualMemory.peakSampledBytes == expectedMemory.peakSampledBytes
+                && actualMemory.peakDeltaBytes == expectedMemory.peakDeltaBytes,
             message);
 }
 
@@ -225,6 +241,11 @@ void testRejectedStatusesAndMalformedCompletedResults()
     completedWithError.error = ErrorInfo{ErrorCode::InternalError, FailureStage::ResultAssembly, std::nullopt, "error", std::nullopt};
     requireInvalidArgument([&] { return SingleResultDocumentService{}.create(completedWithError); },
                            "completed result with error was accepted");
+
+    auto missingMeasurement = completedResult();
+    missingMeasurement.measurementSettings.reset();
+    requireInvalidArgument([&] { return SingleResultDocumentService{}.create(missingMeasurement); },
+                           "completed result without measurement settings was accepted");
 }
 
 } // namespace

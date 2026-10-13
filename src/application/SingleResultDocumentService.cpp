@@ -1,6 +1,7 @@
 #include <cryptobench/application/SingleResultDocumentService.h>
 
 #include <stdexcept>
+#include <variant>
 #include <utility>
 
 namespace cryptobench::application {
@@ -16,8 +17,15 @@ ResultDocument SingleResultDocumentService::create(const core::BenchmarkResult& 
     if (result.error.has_value()) {
         throw std::invalid_argument("completed benchmark result contains an error");
     }
+    if (!result.measurementSettings.has_value() ||
+        !core::isValidMeasurementSettings(*result.measurementSettings)) {
+        throw std::invalid_argument("completed benchmark result has invalid measurement settings");
+    }
+    if (!std::holds_alternative<core::MemoryV2Statistics>(result.statistics->memory)) {
+        throw std::invalid_argument("completed benchmark result is not Memory v2");
+    }
 
-    return {
+    ResultDocument document{
         ResultMode::Single,
         ResultDocumentStatus::Completed,
         {ExportEntry{
@@ -29,8 +37,11 @@ ResultDocument SingleResultDocumentService::create(const core::BenchmarkResult& 
             result.environment,
             result.statistics,
             std::nullopt
-        }}
+        }},
+        std::nullopt,
+        ResultMeasurementMetadata{*result.measurementSettings}
     };
+    return document;
 }
 
 } // namespace cryptobench::application

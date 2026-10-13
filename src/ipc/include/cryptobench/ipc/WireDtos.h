@@ -19,6 +19,11 @@ struct BenchmarkRequest {
     core::BenchmarkConfig config;
 };
 
+struct BenchmarkRunRequest {
+    std::uint32_t logicalRunIndex;
+    core::BenchmarkConfig config;
+};
+
 using Progress = core::ProgressInfo;
 using WorkerRunMeasurement = core::WorkerRunMeasurement;
 

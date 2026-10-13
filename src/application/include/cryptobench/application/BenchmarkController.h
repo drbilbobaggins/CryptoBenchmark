@@ -1,20 +1,18 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
 #include <QObject>
-#include <QTimer>
-
 #include <cryptobench/application/BenchmarkSessionExecutor.h>
+#include <cryptobench/application/WorkerRunSession.h>
 #include <cryptobench/core/BenchmarkConfig.h>
 #include <cryptobench/core/BenchmarkResult.h>
+#include <cryptobench/core/MeasurementSettings.h>
 #include <cryptobench/core/ProgressInfo.h>
 #include <cryptobench/core/ResultAssembler.h>
-#include <cryptobench/ipc/ParentIpcChannel.h>
-#include <cryptobench/platform/windows/WorkerMemorySampler.h>
-#include <cryptobench/platform/windows/WindowsWorkerProcess.h>
 
 namespace cryptobench::application {
 
@@ -22,7 +20,11 @@ class BenchmarkController final : public BenchmarkSessionExecutor {
     Q_OBJECT
 
 public:
-    explicit BenchmarkController(QObject* parent = nullptr);
+    explicit BenchmarkController(
+        QObject* parent = nullptr,
+        QString workerExecutablePath = {},
+        WorkerRunSessionTestHooks sessionTestHooks = {},
+        core::MeasurementSettings measurementSettings = core::defaultMeasurementSettings());
     ~BenchmarkController() override;
 
     void start(const core::BenchmarkConfig& config) override;
@@ -32,60 +34,51 @@ public:
 private:
     enum class State {
         Idle,
-        WaitingForWorkerReady,
-        WaitingForMeasurementReady,
-        Measuring,
-        WaitingForWorkerRunMeasurement,
-        WaitingForWorkerOutcome,
-        WaitingForWorkerExit,
+        StartingRun,
+        BetweenRuns,
         Cancelling,
-        Aborting
+        Terminalizing
     };
 
-    enum class FailureOrigin {
-        Parent,
-        Worker,
-        ProcessExit
+    enum class PendingTerminalKind {
+        None,
+        Completed,
+        Failed,
+        Cancelled
     };
 
-    void onWorkerReady(const ipc::WorkerReady& value);
-    void onProgress(const core::ProgressInfo& value);
-    void onMeasurementReady(std::uint32_t runIndex);
-    void onMeasurementFinished(std::uint32_t runIndex);
-    void onWorkerRunMeasurement(const core::WorkerRunMeasurement& value);
-    void onWorkerOutcome(const ipc::WorkerOutcome& value);
-    void onTransportError(const QString& message);
-    void onDisconnected();
-    void onWorkerError(QProcess::ProcessError error, const QString& message);
-    void onWorkerFinished(int exitCode, QProcess::ExitStatus exitStatus);
-    void onTimeout();
-
-    void armTimeout();
-    void enterFailure(core::ErrorInfo error, FailureOrigin origin = FailureOrigin::Parent);
-    void finalizeFailure();
-    void finishSuccessfully();
+    void startRun();
+    void onSessionProgress(WorkerRunSession* session, std::uint64_t generation,
+                           const core::ProgressInfo& progress);
+    void onSessionCompleted(WorkerRunSession* session, std::uint64_t generation,
+                            const WorkerRunSessionResult& result);
+    void onSessionFailed(WorkerRunSession* session, std::uint64_t generation,
+                         const core::ErrorInfo& error);
+    void onSessionCancelled(WorkerRunSession* session, std::uint64_t generation);
+    void queueTerminalContinuation(WorkerRunSession* session, std::uint64_t generation);
+    void finishCompleted();
+    void finishFailed();
     void finishCancelled();
+    static core::ErrorInfo controllerError(core::ErrorCode code,
+                                           core::FailureStage stage,
+                                           std::string message,
+                                           std::optional<std::uint32_t> runIndex = std::nullopt);
 
     State state_ = State::Idle;
-    bool sessionActive_ = false;
-    bool terminalResultEmitted_ = false;
-    bool processExited_ = false;
+    bool cancelRequested_ = false;
+    std::uint64_t generation_ = 0;
+    std::uint32_t expectedRunIndex_ = 0;
     std::optional<core::BenchmarkConfig> config_;
     std::optional<core::StructuralCharacteristics> characteristics_;
     std::optional<core::EnvironmentInfo> environment_;
-    std::uint32_t expectedRunIndex_ = 0;
+    core::MeasurementSettings measurementSettings_ = core::defaultMeasurementSettings();
+    QString workerExecutablePath_;
+    WorkerRunSessionTestHooks sessionTestHooks_;
+    std::unique_ptr<WorkerRunSession> currentSession_;
     std::vector<core::RunResult> completedRuns_;
-    std::optional<core::ParentRunMemoryMeasurement> pendingMemory_;
-    std::optional<core::ErrorInfo> failureError_;
-    bool failureErrorAuthoritative_ = false;
-    bool failureDrainActive_ = false;
-    bool failureIpcDisconnected_ = false;
-    bool failureKillRequested_ = false;
-
-    ipc::ParentIpcChannel ipcChannel_;
-    platform::windows::WindowsWorkerProcess workerProcess_;
-    platform::windows::WorkerMemorySampler memorySampler_;
-    QTimer technicalTimer_;
+    PendingTerminalKind pendingTerminalKind_ = PendingTerminalKind::None;
+    std::optional<core::RunResult> pendingRun_;
+    std::optional<core::ErrorInfo> pendingError_;
 };
 
 } // namespace cryptobench::application

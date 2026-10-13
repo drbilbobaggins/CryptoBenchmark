@@ -87,7 +87,8 @@ void testMemoryAndRunResultValueContract()
     require(result.meanElapsedTimePerOperation.count() == 100.5, "fractional elapsed duration mismatch");
     require(result.totalCpuTime == RunDuration{120}, "run result CPU duration mismatch");
     require(result.meanCpuTimePerOperation.count() == 40.25, "fractional CPU duration mismatch");
-    require(result.memory.peakDeltaBytes == 450, "run result memory mismatch");
+        require(std::get<MemoryRunMeasurement>(result.memory).peakDeltaBytes == 450,
+            "run result memory mismatch");
 }
 
 void testBenchmarkStatisticsFromRunMeans()
@@ -100,7 +101,8 @@ void testBenchmarkStatisticsFromRunMeans()
     const auto statistics = BenchmarkStatisticsCalculator::calculate(runs);
     requireStatistics(statistics.elapsedNanosecondsPerOperation, 20.0, 20.0, 10.0, 30.0, std::sqrt(200.0 / 3.0), "elapsed");
     requireStatistics(statistics.cpuNanosecondsPerOperation, 8.0, 8.0, 4.0, 12.0, std::sqrt(32.0 / 3.0), "CPU");
-    requireStatistics(statistics.peakDeltaBytes, 200.0, 200.0, 100.0, 300.0, std::sqrt(20000.0 / 3.0), "memory");
+    requireStatistics(std::get<Statistics<double>>(statistics.memory), 200.0, 200.0, 100.0, 300.0,
+                      std::sqrt(20000.0 / 3.0), "memory");
 }
 
 void testSingleRunAndEmptyStatistics()
@@ -109,7 +111,8 @@ void testSingleRunAndEmptyStatistics()
     const auto statistics = BenchmarkStatisticsCalculator::calculate(singleRun);
     requireStatistics(statistics.elapsedNanosecondsPerOperation, 12.5, 12.5, 12.5, 12.5, 0.0, "single elapsed");
     requireStatistics(statistics.cpuNanosecondsPerOperation, 4.25, 4.25, 4.25, 4.25, 0.0, "single CPU");
-    requireStatistics(statistics.peakDeltaBytes, 75.0, 75.0, 75.0, 75.0, 0.0, "single memory");
+    requireStatistics(std::get<Statistics<double>>(statistics.memory), 75.0, 75.0, 75.0, 75.0,
+                      0.0, "single memory");
 
     bool rejected = false;
     try {

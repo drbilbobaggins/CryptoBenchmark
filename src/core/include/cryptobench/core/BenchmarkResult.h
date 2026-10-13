@@ -8,6 +8,7 @@
 #include <cryptobench/core/BenchmarkStatus.h>
 #include <cryptobench/core/EnvironmentInfo.h>
 #include <cryptobench/core/ErrorInfo.h>
+#include <cryptobench/core/MeasurementSettings.h>
 #include <cryptobench/core/RunResult.h>
 #include <cryptobench/core/StructuralCharacteristics.h>
 
@@ -21,6 +22,7 @@ struct BenchmarkResult {
     EnvironmentInfo environment;
     BenchmarkStatus status;
     std::optional<ErrorInfo> error;
+    std::optional<MeasurementSettings> measurementSettings;
 };
 
 } // namespace cryptobench::core

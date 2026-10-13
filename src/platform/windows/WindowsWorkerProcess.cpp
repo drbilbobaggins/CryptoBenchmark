@@ -47,6 +47,30 @@ void WindowsWorkerProcess::start(const QString& ipcEndpoint)
     process_.start();
 }
 
+void WindowsWorkerProcess::startV2(const QString& ipcEndpoint, const QString& workerExecutablePath)
+{
+    if (ipcEndpoint.isEmpty()) {
+        throw std::invalid_argument("WindowsWorkerProcess IPC endpoint must not be empty");
+    }
+    if (process_.state() != QProcess::NotRunning) {
+        throw std::logic_error("WindowsWorkerProcess is already active");
+    }
+
+    const auto workerPath = workerExecutablePath.isEmpty()
+        ? QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("CryptoBenchmarkWorker.exe"))
+        : workerExecutablePath;
+    const QFileInfo workerInfo(workerPath);
+    if (!workerInfo.exists() || !workerInfo.isFile()) {
+        const auto message = QStringLiteral("CryptoBenchmarkWorker.exe was not found at ") + workerPath;
+        emit errorOccurred(QProcess::FailedToStart, message);
+        throw std::runtime_error(message.toStdString());
+    }
+
+    process_.setProgram(workerInfo.absoluteFilePath());
+    process_.setArguments({QStringLiteral("--ipc-endpoint"), ipcEndpoint, QStringLiteral("--ipc-v2")});
+    process_.start();
+}
+
 QProcess::ProcessState WindowsWorkerProcess::state() const
 {
     return process_.state();

@@ -23,12 +23,22 @@ class BatchController final : public QObject {
 public:
     using SnapshotPersister = std::function<WriteResult(const QString&, const QByteArray&)>;
     using SnapshotSerializer = std::function<QByteArray(const ResultDocument&)>;
+    using ExecutorFactory = std::function<std::unique_ptr<BenchmarkSessionExecutor>(
+        const core::MeasurementSettings&)>;
+    using MeasurementSettingsProvider = std::function<core::MeasurementSettings()>;
 
     explicit BatchController(QObject* parent = nullptr);
     BatchController(
         std::unique_ptr<BenchmarkSessionExecutor> executor,
         SnapshotPersister persister,
+        SnapshotSerializer serializer,
+        core::MeasurementSettings executorSettings,
+        QObject* parent = nullptr);
+    BatchController(
+        ExecutorFactory executorFactory,
+        SnapshotPersister persister = {},
         SnapshotSerializer serializer = {},
+        MeasurementSettingsProvider settingsProvider = {},
         QObject* parent = nullptr);
     ~BatchController() override = default;
 
@@ -70,10 +80,16 @@ private:
     void failBatch(BatchErrorCode code, BatchErrorStage stage, std::string message);
     void finishTerminal();
     void emitProgress();
+    void connectExecutor();
+    void retireExecutor();
     bool nextEntryGate(std::size_t position) const;
     std::optional<BatchStatus> naturalFinalStatus() const;
 
-    std::unique_ptr<BenchmarkSessionExecutor> executor_;
+    std::shared_ptr<BenchmarkSessionExecutor> executor_;
+    ExecutorFactory executorFactory_;
+    MeasurementSettingsProvider settingsProvider_;
+    std::optional<core::MeasurementSettings> fixedExecutorSettings_;
+    std::vector<std::shared_ptr<BenchmarkSessionExecutor>> retiredExecutors_;
     SnapshotPersister persister_;
     SnapshotSerializer serializer_;
     BatchResultDocumentService documentService_;

@@ -694,6 +694,27 @@ target_link_libraries(CryptoBenchmarkParentIpcTests
 
 add_test(NAME CryptoBenchmarkParentIpcTests COMMAND CryptoBenchmarkParentIpcTests)
 
+add_executable(CryptoBenchmarkWorkerRunSessionTests
+	WorkerRunSessionTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkWorkerRunSessionTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkWorkerRunSessionTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkWorkerRunSessionTests CryptoBenchmarkTestScriptedWorker)
+add_dependencies(CryptoBenchmarkWorkerRunSessionTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkWorkerRunSessionTests COMMAND CryptoBenchmarkWorkerRunSessionTests)
+
 add_executable(CryptoBenchmarkWorkerSessionTests
 	WorkerSessionTests.cpp
 	${CMAKE_SOURCE_DIR}/src/worker/WorkerSession.cpp

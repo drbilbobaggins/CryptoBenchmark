@@ -24,6 +24,27 @@ void ParentIpcChannel::startListening(const QString& endpoint)
         throw std::invalid_argument("ParentIpcChannel endpoint must not be empty");
     }
 
+    v2Mode_ = false;
+
+    server_.setSocketOptions(QLocalServer::UserAccessOption);
+    if (!server_.listen(endpoint)) {
+        const auto message = QStringLiteral("ParentIpcChannel listen failed: ") + server_.errorString();
+        reportTransportError(message);
+        throw std::runtime_error(message.toStdString());
+    }
+}
+
+void ParentIpcChannel::startListeningV2(const QString& endpoint)
+{
+    if (server_.isListening() || socket_) {
+        throw std::logic_error("ParentIpcChannel is already active");
+    }
+    if (endpoint.isEmpty()) {
+        throw std::invalid_argument("ParentIpcChannel endpoint must not be empty");
+    }
+
+    v2Mode_ = true;
+
     server_.setSocketOptions(QLocalServer::UserAccessOption);
     if (!server_.listen(endpoint)) {
         const auto message = QStringLiteral("ParentIpcChannel listen failed: ") + server_.errorString();
@@ -42,6 +63,7 @@ void ParentIpcChannel::close()
         socket_ = nullptr;
     }
     parser_ = FrameParser{};
+    v2Mode_ = false;
 }
 
 bool ParentIpcChannel::isListening() const
@@ -57,6 +79,16 @@ bool ParentIpcChannel::isConnected() const
 void ParentIpcChannel::sendBenchmarkRequest(const BenchmarkRequest& request)
 {
     sendFrame(MessageType::BenchmarkRequest, encodeBenchmarkRequest(request));
+}
+
+void ParentIpcChannel::sendBenchmarkRunRequest(const BenchmarkRunRequest& request)
+{
+    sendFrame(MessageType::BenchmarkRunRequest, encodeBenchmarkRunRequest(request));
+}
+
+void ParentIpcChannel::sendStartAlgorithmPreparation(std::uint32_t runIndex)
+{
+    sendFrame(MessageType::StartAlgorithmPreparation, encodeRunIndexPayload(runIndex));
 }
 
 void ParentIpcChannel::sendStartMeasurement(std::uint32_t runIndex)
@@ -135,7 +167,16 @@ void ParentIpcChannel::dispatchFrame(const Frame& frame)
         case MessageType::Progress:
             emit progressReceived(decodeProgress(frame.payload));
             return;
+        case MessageType::BaselineReady:
+            if (!v2Mode_) throw std::invalid_argument("ParentIpcChannel received unsupported v2 message");
+            emit baselineReadyReceived(decodeRunIndexPayload(frame.payload));
+            return;
+        case MessageType::AlgorithmReady:
+            if (!v2Mode_) throw std::invalid_argument("ParentIpcChannel received unsupported v2 message");
+            emit algorithmReadyReceived(decodeRunIndexPayload(frame.payload));
+            return;
         case MessageType::MeasurementReady:
+            if (v2Mode_) throw std::invalid_argument("ParentIpcChannel received unsupported v1 message");
             emit measurementReadyReceived(decodeRunIndexPayload(frame.payload));
             return;
         case MessageType::MeasurementFinished:
@@ -148,6 +189,8 @@ void ParentIpcChannel::dispatchFrame(const Frame& frame)
             emit workerOutcomeReceived(decodeWorkerOutcome(frame.payload));
             return;
         case MessageType::BenchmarkRequest:
+        case MessageType::BenchmarkRunRequest:
+        case MessageType::StartAlgorithmPreparation:
         case MessageType::StartMeasurement:
         case MessageType::MemoryWindowClosed:
             throw std::invalid_argument("ParentIpcChannel received a parent-originating message");

@@ -1,6 +1,7 @@
 #include <cryptobench/core/AlgorithmRegistry.h>
 #include <cryptobench/core/BenchmarkRunner.h>
 #include <cryptobench/core/ConfigValidator.h>
+#include <cryptobench/core/RunnerFailure.h>
 
 #include <algorithm>
 #include <array>
@@ -234,6 +235,161 @@ void testSeriesPreparationFailureStopsImmediately()
             "runner did not stop immediately after series preparation failure");
 }
 
+void testSingleLogicalRunPhases()
+{
+    TestState state;
+    auto task = makeTask(validConfig(3, 4), std::make_unique<FakeAdapter>(state));
+    FakeProgressSink progress(state);
+    FakeCoordinator coordinator(state);
+    FakeCpuTimeSource cpu(state);
+    BenchmarkRunner runner(task, progress, coordinator, cpu);
+
+    runner.prepareLogicalRun(2);
+    require(state.events == std::vector<std::string>{"prepareSeries", "prepareRun", "progress:Warmup:2", "executeIteration"},
+            "single-run preparation crossed the measurement boundary");
+    require(state.executeCalls == 1 && state.measurements.empty() && state.nextCpuValue == 0,
+            "single-run preparation performed measured work");
+
+    const auto measurement = runner.measureLogicalRun(2);
+    require(state.executeCalls == 4, "single-run measured iteration count mismatch");
+    require(state.measurements.size() == 1 && state.measurements.front().runIndex == 2,
+            "single-run measurement index mismatch");
+    require(measurement.runIndex == 2 && measurement.processCpuNanoseconds == 300,
+            "single-run measurement result mismatch");
+    require(state.events == std::vector<std::string>{
+                "prepareSeries", "prepareRun", "progress:Warmup:2", "executeIteration",
+                "beforeMeasurement:2", "cpuTime", "executeIteration", "executeIteration", "executeIteration", "cpuTime", "afterMeasurement:2"},
+            "single-run phase ordering mismatch");
+}
+
+        void testSingleLogicalRunZeroIndex()
+        {
+            TestState state;
+            auto task = makeTask(validConfig(3, 4), std::make_unique<FakeAdapter>(state));
+            FakeProgressSink progress(state);
+            FakeCoordinator coordinator(state);
+            FakeCpuTimeSource cpu(state);
+            BenchmarkRunner runner(task, progress, coordinator, cpu);
+
+            runner.prepareLogicalRun(0);
+            const auto preparationEvents = state.events;
+            require(preparationEvents == std::vector<std::string>{"prepareSeries", "prepareRun", "progress:Warmup:0", "executeIteration"},
+                "zero-index preparation and warm-up sequence mismatch");
+            require(state.executeCalls == 1 && state.measurements.empty() && state.nextCpuValue == 0,
+                "zero-index preparation performed measured work");
+
+            const auto measurement = runner.measureLogicalRun(0);
+            require(state.executeCalls == 4, "zero-index measured iteration count mismatch");
+            require(state.measurements.size() == 1 && state.measurements.front().runIndex == 0,
+                "zero-index measurement was not recorded with runIndex zero");
+            require(measurement.runIndex == 0 && measurement.processCpuNanoseconds == 300,
+                "zero-index measurement result mismatch");
+            require(std::count(state.events.begin(), state.events.end(), "prepareSeries") == 1 &&
+                std::count(state.events.begin(), state.events.end(), "prepareRun") == 1 &&
+                std::count(state.events.begin(), state.events.end(), "progress:Warmup:0") == 1,
+                "zero-index preparation or warm-up repeated");
+        }
+
+        void testSingleLogicalRunMeasuredFailure()
+        {
+            TestState state;
+            state.throwOnExecuteCall = 2;
+            auto task = makeTask(validConfig(3, 4), std::make_unique<FakeAdapter>(state));
+            FakeProgressSink progress(state);
+            FakeCoordinator coordinator(state);
+            FakeCpuTimeSource cpu(state);
+            BenchmarkRunner runner(task, progress, coordinator, cpu);
+
+            runner.prepareLogicalRun(2);
+            bool failed = false;
+            try {
+            static_cast<void>(runner.measureLogicalRun(2));
+            } catch (const RunnerFailure& error) {
+            failed = true;
+            require(error.stage() == FailureStage::Measurement, "single-run measured failure stage mismatch");
+            require(error.runIndex() == 2, "single-run measured failure index mismatch");
+            }
+            require(failed, "single-run measured failure did not throw RunnerFailure");
+            require(state.measurements.empty(), "failed single-run measurement was recorded");
+            require(std::count(state.events.begin(), state.events.end(), "afterMeasurement:2") == 0,
+                "failed single-run measurement called afterMeasurement");
+            require(std::count(state.events.begin(), state.events.end(), "executeIteration") == 2,
+                "single-run measured failure continued to a later iteration");
+            const auto failureEvents = state.events;
+            bool repeated = false;
+            try {
+            static_cast<void>(runner.measureLogicalRun(2));
+            } catch (const std::logic_error&) {
+            repeated = true;
+            }
+            require(repeated, "second single-run measurement was accepted after failure");
+            require(state.events == failureEvents && state.executeCalls == 2,
+                "rejected second measurement caused execution side effects");
+        }
+
+void testSingleLogicalRunGuardsAndIndexValidation()
+{
+    TestState invalidState;
+    auto invalidTask = makeTask(validConfig(3, 4), std::make_unique<FakeAdapter>(invalidState));
+    FakeProgressSink invalidProgress(invalidState);
+    FakeCoordinator invalidCoordinator(invalidState);
+    FakeCpuTimeSource invalidCpu(invalidState);
+    BenchmarkRunner invalidRunner(invalidTask, invalidProgress, invalidCoordinator, invalidCpu);
+    for (const auto index : {4U, 5U}) {
+        bool rejected = false;
+        try {
+            invalidRunner.prepareLogicalRun(index);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "invalid logicalRunIndex was accepted");
+    }
+    require(invalidState.events.empty() && invalidState.executeCalls == 0 && invalidState.nextCpuValue == 0,
+            "invalid logicalRunIndex caused execution side effects");
+
+    TestState state;
+    auto task = makeTask(validConfig(3, 4), std::make_unique<FakeAdapter>(state));
+    FakeProgressSink progress(state);
+    FakeCoordinator coordinator(state);
+    FakeCpuTimeSource cpu(state);
+    BenchmarkRunner runner(task, progress, coordinator, cpu);
+    bool measureBeforePrepareRejected = false;
+    try {
+        static_cast<void>(runner.measureLogicalRun(2));
+    } catch (const std::logic_error&) {
+        measureBeforePrepareRejected = true;
+    }
+    require(measureBeforePrepareRejected, "measurement before preparation was accepted");
+    runner.prepareLogicalRun(2);
+    const auto preparationEvents = state.events;
+    bool duplicatePreparationRejected = false;
+    try {
+        runner.prepareLogicalRun(2);
+    } catch (const std::logic_error&) {
+        duplicatePreparationRejected = true;
+    }
+    require(duplicatePreparationRejected && state.events == preparationEvents,
+            "duplicate preparation performed unexpected work");
+    bool wrongIndexRejected = false;
+    try {
+        static_cast<void>(runner.measureLogicalRun(1));
+    } catch (const std::logic_error&) {
+        wrongIndexRejected = true;
+    }
+    require(wrongIndexRejected && state.events == preparationEvents,
+            "measurement with a different logicalRunIndex performed work");
+    static_cast<void>(runner.measureLogicalRun(2));
+    const auto measurementEvents = state.events;
+    bool duplicateMeasurementRejected = false;
+    try {
+        static_cast<void>(runner.measureLogicalRun(2));
+    } catch (const std::logic_error&) {
+        duplicateMeasurementRejected = true;
+    }
+    require(duplicateMeasurementRejected && state.events == measurementEvents,
+            "duplicate measurement performed unexpected work");
+}
+
 } // namespace
 
 int runBenchmarkRunnerTests()
@@ -241,7 +397,11 @@ int runBenchmarkRunnerTests()
     const auto tests = std::array{
         std::pair{"successful lifecycle and ordering", &testSuccessfulLifecycleAndOrdering},
         std::pair{"measured failure fail-fast", &testMeasuredFailureStopsImmediately},
-        std::pair{"series preparation failure", &testSeriesPreparationFailureStopsImmediately}
+        std::pair{"series preparation failure", &testSeriesPreparationFailureStopsImmediately},
+        std::pair{"single logical run phases", &testSingleLogicalRunPhases},
+        std::pair{"single logical run zero index", &testSingleLogicalRunZeroIndex},
+        std::pair{"single logical run measured failure", &testSingleLogicalRunMeasuredFailure},
+        std::pair{"single logical run guards and index validation", &testSingleLogicalRunGuardsAndIndexValidation}
     };
 
     for (const auto& [name, test] : tests) {
