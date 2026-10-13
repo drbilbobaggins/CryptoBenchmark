@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -178,30 +179,85 @@ void testIdleAndConfiguration()
 
 void waitForCompleted(MainWindow& window)
 {
-    waitUntil([&] { return status(window) == QStringLiteral("Completed"); }, 20'000);
+    waitUntil([&] {
+        return status(window) == QStringLiteral(
+            "Completed; Memory v2 statistics are not supported by this view.");
+    }, 20'000);
 }
 
-void requireCompletedTable(MainWindow& window)
+void requireMemoryV2InterimPresentation(MainWindow& window)
 {
     auto* table = widget<QTableWidget>(window, "resultsTable");
-    require(table->rowCount() == 3, "Completed result did not contain exactly three rows");
-    for (int row = 0; row < 3; ++row) {
-        require(table->item(row, 0) != nullptr &&
-                    (table->item(row, 0)->text().contains(QStringLiteral("ns")) ||
-                     table->item(row, 0)->text().contains(QStringLiteral("µs")) ||
-                     table->item(row, 0)->text().contains(QStringLiteral("ms")) ||
-                     table->item(row, 0)->text().contains(QStringLiteral("B")) ||
-                     table->item(row, 0)->text().contains(QStringLiteral("KiB")) ||
-                     table->item(row, 0)->text().contains(QStringLiteral("MiB"))),
-                "result row did not contain a presentation unit");
-        for (int column = 1; column < 6; ++column) {
-            require(table->item(row, column) != nullptr &&
-                        !table->item(row, column)->text().isEmpty(),
-                    "result statistic cell was empty");
-        }
-    }
-    require(!widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible(),
-            "results placeholder remained visible after completion");
+    require(table->rowCount() == 0, "Memory v2 completion populated the legacy results table");
+    require(widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible(),
+            "Memory v2 completion hid the results placeholder");
+    require(status(window) == QStringLiteral(
+                "Completed; Memory v2 statistics are not supported by this view."),
+            "Memory v2 completion did not report the exact interim GUI status");
+}
+
+void requireStatisticGroup(const QJsonObject& group, const char* name)
+{
+    require(group.contains(QStringLiteral("mean")) &&
+                group.contains(QStringLiteral("median")) &&
+                group.contains(QStringLiteral("min")) &&
+                group.contains(QStringLiteral("max")) &&
+                group.contains(QStringLiteral("stddev")),
+            std::string("missing statistic member in ") + name);
+    require(group.value(QStringLiteral("mean")).isDouble() &&
+                group.value(QStringLiteral("median")).isDouble() &&
+                group.value(QStringLiteral("min")).isDouble() &&
+                group.value(QStringLiteral("max")).isDouble() &&
+                group.value(QStringLiteral("stddev")).isDouble(),
+            std::string("non-numeric statistic member in ") + name);
+}
+
+void requireMemoryV2Export(const QJsonObject& root)
+{
+    require(root.value(QStringLiteral("format")) == QStringLiteral("cryptobenchmark-result") &&
+                root.value(QStringLiteral("schemaVersion")) == 2 &&
+                root.value(QStringLiteral("mode")) == QStringLiteral("single") &&
+                root.value(QStringLiteral("status")) == QStringLiteral("completed"),
+            "GUI export had incorrect canonical document metadata");
+
+    const auto measurement = root.value(QStringLiteral("measurement")).toObject();
+    require(measurement.value(QStringLiteral("memorySamplingIntervalMilliseconds")) == 5 &&
+                measurement.value(QStringLiteral("memoryModel")) == QStringLiteral("memoryV2") &&
+                measurement.value(QStringLiteral("workerLifecycle")) ==
+                    QStringLiteral("freshWorkerPerLogicalRun"),
+            "GUI export had incorrect measurement metadata");
+
+    const auto entries = root.value(QStringLiteral("entries")).toArray();
+    require(entries.size() == 1 &&
+                entries.at(0).toObject().value(QStringLiteral("status")) ==
+                    QStringLiteral("completed"),
+            "GUI export did not contain exactly one Completed entry");
+
+    const auto statistics = entries.at(0).toObject().value(QStringLiteral("statistics")).toObject();
+    const auto wallClock = statistics.value(QStringLiteral("wallClockNanosecondsPerOperation")).toObject();
+    const auto processCpu = statistics.value(QStringLiteral("processCpuNanosecondsPerOperation")).toObject();
+    const auto memory = statistics.value(QStringLiteral("memory")).toObject();
+    requireStatisticGroup(wallClock, "wallClockNanosecondsPerOperation");
+    requireStatisticGroup(processCpu, "processCpuNanosecondsPerOperation");
+    require(memory.value(QStringLiteral("unit")) == QStringLiteral("bytes") &&
+                memory.contains(QStringLiteral("readyStateDelta")) &&
+                memory.contains(QStringLiteral("preparationPeakDelta")) &&
+                memory.contains(QStringLiteral("executionPeakDelta")) &&
+                memory.contains(QStringLiteral("operationalPeakDelta")),
+            "GUI export had incomplete Memory v2 statistics");
+    requireStatisticGroup(memory.value(QStringLiteral("readyStateDelta")).toObject(), "readyStateDelta");
+    requireStatisticGroup(memory.value(QStringLiteral("preparationPeakDelta")).toObject(),
+                          "preparationPeakDelta");
+    requireStatisticGroup(memory.value(QStringLiteral("executionPeakDelta")).toObject(),
+                          "executionPeakDelta");
+    requireStatisticGroup(memory.value(QStringLiteral("operationalPeakDelta")).toObject(),
+                          "operationalPeakDelta");
+    require(!statistics.contains(QStringLiteral("elapsedNanosecondsPerOperation")) &&
+                !statistics.contains(QStringLiteral("peakDeltaBytes")) &&
+                !statistics.contains(QStringLiteral("peakPrivateUsageDeltaBytes")) &&
+                !memory.contains(QStringLiteral("peakDeltaBytes")) &&
+                !memory.contains(QStringLiteral("peakPrivateUsageDeltaBytes")),
+            "GUI export contained obsolete legacy memory fields");
 }
 
 void testCompletedAndReplacement()
@@ -222,7 +278,7 @@ void testCompletedAndReplacement()
             "Completed result did not enable Export JSON");
     require(widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
             "configuration was not restored after completion");
-    requireCompletedTable(window);
+    requireMemoryV2InterimPresentation(window);
 
     widget<QSpinBox>(window, "workloadSizeSpinBox")->setValue(16);
     run->click();
@@ -231,7 +287,7 @@ void testCompletedAndReplacement()
                 !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "old result was not cleared at new Run start");
     waitForCompleted(window);
-    requireCompletedTable(window);
+    requireMemoryV2InterimPresentation(window);
     clearScenario();
 }
 
@@ -258,20 +314,20 @@ void testCancelAndReuse()
     setScenario("completed");
     run->click();
     waitForCompleted(window);
-    requireCompletedTable(window);
+    requireMemoryV2InterimPresentation(window);
     clearScenario();
 }
 
 void testFailedAndReuse()
 {
-    setScenario("failed-disconnect-immediately");
+    setScenario("failed-disconnect-immediately-v2");
     MainWindow window;
     window.show();
     configureHash(window);
     auto* run = widget<QPushButton>(window, "runButton");
     run->click();
     waitUntil([&] { return status(window).startsWith(QStringLiteral("Benchmark failed:")); }, 10'000);
-    require(status(window).contains(QStringLiteral("scripted worker failure")),
+    require(status(window).contains(QStringLiteral("scripted v2 worker failure")),
             "Failed result did not expose the scripted worker technical message");
     require(!widget<QPushButton>(window, "cancelButton")->isEnabled() &&
                 widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
@@ -282,7 +338,7 @@ void testFailedAndReuse()
     setScenario("completed");
     run->click();
     waitForCompleted(window);
-    requireCompletedTable(window);
+    requireMemoryV2InterimPresentation(window);
     clearScenario();
 }
 
@@ -330,9 +386,7 @@ void testSingleJsonExport()
     const auto document = QJsonDocument::fromJson(firstPayload, &parseError);
     require(parseError.error == QJsonParseError::NoError && document.isObject(),
             "successful export was not canonical JSON");
-    require(document.object().value("mode") == QStringLiteral("single") &&
-                document.object().value("status") == QStringLiteral("completed"),
-            "successful export had incorrect document status");
+    requireMemoryV2Export(document.object());
     require(messageTitle == QStringLiteral("Export complete"),
             "successful export did not report completion");
 
@@ -357,7 +411,8 @@ void testSingleJsonExport()
     writeFile(parentFile, "parent");
     target = parentFile + "/result.json";
     exportButton->click();
-    require(status(window) == QStringLiteral("Completed"),
+    require(status(window) == QStringLiteral(
+                "Completed; Memory v2 statistics are not supported by this view."),
             "export failure changed the visible Completed status");
     require(exportButton->isEnabled(), "export failure discarded the retained result");
     require(messageTitle == QStringLiteral("Export failed"), "export failure was not reported");
@@ -1130,7 +1185,8 @@ void testModalDialogRace()
     QTimer pollTimer;
     pollTimer.setInterval(10);
     QObject::connect(&pollTimer, &QTimer::timeout, &window, [&] {
-        if (!dialogAnswered && status(window) == QStringLiteral("Completed")) {
+        if (!dialogAnswered && status(window) == QStringLiteral(
+            "Completed; Memory v2 statistics are not supported by this view.")) {
             completionObserved = true;
             dialogAnswered = tryAnswerMessageBox(QMessageBox::Yes);
             if (dialogAnswered) pollTimer.stop();
