@@ -11,6 +11,7 @@
 #include <QTimer>
 
 #include <array>
+#include <cstdint>
 #include <exception>
 #include <utility>
 #include <variant>
@@ -203,7 +204,11 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
     , singleController_(std::make_unique<cryptobench::application::BenchmarkController>())
-    , batchController_(std::make_unique<cryptobench::application::BatchController>())
+    , batchController_(std::make_unique<cryptobench::application::BatchController>(
+          [this] {
+              return cryptobench::core::MeasurementSettings{
+                  static_cast<std::uint32_t>(ui->memorySamplingIntervalComboBox->currentData().toUInt())};
+          }))
 {
     ui->setupUi(this);
 
@@ -266,6 +271,7 @@ MainWindow::MainWindow(QWidget* parent)
         static_cast<int>(cryptobench::core::kMaxRuns));
     ui->runsSpinBox->setValue(3);
     ui->runsSpinBox->setEnabled(true);
+    populateMeasurementSettings();
     populateCategories();
     applyPresentationState();
     updateBatchPresentation();
@@ -279,6 +285,19 @@ MainWindow::~MainWindow()
 void MainWindow::setDialogCallbacks(DialogCallbacks callbacks)
 {
     dialogCallbacks_ = std::move(callbacks);
+}
+
+void MainWindow::populateMeasurementSettings()
+{
+    const QSignalBlocker blocker(ui->memorySamplingIntervalComboBox);
+    ui->memorySamplingIntervalComboBox->clear();
+    for (std::uint32_t interval = 1; interval <= 5; ++interval) {
+        ui->memorySamplingIntervalComboBox->addItem(
+            QStringLiteral("%1 ms").arg(interval), static_cast<quint32>(interval));
+    }
+    ui->memorySamplingIntervalComboBox->setCurrentIndex(
+        ui->memorySamplingIntervalComboBox->findData(
+            static_cast<quint32>(cryptobench::core::kDefaultMemorySamplingIntervalMilliseconds)));
 }
 
 void MainWindow::populateCategories()
@@ -472,6 +491,7 @@ void MainWindow::applyPresentationState()
     const bool singleRunning = presentationState_ == PresentationState::SingleRunning;
 
     setConfigurationEnabled(idle);
+    ui->memorySamplingIntervalComboBox->setEnabled(idle);
     ui->cancelButton->setEnabled(singleRunning);
     ui->exportJsonButton->setEnabled(idle && exportableSingleResult_.has_value());
     updateRunAvailability();
@@ -573,6 +593,15 @@ void MainWindow::startBenchmark()
     const auto config = buildBenchmarkConfig(validation);
     if (!config) {
         updateInputControls();
+        return;
+    }
+
+    try {
+        singleController_->setMeasurementSettings({
+            static_cast<std::uint32_t>(ui->memorySamplingIntervalComboBox->currentData().toUInt())});
+    } catch (const std::exception& error) {
+        ui->statusLabel->setText(QStringLiteral("Benchmark failed to start: %1")
+            .arg(QString::fromUtf8(error.what())));
         return;
     }
 

@@ -50,6 +50,17 @@ bool BenchmarkController::isBusy() const noexcept
     return state_ != State::Idle;
 }
 
+void BenchmarkController::setMeasurementSettings(core::MeasurementSettings measurementSettings)
+{
+    if (isBusy()) {
+        throw std::logic_error("BenchmarkController measurement settings cannot change while busy");
+    }
+    if (!core::isValidMeasurementSettings(measurementSettings)) {
+        throw std::invalid_argument("BenchmarkController measurement settings are invalid");
+    }
+    measurementSettings_ = measurementSettings;
+}
+
 void BenchmarkController::requestCancel()
 {
     if (!isBusy()) return;

@@ -160,6 +160,17 @@ void testIdleAndConfiguration()
             "Cancel was enabled while idle");
     require(!widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Export JSON was enabled before a Completed result");
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    require(sampling->count() == 5 && sampling->isEnabled(),
+            "global measurement selector did not expose the required idle defaults");
+    for (int index = 0; index < 5; ++index) {
+        require(sampling->itemText(index) == QStringLiteral("%1 ms").arg(index + 1) &&
+                    sampling->itemData(index).toUInt() == static_cast<uint>(index + 1),
+                "global measurement selector values were not ordered 1 ms through 5 ms");
+    }
+    require(sampling->currentText() == QStringLiteral("5 ms") &&
+                sampling->currentData().toUInt() == 5,
+            "global measurement selector did not default to 5 ms");
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0,
             "initial results table was not empty");
 
@@ -212,7 +223,7 @@ void requireStatisticGroup(const QJsonObject& group, const char* name)
             std::string("non-numeric statistic member in ") + name);
 }
 
-void requireMemoryV2Export(const QJsonObject& root)
+void requireMemoryV2Export(const QJsonObject& root, int expectedInterval = 5)
 {
     require(root.value(QStringLiteral("format")) == QStringLiteral("cryptobenchmark-result") &&
                 root.value(QStringLiteral("schemaVersion")) == 2 &&
@@ -221,7 +232,7 @@ void requireMemoryV2Export(const QJsonObject& root)
             "GUI export had incorrect canonical document metadata");
 
     const auto measurement = root.value(QStringLiteral("measurement")).toObject();
-    require(measurement.value(QStringLiteral("memorySamplingIntervalMilliseconds")) == 5 &&
+    require(measurement.value(QStringLiteral("memorySamplingIntervalMilliseconds")) == expectedInterval &&
                 measurement.value(QStringLiteral("memoryModel")) == QStringLiteral("memoryV2") &&
                 measurement.value(QStringLiteral("workerLifecycle")) ==
                     QStringLiteral("freshWorkerPerLogicalRun"),
@@ -266,11 +277,13 @@ void testCompletedAndReplacement()
     MainWindow window;
     window.show();
     configureHash(window);
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    sampling->setCurrentIndex(sampling->findData(2));
     auto* run = widget<QPushButton>(window, "runButton");
     auto* cancel = widget<QPushButton>(window, "cancelButton");
     run->click();
     require(!run->isEnabled() && !widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
-                cancel->isEnabled(),
+                cancel->isEnabled() && !sampling->isEnabled(),
             "Running state did not lock configuration and enable Cancel");
     waitForCompleted(window);
     require(!cancel->isEnabled(), "Cancel remained enabled after completion");
@@ -278,6 +291,7 @@ void testCompletedAndReplacement()
             "Completed result did not enable Export JSON");
     require(widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
             "configuration was not restored after completion");
+    require(sampling->isEnabled(), "measurement selector was not restored after completion");
     requireMemoryV2InterimPresentation(window);
 
     widget<QSpinBox>(window, "workloadSizeSpinBox")->setValue(16);
@@ -299,11 +313,12 @@ void testCancelAndReuse()
     configureHash(window);
     auto* run = widget<QPushButton>(window, "runButton");
     auto* cancel = widget<QPushButton>(window, "cancelButton");
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
     run->click();
     waitUntil([&] { return cancel->isEnabled(); }, 5'000);
     cancel->click();
     require(status(window) == QStringLiteral("Cancelling...") && !cancel->isEnabled() &&
-                !run->isEnabled(),
+                !run->isEnabled() && !sampling->isEnabled(),
             "Cancel did not enter the Cancelling presentation state");
     waitUntil([&] { return status(window) == QStringLiteral("Benchmark cancelled"); }, 10'000);
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
@@ -364,6 +379,8 @@ void testSingleJsonExport()
     MainWindow window;
     window.show();
     configureHash(window);
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    sampling->setCurrentIndex(sampling->findData(2));
 
     QString target;
     bool overwrite = false;
@@ -386,17 +403,28 @@ void testSingleJsonExport()
     const auto document = QJsonDocument::fromJson(firstPayload, &parseError);
     require(parseError.error == QJsonParseError::NoError && document.isObject(),
             "successful export was not canonical JSON");
-    requireMemoryV2Export(document.object());
+    requireMemoryV2Export(document.object(), 2);
     require(messageTitle == QStringLiteral("Export complete"),
             "successful export did not report completion");
 
-        target.clear();
-        messageTitle.clear();
-        exportButton->click();
-        require(messageTitle.isEmpty() && exportButton->isEnabled(),
-            "cancelling the Single export target changed the retained Completed result");
+    sampling->setCurrentIndex(sampling->findData(4));
+    widget<QPushButton>(window, "runButton")->click();
+    waitForCompleted(window);
+    target = directory.filePath("second-single-result.json");
+    exportButton->click();
+    const auto secondPayload = readFile(target);
+    const auto secondDocument = QJsonDocument::fromJson(secondPayload, &parseError);
+    require(parseError.error == QJsonParseError::NoError && secondDocument.isObject(),
+            "second Single export was not canonical JSON");
+    requireMemoryV2Export(secondDocument.object(), 4);
 
-            target = directory.filePath("single-result.json");
+    target.clear();
+    messageTitle.clear();
+    exportButton->click();
+    require(messageTitle.isEmpty() && exportButton->isEnabled(),
+        "cancelling the Single export target changed the retained Completed result");
+
+    target = directory.filePath("single-result.json");
     const QByteArray original = "existing target";
     writeFile(target, original);
     overwrite = false;
@@ -405,7 +433,7 @@ void testSingleJsonExport()
 
     overwrite = true;
     exportButton->click();
-    require(readFile(target) == firstPayload, "approved overwrite did not replace the target");
+    require(readFile(target) == secondPayload, "approved overwrite did not replace the target");
 
     const auto parentFile = directory.filePath("not-a-directory");
     writeFile(parentFile, "parent");
@@ -419,7 +447,7 @@ void testSingleJsonExport()
 
     target = directory.filePath("retry-result.json");
     exportButton->click();
-    require(readFile(target) == firstPayload, "retry export did not persist the retained result");
+    require(readFile(target) == secondPayload, "retry export did not persist the retained result");
     require(exportButton->isEnabled(), "successful export discarded the retained result");
     clearScenario();
 }
@@ -564,6 +592,10 @@ void testBatchRunAndCancel()
     auto* outputBrowse = widget<QPushButton>(window, "batchOutputBrowseButton");
     auto* run = widget<QPushButton>(window, "batchRunButton");
     auto* cancel = widget<QPushButton>(window, "batchCancelButton");
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    require(sampling->count() == 5 && sampling->currentData().toUInt() == 5,
+        "Batch did not expose the global measurement selector");
+    sampling->setCurrentIndex(sampling->findData(3));
     inputBrowse->click();
     require(!run->isEnabled(), "valid batch without an output target enabled Run Batch");
     outputBrowse->click();
@@ -581,6 +613,7 @@ void testBatchRunAndCancel()
     run->click();
     require(!run->isEnabled() && cancel->isEnabled() &&
         !inputBrowse->isEnabled() && !outputBrowse->isEnabled() &&
+        !sampling->isEnabled() &&
         !widget<QPushButton>(window, "runButton")->isEnabled() &&
         !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
         "BatchRunning did not enforce mutual exclusion and control locking");
@@ -592,7 +625,7 @@ void testBatchRunAndCancel()
     require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed"),
             "Batch completion did not reach the Completed terminal status");
     require(!cancel->isEnabled() && run->isEnabled() && inputBrowse->isEnabled() &&
-        outputBrowse->isEnabled(),
+        outputBrowse->isEnabled() && sampling->isEnabled(),
         "completed Batch did not return to Idle presentation");
     require(widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("2 / 2"),
             "terminal Batch did not retain the controller-supplied current entry");
@@ -609,6 +642,9 @@ void testBatchRunAndCancel()
     require(parseError.error == QJsonParseError::NoError && document.isObject() &&
         document.object().value("mode") == QStringLiteral("batch"),
         "BatchController did not produce a batch result document");
+    require(document.object().value("measurement").toObject()
+                .value("memorySamplingIntervalMilliseconds").toInt() == 3,
+            "Batch export did not preserve the selected measurement settings snapshot");
     clearScenario();
 
     setScenario("wait-before-measurement");
@@ -626,6 +662,7 @@ void testBatchRunAndCancel()
     widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->click();
     widget<QPushButton>(cancelWindow, "batchOutputBrowseButton")->click();
     auto* batchCancel = widget<QPushButton>(cancelWindow, "batchCancelButton");
+    auto* cancelSampling = widget<QComboBox>(cancelWindow, "memorySamplingIntervalComboBox");
     widget<QPushButton>(cancelWindow, "batchRunButton")->click();
     require(batchCancel->isEnabled(), "Batch Run did not enter BatchRunning presentation");
     waitUntil([&] {
@@ -638,7 +675,7 @@ void testBatchRunAndCancel()
     require(cancelWindow.isVisible(), "active Batch close with No unexpectedly closed the window");
     batchCancel->click();
     require(widget<QLabel>(cancelWindow, "batchStatusLabel")->text() == QStringLiteral("Cancelling...") &&
-                !batchCancel->isEnabled(),
+                !batchCancel->isEnabled() && !cancelSampling->isEnabled(),
         "Batch Cancel did not enter BatchCancelling presentation");
     QTimer::singleShot(0, [&] { answerMessageBox(QMessageBox::No); });
     cancelWindow.close();

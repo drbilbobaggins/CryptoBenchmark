@@ -28,6 +28,7 @@ public:
     using MeasurementSettingsProvider = std::function<core::MeasurementSettings()>;
 
     explicit BatchController(QObject* parent = nullptr);
+    explicit BatchController(MeasurementSettingsProvider settingsProvider, QObject* parent = nullptr);
     BatchController(
         std::unique_ptr<BenchmarkSessionExecutor> executor,
         SnapshotPersister persister,

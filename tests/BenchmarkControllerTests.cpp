@@ -214,6 +214,87 @@ void testFreshWorkerSeriesAndReuse()
         "controller reuse did not start exactly one fresh worker");
 }
 
+void testMeasurementSettingsSnapshotAndConfiguration()
+{
+    std::vector<std::uint32_t> samplerIntervals;
+    application::WorkerRunSessionTestHooks hooks;
+    hooks.startSampler = [&](std::uint32_t, const core::MeasurementSettings& settings) {
+        samplerIntervals.push_back(settings.memorySamplingIntervalMilliseconds);
+    };
+    hooks.samplerIsActive = [] { return true; };
+    hooks.markExecutionBoundary = [] {};
+    hooks.stopAndCollectSampler = [] {
+        return core::MemoryV2RawObservations{
+            100, 110, 120, 130, 140, 1, 1};
+    };
+    application::BenchmarkController controller(nullptr, {}, std::move(hooks));
+
+    for (const std::uint32_t interval : {0U, 6U}) {
+        bool rejected = false;
+        try {
+            controller.setMeasurementSettings({interval});
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "invalid controller measurement settings were accepted");
+    }
+
+    for (std::uint32_t interval = 1; interval <= 5; ++interval) {
+        controller.setMeasurementSettings({interval});
+    }
+
+    controller.setMeasurementSettings({3});
+    std::optional<core::BenchmarkResult> firstResult;
+    QEventLoop firstLoop;
+    QTimer firstTimeout;
+    firstTimeout.setSingleShot(true);
+    QObject::connect(&controller, &application::BenchmarkController::benchmarkFinished,
+                     [&](const core::BenchmarkResult& result) {
+                         firstResult = result;
+                         firstLoop.quit();
+                     });
+    QObject::connect(&firstTimeout, &QTimer::timeout, &firstLoop, &QEventLoop::quit);
+    controller.start(seriesConfig(3));
+
+    bool busyRejected = false;
+    try {
+        controller.setMeasurementSettings({2});
+    } catch (const std::logic_error&) {
+        busyRejected = true;
+    }
+    require(busyRejected, "busy controller accepted a measurement settings mutation");
+    firstTimeout.start(30'000);
+    firstLoop.exec();
+
+    require(firstResult.has_value(), "single settings benchmark timed out");
+    require(firstResult->measurementSettings.has_value() &&
+                firstResult->measurementSettings->memorySamplingIntervalMilliseconds == 3,
+            "single result did not retain the selected measurement settings");
+    if (samplerIntervals.size() != 3) {
+        throw std::runtime_error("single logical benchmark sampler count was " +
+                                 std::to_string(samplerIntervals.size()));
+    }
+    for (const auto interval : samplerIntervals) {
+        require(interval == 3, "single sampler received a changed measurement interval");
+    }
+    const auto immutableFirstResult = *firstResult;
+
+    samplerIntervals.clear();
+    controller.setMeasurementSettings({2});
+    firstResult.reset();
+    firstTimeout.start(30'000);
+    controller.start(seriesConfig(1));
+    firstLoop.exec();
+    require(firstResult.has_value() && firstResult->measurementSettings.has_value() &&
+                firstResult->measurementSettings->memorySamplingIntervalMilliseconds == 2,
+            "reused controller did not apply the new idle measurement settings");
+    require(samplerIntervals.size() == 1 && samplerIntervals.front() == 2,
+            "reused controller did not pass the new settings to the sampler");
+    require(immutableFirstResult.measurementSettings.has_value() &&
+                immutableFirstResult.measurementSettings->memorySamplingIntervalMilliseconds == 3,
+            "previously emitted result was mutated after controller reuse");
+}
+
 void testCancellationDuringTerminalContinuationRetainsPrefix()
 {
     std::vector<qint64> workerPids;
@@ -319,6 +400,7 @@ int main(int argc, char* argv[])
         testInvalidPreflight();
         testSuccessfulSession();
         testFreshWorkerSeriesAndReuse();
+        testMeasurementSettingsSnapshotAndConfiguration();
         testCancellationDuringTerminalContinuationRetainsPrefix();
         testDestructorSupervisesActiveSessionAsynchronously();
         testDestructorDefersTerminalSessionDeletion();

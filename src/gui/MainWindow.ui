@@ -16,6 +16,41 @@
   <widget class="QWidget" name="centralWidget">
    <layout class="QVBoxLayout" name="mainLayout">
     <item>
+      <widget class="QGroupBox" name="measurementSettingsGroupBox">
+       <property name="title">
+         <string>Measurement settings</string>
+       </property>
+       <layout class="QHBoxLayout" name="measurementSettingsLayout">
+         <item>
+          <widget class="QLabel" name="memorySamplingIntervalLabel">
+            <property name="text">
+             <string>Memory sampling interval:</string>
+            </property>
+            <property name="buddy">
+             <cstring>memorySamplingIntervalComboBox</cstring>
+            </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="memorySamplingIntervalComboBox"/>
+         </item>
+         <item>
+          <spacer name="measurementSettingsSpacer">
+            <property name="orientation">
+             <enum>Qt::Horizontal</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+               <width>40</width>
+               <height>20</height>
+             </size>
+            </property>
+          </spacer>
+         </item>
+       </layout>
+      </widget>
+    </item>
+    <item>
      <widget class="QTabWidget" name="workflowTabWidget">
       <widget class="QWidget" name="singleTab">
        <attribute name="title">
