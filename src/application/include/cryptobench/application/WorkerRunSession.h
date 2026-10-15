@@ -39,6 +39,7 @@ struct WorkerRunSessionTestHooks {
     std::function<bool()> samplerIsActive;
     std::function<QProcess::ProcessState()> processState;
     std::function<void()> cleanupStarted;
+    std::function<void()> processFinishedObserved;
     std::function<void()> killProcess;
     std::function<void()> cleanupTimeoutArmed;
     std::function<int()> cleanupTimeoutMilliseconds;

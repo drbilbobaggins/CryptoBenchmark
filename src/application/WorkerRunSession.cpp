@@ -389,6 +389,7 @@ void WorkerRunSession::onProcessFinished(int exitCode, QProcess::ExitStatus exit
         workerFailureGraceTimer_.stop();
         cleanupTimer_.stop();
         finalizeTerminal();
+        if (testHooks_.processFinishedObserved) testHooks_.processFinishedObserved();
         return;
     }
     if (isActive()) {
@@ -398,6 +399,7 @@ void WorkerRunSession::onProcessFinished(int exitCode, QProcess::ExitStatus exit
             armFinalDrainTimeout();
         }
     }
+    if (testHooks_.processFinishedObserved) testHooks_.processFinishedObserved();
 }
 
 void WorkerRunSession::onWorkerFailureGraceTimeout()

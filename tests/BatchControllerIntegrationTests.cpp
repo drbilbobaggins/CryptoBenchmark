@@ -20,6 +20,7 @@
 #include <array>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -225,18 +226,42 @@ void waitForBatch(BatchController& controller, std::size_t& finishCount,
     require(finishCount == 1, "batch emitted a late duplicate terminal state");
 }
 
-void requireCompletedEntries(const BatchExecutionState& state)
+void requireRealCompletedEntry(const application::BatchEntryState& entry,
+                   std::uint32_t expectedInterval)
+{
+    require(entry.status == application::BatchEntryStatus::Completed,
+        "real batch contains a non-completed entry");
+    require(entry.result.has_value(), "completed real batch entry has no result");
+    const auto& result = *entry.result;
+    require(application::benchmarkConfigToJson(result.config) ==
+        application::benchmarkConfigToJson(entry.definition.config),
+        "real batch result config differs from its entry config");
+    require(result.status == core::BenchmarkStatus::Completed,
+        "real batch result is not Completed");
+    require(result.runs.size() == entry.definition.config.runs,
+        "real batch result has the wrong logical run count");
+    for (std::uint32_t runIndex = 0; runIndex < entry.definition.config.runs; ++runIndex) {
+    require(result.runs.at(runIndex).runIndex == runIndex,
+        "real batch logical run indices are not ordered");
+    }
+    require(result.statistics.has_value() &&
+        std::holds_alternative<core::MemoryV2Statistics>(result.statistics->memory),
+        "real batch result does not contain Memory v2 statistics");
+    require(result.measurementSettings.has_value() &&
+        result.measurementSettings->memorySamplingIntervalMilliseconds == expectedInterval,
+        "real batch result lost the Batch-start measurement settings snapshot");
+    const auto now = std::chrono::system_clock::now();
+    test_support::assertCompletedResult(result, entry.definition.config,
+                    now - std::chrono::minutes(1), now);
+}
+
+void requireCompletedEntries(const BatchExecutionState& state, std::uint32_t expectedInterval)
 {
     require(state.status == BatchStatus::Completed, "natural batch did not complete");
     require(!state.batchError.has_value(), "natural batch contains a batch error");
     require(state.entries.size() == 4, "natural batch has the wrong entry count");
     for (const auto& entry : state.entries) {
-        require(entry.status == application::BatchEntryStatus::Completed,
-                "natural batch contains a non-completed entry");
-        require(entry.result.has_value(), "completed batch entry has no result");
-        const auto now = std::chrono::system_clock::now();
-        test_support::assertCompletedResult(entry.result.value(), entry.definition.config,
-                                            now - std::chrono::minutes(1), now);
+        requireRealCompletedEntry(entry, expectedInterval);
     }
 }
 
@@ -246,17 +271,48 @@ void testNaturalBatch()
     const auto definition = naturalDefinition(directory);
     const auto target = directory.filePath("natural-result.json");
     PersistenceObserver observer;
-    auto persister = [&observer](const QString& path, const QByteArray& payload) {
+    std::vector<qint64> workerPids;
+    std::size_t cleanupCount = 0;
+    std::size_t providerCallCount = 0;
+    std::vector<std::uint32_t> factoryIntervals;
+    std::vector<std::size_t> workerStartsAtPersistence;
+    application::WorkerRunSessionTestHooks hooks;
+    hooks.workerStarted = [&](qint64 pid) { workerPids.push_back(pid); };
+    hooks.cleanupStarted = [&] { ++cleanupCount; };
+    auto persister = [&observer, &workerPids, &workerStartsAtPersistence](
+                         const QString& path, const QByteArray& payload) {
+        workerStartsAtPersistence.push_back(workerPids.size());
         return observer(path, payload);
     };
-    BatchController controller(std::make_unique<application::BenchmarkController>(), persister, {},
-                               core::MeasurementSettings{5});
+    auto executorFactory = [&hooks, &factoryIntervals](const core::MeasurementSettings& settings) {
+        factoryIntervals.push_back(settings.memorySamplingIntervalMilliseconds);
+        return std::make_unique<application::BenchmarkController>(
+            nullptr, QString{}, hooks, settings);
+    };
+    auto settingsProvider = [&providerCallCount] {
+        ++providerCallCount;
+        return core::MeasurementSettings{3};
+    };
+    BatchController controller(executorFactory, persister, {}, settingsProvider);
     std::size_t finishCount = 0;
     std::optional<BatchExecutionState> finishedState;
 
     controller.start(definition, target);
     waitForBatch(controller, finishCount, finishedState);
-    requireCompletedEntries(*finishedState);
+        require(providerCallCount == 1,
+            "real-worker Batch settings provider was not sampled exactly once");
+            require(factoryIntervals == std::vector<std::uint32_t>{3},
+                "real-worker Batch executor factory did not receive the provider snapshot");
+        requireCompletedEntries(*finishedState, 3);
+        require(workerPids.size() == 8 && cleanupCount == workerPids.size(),
+            "natural Batch did not observe one cleanup for each of eight logical runs");
+        require(std::set<qint64>(workerPids.begin(), workerPids.end()).size() == workerPids.size(),
+            "natural Batch reused a worker PID across logical runs");
+        require(workerStartsAtPersistence == std::vector<std::size_t>{0, 2, 4, 6, 8},
+            "natural Batch did not gate each next entry on its checkpoint");
+        require(finishedState->measurementSettings.has_value() &&
+                    finishedState->measurementSettings->memorySamplingIntervalMilliseconds == 3,
+            "natural Batch state lost its measurement settings snapshot");
     require(observer.payloads.size() == 5, "natural batch did not persist five snapshots");
     require(observer.targets.size() == observer.payloads.size(),
             "persistence observer target count mismatch");
@@ -264,6 +320,10 @@ void testNaturalBatch()
                                                "inProgress", "completed"};
     for (std::size_t snapshotIndex = 0; snapshotIndex < observer.payloads.size(); ++snapshotIndex) {
         require(observer.targets[snapshotIndex] == target, "snapshot was written to the wrong target");
+        require(persistedRoot(observer.payloads[snapshotIndex])
+                .value("measurement").toObject()
+                    .value("memorySamplingIntervalMilliseconds").toInt() == 3,
+            "natural Batch checkpoint changed its measurement settings snapshot");
         std::array<application::BatchEntryStatus, 4> expectedStatuses{};
         for (std::size_t entryIndex = 0; entryIndex < expectedStatuses.size(); ++entryIndex) {
             expectedStatuses[entryIndex] = entryIndex < snapshotIndex
@@ -297,6 +357,124 @@ void testNaturalBatch()
         application::BatchEntryStatus::Completed, application::BatchEntryStatus::Completed,
         application::BatchEntryStatus::Completed, application::BatchEntryStatus::Completed};
     requireBatchSnapshot(onDiskPayload, *finishedState, "completed", completedStatuses);
+}
+
+void testRealCheckpointFailureStopsNextEntry()
+{
+    QTemporaryDir directory;
+    const auto definition = cancellationDefinition(directory);
+    const auto target = directory.filePath("checkpoint-failure-result.json");
+    PersistenceObserver observer;
+    std::vector<qint64> workerPids;
+    std::size_t cleanupCount = 0;
+    std::size_t persistCall = 0;
+    std::vector<std::size_t> workerStartsAtPersistence;
+    application::WorkerRunSessionTestHooks hooks;
+    hooks.workerStarted = [&](qint64 pid) { workerPids.push_back(pid); };
+    hooks.cleanupStarted = [&] { ++cleanupCount; };
+    auto persister = [&](const QString& path, const QByteArray& payload) {
+        ++persistCall;
+        workerStartsAtPersistence.push_back(workerPids.size());
+        if (persistCall == 2) {
+            return WriteResult{false, QStringLiteral("scripted checkpoint failure")};
+        }
+        return observer(path, payload);
+    };
+    auto executor = std::make_unique<application::BenchmarkController>(
+        nullptr, QString{}, std::move(hooks), core::MeasurementSettings{3});
+    BatchController controller(std::move(executor), persister, {}, core::MeasurementSettings{3});
+    std::size_t finishCount = 0;
+    std::optional<BatchExecutionState> finishedState;
+
+    controller.start(definition, target);
+    waitForBatch(controller, finishCount, finishedState);
+
+    require(finishedState->status == BatchStatus::Failed,
+            "real checkpoint failure did not fail the Batch");
+    require(finishedState->batchError.has_value() &&
+                finishedState->batchError->code == application::BatchErrorCode::OutputWriteFailed &&
+                finishedState->batchError->stage == application::BatchErrorStage::SnapshotPersistence,
+            "real checkpoint failure had the wrong Batch error classification");
+    require(finishedState->entries[0].status == application::BatchEntryStatus::Completed,
+            "checkpoint failure rewrote the completed first entry status");
+    requireRealCompletedEntry(finishedState->entries[0], 3);
+    require(finishedState->entries[1].status == application::BatchEntryStatus::NotStarted &&
+                !finishedState->entries[1].result.has_value(),
+            "checkpoint failure started or populated the later entry");
+    require(workerPids.size() == 2 && cleanupCount == workerPids.size() &&
+                workerStartsAtPersistence == std::vector<std::size_t>{0, 2},
+            "checkpoint failure did not stop after the first entry checkpoint");
+    require(observer.payloads.size() == 1 && persistCall == 2,
+            "checkpoint failure unexpectedly retried or persisted a later snapshot");
+}
+
+void testRealLogicalRunBoundaryCancellation()
+{
+    QTemporaryDir directory;
+    const auto definition = cancellationDefinition(directory);
+    const auto cancelledTarget = directory.filePath("boundary-cancel-result.json");
+    const auto reuseTarget = directory.filePath("boundary-reuse-result.json");
+    PersistenceObserver observer;
+    std::vector<qint64> workerPids;
+    std::size_t cleanupCount = 0;
+    bool boundaryReached = false;
+    bool cancelIssued = false;
+    BatchController* controllerPointer = nullptr;
+    application::WorkerRunSessionTestHooks hooks;
+    hooks.workerStarted = [&](qint64 pid) { workerPids.push_back(pid); };
+    hooks.cleanupStarted = [&] { ++cleanupCount; };
+    hooks.terminalContinuationQueued = [&] {
+        if (!cancelIssued) {
+            boundaryReached = true;
+            cancelIssued = true;
+            controllerPointer->requestCancel();
+        }
+    };
+    auto executor = std::make_unique<application::BenchmarkController>(
+        nullptr, QString{}, std::move(hooks), core::MeasurementSettings{2});
+    BatchController controller(std::move(executor),
+                               [&observer](const QString& path, const QByteArray& payload) {
+                                   return observer(path, payload);
+                               }, {}, core::MeasurementSettings{2});
+    controllerPointer = &controller;
+    std::size_t finishCount = 0;
+    std::optional<BatchExecutionState> finishedState;
+
+    controller.start(definition, cancelledTarget);
+    waitForBatch(controller, finishCount, finishedState);
+
+    require(boundaryReached && cancelIssued,
+            "logical-run boundary cancellation hook was not reached exactly as expected");
+    require(finishedState->status == BatchStatus::Cancelled &&
+                finishedState->cancelRequested,
+            "boundary cancellation did not produce a cancelled Batch");
+    require(finishedState->entries[0].status == application::BatchEntryStatus::Cancelled &&
+                finishedState->entries[0].result.has_value() &&
+                finishedState->entries[0].result->status == core::BenchmarkStatus::Cancelled &&
+                finishedState->entries[0].result->runs.size() == 1,
+            "boundary cancellation did not preserve the canonical cancelled run prefix");
+    require(finishedState->entries[1].status == application::BatchEntryStatus::NotStarted &&
+                !finishedState->entries[1].result.has_value(),
+            "boundary cancellation advanced to a later entry");
+    require(workerPids.size() == 1 && cleanupCount == 1,
+            "boundary cancellation launched or failed to clean an extra logical run");
+    require(observer.payloads.size() == 2 &&
+                persistedRoot(observer.payloads.back()).value("status").toString() == "cancelled",
+            "boundary cancellation did not persist the required cancelled final snapshot");
+
+    const auto reuseDefinition = parseDefinition(
+        directory,
+        R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[)"
+        R"({"id":"reuse","profileId":"sha256","operation":"hash","iterationsPerRun":2,"runs":2,"parameters":{"inputSizeBytes":64}}]})");
+    finishCount = 0;
+    finishedState.reset();
+    controller.start(reuseDefinition, reuseTarget);
+    waitForBatch(controller, finishCount, finishedState);
+    require(finishedState->status == BatchStatus::Completed &&
+                finishedState->entries[0].status == application::BatchEntryStatus::Completed,
+            "BatchController could not be reused after boundary cancellation");
+    require(workerPids.size() == 3 && cleanupCount == 3,
+            "controller reuse did not complete both fresh logical runs cleanly");
 }
 
 void testCancellationAndReuse()
@@ -378,6 +556,8 @@ int main(int argc, char* argv[])
     QCoreApplication application(argc, argv);
     try {
         testNaturalBatch();
+        testRealCheckpointFailureStopsNextEntry();
+        testRealLogicalRunBoundaryCancellation();
         testCancellationAndReuse();
         std::cout << "PASS BatchControllerIntegration\n";
         return 0;
