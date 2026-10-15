@@ -192,6 +192,16 @@
       </layout>
      </widget>
     </item>
+      <item>
+       <widget class="QLabel" name="runDurationRecommendationLabel">
+        <property name="text">
+         <string>Recommendation: aim for at least ~1 second of measured cryptographic work per run. Shorter runs may be more sensitive to fixed overhead and system noise.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
     <item>
      <widget class="QGroupBox" name="actionsGroupBox">
       <property name="title">
@@ -285,8 +295,11 @@
           <number>0</number>
          </property>
          <attribute name="horizontalHeaderStretchLastSection">
-          <bool>true</bool>
+          <bool>false</bool>
          </attribute>
+         <property name="horizontalScrollBarPolicy">
+          <enum>Qt::ScrollBarAsNeeded</enum>
+         </property>
          <column>
           <property name="text">
            <string>Metric</string>
@@ -319,6 +332,67 @@
          </column>
         </widget>
        </item>
+      <item>
+       <widget class="QGroupBox" name="memoryPhaseBreakdownGroupBox">
+        <property name="title">
+         <string>Memory phase breakdown</string>
+        </property>
+        <property name="visible">
+         <bool>false</bool>
+        </property>
+        <layout class="QVBoxLayout" name="memoryPhaseBreakdownLayout">
+         <item>
+          <widget class="QTableWidget" name="memoryPhaseBreakdownTable">
+           <property name="editTriggers">
+            <set>QAbstractItemView::NoEditTriggers</set>
+           </property>
+           <property name="horizontalScrollBarPolicy">
+            <enum>Qt::ScrollBarAsNeeded</enum>
+           </property>
+           <property name="columnCount">
+            <number>6</number>
+           </property>
+           <property name="rowCount">
+            <number>0</number>
+           </property>
+           <attribute name="horizontalHeaderStretchLastSection">
+            <bool>false</bool>
+           </attribute>
+           <column>
+            <property name="text">
+        <string>Metric</string>
+            </property>
+           </column>
+           <column>
+            <property name="text">
+        <string>Mean</string>
+            </property>
+           </column>
+           <column>
+            <property name="text">
+        <string>Median</string>
+            </property>
+           </column>
+           <column>
+            <property name="text">
+        <string>Min</string>
+            </property>
+           </column>
+           <column>
+            <property name="text">
+        <string>Max</string>
+            </property>
+           </column>
+           <column>
+            <property name="text">
+        <string>Std. dev.</string>
+            </property>
+           </column>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
       </layout>
      </widget>
     </item>

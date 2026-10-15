@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "MemoryPresentation.h"
 
 #include "ui_MainWindow.h"
 
@@ -125,13 +126,6 @@ DisplayUnit timeUnit(double mean)
     return {QStringLiteral("ms"), 1'000'000.0};
 }
 
-DisplayUnit memoryUnit(double mean)
-{
-    if (mean < 1'024.0) return {QStringLiteral("B"), 1.0};
-    if (mean < 1'048'576.0) return {QStringLiteral("KiB"), 1'024.0};
-    return {QStringLiteral("MiB"), 1'048'576.0};
-}
-
 void setStatisticRow(
     QTableWidget* table,
     int row,
@@ -139,17 +133,53 @@ void setStatisticRow(
     const cryptobench::core::Statistics<double>& statistics,
     const DisplayUnit& unit)
 {
-    table->setItem(row, 0, new QTableWidgetItem(label + QStringLiteral(" (") + unit.suffix + QLatin1Char(')')));
-    table->setItem(row, 1, new QTableWidgetItem(formatStatistic(statistics.mean, unit.divisor)));
-    table->setItem(row, 2, new QTableWidgetItem(formatStatistic(statistics.median, unit.divisor)));
-    table->setItem(row, 3, new QTableWidgetItem(formatStatistic(statistics.min, unit.divisor)));
-    table->setItem(row, 4, new QTableWidgetItem(formatStatistic(statistics.max, unit.divisor)));
-    table->setItem(row, 5, new QTableWidgetItem(formatStatistic(statistics.stddev, unit.divisor)));
+    const auto formatValue = [&](double value) {
+        return formatStatistic(value, unit.divisor) + QLatin1Char(' ') + unit.suffix;
+    };
+    table->setItem(row, 0, new QTableWidgetItem(label));
+    table->setItem(row, 1, new QTableWidgetItem(formatValue(statistics.mean)));
+    table->setItem(row, 2, new QTableWidgetItem(formatValue(statistics.median)));
+    table->setItem(row, 3, new QTableWidgetItem(formatValue(statistics.min)));
+    table->setItem(row, 4, new QTableWidgetItem(formatValue(statistics.max)));
+    table->setItem(row, 5, new QTableWidgetItem(formatValue(statistics.stddev)));
+}
+
+void setMemoryStatisticRow(
+    QTableWidget* table,
+    int row,
+    const QString& label,
+    const cryptobench::core::Statistics<double>& statistics)
+{
+    const auto unit = cryptobench::gui::memoryDisplayUnit(statistics);
+    const auto formatValue = [&](double value) {
+        return cryptobench::gui::formatMemoryStatistic(value, unit) +
+               QLatin1Char(' ') + unit.suffix;
+    };
+    table->setItem(row, 0, new QTableWidgetItem(label));
+    table->setItem(row, 1, new QTableWidgetItem(
+        formatValue(statistics.mean)));
+    table->setItem(row, 2, new QTableWidgetItem(
+        formatValue(statistics.median)));
+    table->setItem(row, 3, new QTableWidgetItem(
+        formatValue(statistics.min)));
+    table->setItem(row, 4, new QTableWidgetItem(
+        formatValue(statistics.max)));
+    table->setItem(row, 5, new QTableWidgetItem(
+        formatValue(statistics.stddev)));
+}
+
+void resizeResultTable(QTableWidget* table)
+{
+    table->horizontalHeader()->setStretchLastSection(false);
+    table->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    table->resizeColumnsToContents();
 }
 
 void clearDisplayedResults(Ui::MainWindow* ui)
 {
     ui->resultsTable->setRowCount(0);
+    ui->memoryPhaseBreakdownTable->setRowCount(0);
+    ui->memoryPhaseBreakdownGroupBox->setVisible(false);
     ui->resultsPlaceholderLabel->setVisible(true);
 }
 
@@ -163,25 +193,37 @@ void displayCompletedResults(Ui::MainWindow* ui, const cryptobench::core::Benchm
     }
 
     const auto& statistics = *result.statistics;
-    const auto* legacyMemory =
-        std::get_if<cryptobench::core::Statistics<double>>(&statistics.memory);
-    if (legacyMemory == nullptr) {
+    const auto* memory =
+        std::get_if<cryptobench::core::MemoryV2Statistics>(&statistics.memory);
+    if (memory == nullptr) {
         clearDisplayedResults(ui);
         ui->statusLabel->setText(QStringLiteral(
-            "Completed; Memory v2 statistics are not supported by this view."));
+            "Completed; result statistics are unavailable."));
         return;
     }
     const auto elapsedUnit = timeUnit(statistics.elapsedNanosecondsPerOperation.mean);
     const auto cpuUnit = timeUnit(statistics.cpuNanosecondsPerOperation.mean);
-    const auto memoryDisplayUnit = memoryUnit(legacyMemory->mean);
 
-    ui->resultsTable->setRowCount(3);
+    ui->resultsTable->setRowCount(4);
     setStatisticRow(ui->resultsTable, 0, QStringLiteral("Wall-clock / operation"),
                     statistics.elapsedNanosecondsPerOperation, elapsedUnit);
     setStatisticRow(ui->resultsTable, 1, QStringLiteral("Process CPU time / operation"),
                     statistics.cpuNanosecondsPerOperation, cpuUnit);
-    setStatisticRow(ui->resultsTable, 2, QStringLiteral("Peak PrivateUsage delta"),
-                    *legacyMemory, memoryDisplayUnit);
+    setMemoryStatisticRow(ui->resultsTable, 2, QStringLiteral("Operational peak PrivateUsage delta"),
+                          memory->operationalPeakPrivateUsageDeltaBytes);
+    setMemoryStatisticRow(ui->resultsTable, 3, QStringLiteral("Ready-state PrivateUsage delta"),
+                          memory->readyStatePrivateUsageDeltaBytes);
+    resizeResultTable(ui->resultsTable);
+
+    ui->memoryPhaseBreakdownTable->setRowCount(2);
+    setMemoryStatisticRow(ui->memoryPhaseBreakdownTable, 0,
+                          QStringLiteral("Preparation peak PrivateUsage delta"),
+                          memory->preparationPeakPrivateUsageDeltaBytes);
+    setMemoryStatisticRow(ui->memoryPhaseBreakdownTable, 1,
+                          QStringLiteral("Execution peak PrivateUsage delta"),
+                          memory->executionPeakPrivateUsageDeltaBytes);
+    resizeResultTable(ui->memoryPhaseBreakdownTable);
+    ui->memoryPhaseBreakdownGroupBox->setVisible(true);
     ui->resultsPlaceholderLabel->setVisible(false);
 }
 

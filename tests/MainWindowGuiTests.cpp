@@ -1,4 +1,5 @@
 #include "../src/gui/MainWindow.h"
+#include "../src/gui/MemoryPresentation.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -6,6 +7,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QGroupBox>
+#include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -160,6 +163,10 @@ void testIdleAndConfiguration()
             "Cancel was enabled while idle");
     require(!widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Export JSON was enabled before a Completed result");
+    auto* recommendation = widget<QLabel>(window, "runDurationRecommendationLabel");
+    require(recommendation->isVisible() && recommendation->text() == QStringLiteral(
+                "Recommendation: aim for at least ~1 second of measured cryptographic work per run. Shorter runs may be more sensitive to fixed overhead and system noise."),
+            "fixed run-duration recommendation was not presented exactly");
     auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
     require(sampling->count() == 5 && sampling->isEnabled(),
             "global measurement selector did not expose the required idle defaults");
@@ -173,6 +180,21 @@ void testIdleAndConfiguration()
             "global measurement selector did not default to 5 ms");
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0,
             "initial results table was not empty");
+    require(widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
+                !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible(),
+            "initial Memory phase breakdown was not empty and hidden");
+
+    const core::Statistics<double> negativeReady{-2048.0, -2048.0, -4096.0, -1024.0, 512.0};
+    const auto negativeUnit = gui::memoryDisplayUnit(negativeReady);
+    require(negativeUnit.suffix == QStringLiteral("KiB") &&
+                gui::formatMemoryStatistic(-2048.0, negativeUnit) == QStringLiteral("-2"),
+            "negative ReadyState formatting lost its sign or selected the wrong unit");
+    const core::Statistics<double> largeNegativeReady{-1'048'576.0, -1'048'576.0,
+                                                       -2'097'152.0, -524'288.0, 0.0};
+    const auto largeNegativeUnit = gui::memoryDisplayUnit(largeNegativeReady);
+    require(largeNegativeUnit.suffix == QStringLiteral("MiB") &&
+                gui::formatMemoryStatistic(-1'048'576.0, largeNegativeUnit) == QStringLiteral("-1"),
+            "large negative ReadyState formatting did not use magnitude-based units");
 
     configureSignatureAndKeyEstablishmentTransitions(window);
     configureHash(window);
@@ -190,21 +212,56 @@ void testIdleAndConfiguration()
 
 void waitForCompleted(MainWindow& window)
 {
-    waitUntil([&] {
-        return status(window) == QStringLiteral(
-            "Completed; Memory v2 statistics are not supported by this view.");
-    }, 20'000);
+    waitUntil([&] { return status(window) == QStringLiteral("Completed"); }, 20'000);
 }
 
-void requireMemoryV2InterimPresentation(MainWindow& window)
+void requireStatisticRow(QTableWidget* table, int row, const QString& label)
+{
+    require(table->item(row, 0) != nullptr && table->item(row, 0)->text() == label,
+            "Memory result row label was not canonical");
+    for (int column = 1; column < 6; ++column) {
+        const auto text = table->item(row, column) == nullptr
+            ? QString{}
+            : table->item(row, column)->text();
+        require(!text.isEmpty() &&
+                    (text.endsWith(QStringLiteral(" B")) ||
+                     text.endsWith(QStringLiteral(" KiB")) ||
+                     text.endsWith(QStringLiteral(" MiB")) ||
+                     text.endsWith(QStringLiteral(" ns")) ||
+                     text.endsWith(QStringLiteral(" µs")) ||
+                     text.endsWith(QStringLiteral(" ms"))),
+                "Memory result row is missing a statistic cell");
+    }
+}
+
+void requireMemoryV2Presentation(MainWindow& window)
 {
     auto* table = widget<QTableWidget>(window, "resultsTable");
-    require(table->rowCount() == 0, "Memory v2 completion populated the legacy results table");
-    require(widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible(),
-            "Memory v2 completion hid the results placeholder");
-    require(status(window) == QStringLiteral(
-                "Completed; Memory v2 statistics are not supported by this view."),
-            "Memory v2 completion did not report the exact interim GUI status");
+    require(status(window) == QStringLiteral("Completed"),
+            "Memory v2 completion did not report Completed");
+    require(!widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible(),
+            "Completed Memory v2 result left the placeholder visible");
+    require(table->rowCount() == 4, "Completed Memory v2 result did not populate four primary rows");
+    requireStatisticRow(table, 0, QStringLiteral("Wall-clock / operation"));
+    requireStatisticRow(table, 1, QStringLiteral("Process CPU time / operation"));
+    requireStatisticRow(table, 2, QStringLiteral("Operational peak PrivateUsage delta"));
+    requireStatisticRow(table, 3, QStringLiteral("Ready-state PrivateUsage delta"));
+    for (int row = 0; row < table->rowCount(); ++row) {
+        require(!table->item(row, 0)->text().startsWith(QStringLiteral("Peak PrivateUsage delta")),
+                "Completed Memory v2 result retained the legacy peak row");
+    }
+
+    auto* breakdownGroup = widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox");
+    auto* breakdown = widget<QTableWidget>(window, "memoryPhaseBreakdownTable");
+    require(breakdownGroup->isVisible() && breakdown->rowCount() == 2,
+            "Memory phase breakdown was not displayed with two rows");
+    requireStatisticRow(breakdown, 0, QStringLiteral("Preparation peak PrivateUsage delta"));
+    requireStatisticRow(breakdown, 1, QStringLiteral("Execution peak PrivateUsage delta"));
+    require(table->horizontalScrollBarPolicy() == Qt::ScrollBarAsNeeded &&
+                breakdown->horizontalScrollBarPolicy() == Qt::ScrollBarAsNeeded &&
+                !table->horizontalHeader()->stretchLastSection() &&
+                !breakdown->horizontalHeader()->stretchLastSection(),
+            "Memory result tables did not retain content-sized scrolling behavior");
 }
 
 void requireStatisticGroup(const QJsonObject& group, const char* name)
@@ -277,6 +334,12 @@ void testCompletedAndReplacement()
     MainWindow window;
     window.show();
     configureHash(window);
+    auto* resultTable = widget<QTableWidget>(window, "resultsTable");
+    auto* breakdownTable = widget<QTableWidget>(window, "memoryPhaseBreakdownTable");
+    resultTable->setColumnWidth(0, 1);
+    breakdownTable->setColumnWidth(0, 1);
+    const int forcedResultWidth = resultTable->columnWidth(0);
+    const int forcedBreakdownWidth = breakdownTable->columnWidth(0);
     auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
     sampling->setCurrentIndex(sampling->findData(2));
     auto* run = widget<QPushButton>(window, "runButton");
@@ -292,16 +355,21 @@ void testCompletedAndReplacement()
     require(widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
             "configuration was not restored after completion");
     require(sampling->isEnabled(), "measurement selector was not restored after completion");
-    requireMemoryV2InterimPresentation(window);
+    requireMemoryV2Presentation(window);
+    require(resultTable->columnWidth(0) > forcedResultWidth &&
+                breakdownTable->columnWidth(0) > forcedBreakdownWidth,
+            "result population did not resize forced-narrow metric columns");
 
     widget<QSpinBox>(window, "workloadSizeSpinBox")->setValue(16);
     run->click();
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
                 widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible() &&
+                widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
+                !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible() &&
                 !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "old result was not cleared at new Run start");
     waitForCompleted(window);
-    requireMemoryV2InterimPresentation(window);
+    requireMemoryV2Presentation(window);
     clearScenario();
 }
 
@@ -323,13 +391,15 @@ void testCancelAndReuse()
     waitUntil([&] { return status(window) == QStringLiteral("Benchmark cancelled"); }, 10'000);
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
                 widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
+                widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
+                !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible() &&
                 !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Cancelled result did not restore an empty idle GUI");
 
     setScenario("completed");
     run->click();
     waitForCompleted(window);
-    requireMemoryV2InterimPresentation(window);
+    requireMemoryV2Presentation(window);
     clearScenario();
 }
 
@@ -347,13 +417,15 @@ void testFailedAndReuse()
     require(!widget<QPushButton>(window, "cancelButton")->isEnabled() &&
                 widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
                 widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
+                widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
+                !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible() &&
                 !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Failed result did not restore the idle empty GUI");
 
     setScenario("completed");
     run->click();
     waitForCompleted(window);
-    requireMemoryV2InterimPresentation(window);
+    requireMemoryV2Presentation(window);
     clearScenario();
 }
 
@@ -439,8 +511,7 @@ void testSingleJsonExport()
     writeFile(parentFile, "parent");
     target = parentFile + "/result.json";
     exportButton->click();
-    require(status(window) == QStringLiteral(
-                "Completed; Memory v2 statistics are not supported by this view."),
+    require(status(window) == QStringLiteral("Completed"),
             "export failure changed the visible Completed status");
     require(exportButton->isEnabled(), "export failure discarded the retained result");
     require(messageTitle == QStringLiteral("Export failed"), "export failure was not reported");
@@ -1222,8 +1293,7 @@ void testModalDialogRace()
     QTimer pollTimer;
     pollTimer.setInterval(10);
     QObject::connect(&pollTimer, &QTimer::timeout, &window, [&] {
-        if (!dialogAnswered && status(window) == QStringLiteral(
-            "Completed; Memory v2 statistics are not supported by this view.")) {
+        if (!dialogAnswered && status(window) == QStringLiteral("Completed")) {
             completionObserved = true;
             dialogAnswered = tryAnswerMessageBox(QMessageBox::Yes);
             if (dialogAnswered) pollTimer.stop();
