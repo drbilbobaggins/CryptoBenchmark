@@ -328,6 +328,57 @@ void requireMemoryV2Export(const QJsonObject& root, int expectedInterval = 5)
             "GUI export contained obsolete legacy memory fields");
 }
 
+void requireMemoryV2DocumentShape(const QJsonObject& root,
+                                  const QString& mode,
+                                  int expectedInterval)
+{
+    require(root.value(QStringLiteral("format")) == QStringLiteral("cryptobenchmark-result") &&
+                root.value(QStringLiteral("schemaVersion")) == 2 &&
+                root.value(QStringLiteral("mode")) == mode &&
+                root.value(QStringLiteral("status")) == QStringLiteral("completed"),
+            "integrated workflow document metadata was incorrect");
+    const auto measurement = root.value(QStringLiteral("measurement")).toObject();
+    require(measurement.value(QStringLiteral("memorySamplingIntervalMilliseconds")) == expectedInterval &&
+                measurement.value(QStringLiteral("memoryModel")) == QStringLiteral("memoryV2") &&
+                measurement.value(QStringLiteral("workerLifecycle")) ==
+                    QStringLiteral("freshWorkerPerLogicalRun"),
+            "integrated workflow measurement metadata was incorrect");
+
+    const auto entries = root.value(QStringLiteral("entries")).toArray();
+    require(entries.size() == 1 &&
+                entries.at(0).toObject().value(QStringLiteral("status")) ==
+                    QStringLiteral("completed"),
+            "integrated workflow did not contain one Completed entry");
+    const auto statistics = entries.at(0).toObject()
+        .value(QStringLiteral("statistics")).toObject();
+    requireStatisticGroup(
+        statistics.value(QStringLiteral("wallClockNanosecondsPerOperation")).toObject(),
+        "wallClockNanosecondsPerOperation");
+    requireStatisticGroup(
+        statistics.value(QStringLiteral("processCpuNanosecondsPerOperation")).toObject(),
+        "processCpuNanosecondsPerOperation");
+    const auto memory = statistics.value(QStringLiteral("memory")).toObject();
+    require(memory.value(QStringLiteral("unit")) == QStringLiteral("bytes") &&
+                memory.contains(QStringLiteral("readyStateDelta")) &&
+                memory.contains(QStringLiteral("preparationPeakDelta")) &&
+                memory.contains(QStringLiteral("executionPeakDelta")) &&
+                memory.contains(QStringLiteral("operationalPeakDelta")),
+            "integrated workflow lacked the Memory v2 statistic groups");
+    requireStatisticGroup(memory.value(QStringLiteral("readyStateDelta")).toObject(),
+                          "readyStateDelta");
+    requireStatisticGroup(memory.value(QStringLiteral("preparationPeakDelta")).toObject(),
+                          "preparationPeakDelta");
+    requireStatisticGroup(memory.value(QStringLiteral("executionPeakDelta")).toObject(),
+                          "executionPeakDelta");
+    requireStatisticGroup(memory.value(QStringLiteral("operationalPeakDelta")).toObject(),
+                          "operationalPeakDelta");
+    require(!statistics.contains(QStringLiteral("peakDeltaBytes")) &&
+                !statistics.contains(QStringLiteral("peakPrivateUsageDeltaBytes")) &&
+                !memory.contains(QStringLiteral("peakDeltaBytes")) &&
+                !memory.contains(QStringLiteral("peakPrivateUsageDeltaBytes")),
+            "integrated workflow contained legacy memory fields");
+}
+
 void testCompletedAndReplacement()
 {
     setScenario("completed");
@@ -520,6 +571,103 @@ void testSingleJsonExport()
     exportButton->click();
     require(readFile(target) == secondPayload, "retry export did not persist the retained result");
     require(exportButton->isEnabled(), "successful export discarded the retained result");
+    clearScenario();
+}
+
+void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
+{
+    setScenario("completed");
+    QTemporaryDir directory;
+    require(directory.isValid(), "integrated workflow directory was not created");
+
+    const auto batchInputPath = directory.filePath("equivalent-batch.json");
+    writeFile(batchInputPath,
+              R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[{"id":"equivalent","profileId":"sha256","operation":"hash","iterationsPerRun":2,"runs":2,"parameters":{"inputSizeBytes":8}}]})");
+    const auto firstSinglePath = directory.filePath("single-4ms.json");
+    const auto batchPath = directory.filePath("batch-4ms.json");
+    const auto secondSinglePath = directory.filePath("single-1ms.json");
+
+    QString selectedInput;
+    QString selectedOutput;
+    bool overwrite = false;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
+    callbacks.reportMessage = [](QWidget*, const QString&, const QString&) {};
+
+    MainWindow window;
+    window.show();
+    window.setDialogCallbacks(std::move(callbacks));
+    configureHash(window);
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    sampling->setCurrentIndex(sampling->findData(4));
+    auto* run = widget<QPushButton>(window, "runButton");
+    auto* exportButton = widget<QPushButton>(window, "exportJsonButton");
+
+    run->click();
+    require(!sampling->isEnabled(), "Single did not lock the global selector");
+    waitForCompleted(window);
+    require(sampling->isEnabled() && exportButton->isEnabled(),
+            "Single did not return to Idle with an exportable result");
+
+    selectedOutput = firstSinglePath;
+    exportButton->click();
+    const auto firstSinglePayload = readFile(firstSinglePath);
+    const auto firstSingleRoot = QJsonDocument::fromJson(firstSinglePayload).object();
+    requireMemoryV2DocumentShape(firstSingleRoot, QStringLiteral("single"), 4);
+    const auto firstSingleEntry = firstSingleRoot.value(QStringLiteral("entries"))
+        .toArray().at(0).toObject();
+    const auto firstSingleConfig = firstSingleEntry.value(QStringLiteral("config")).toObject();
+
+    selectedInput = batchInputPath;
+    widget<QPushButton>(window, "batchInputBrowseButton")->click();
+    selectedOutput = batchPath;
+    widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+    auto* batchRun = widget<QPushButton>(window, "batchRunButton");
+    batchRun->click();
+    require(!run->isEnabled() && !exportButton->isEnabled() && !sampling->isEnabled(),
+            "Batch did not preserve Single/Batch mutual exclusion and selector lock");
+    waitUntil([&] {
+        return widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed");
+    }, 30'000);
+    require(sampling->isEnabled() && batchRun->isEnabled() && exportButton->isEnabled(),
+            "Batch did not return to Idle with the retained Single result exportable");
+
+    const auto batchPayload = readFile(batchPath);
+    const auto batchRoot = QJsonDocument::fromJson(batchPayload).object();
+    requireMemoryV2DocumentShape(batchRoot, QStringLiteral("batch"), 4);
+    const auto batchEntry = batchRoot.value(QStringLiteral("entries"))
+        .toArray().at(0).toObject();
+    require(batchEntry.value(QStringLiteral("config")).toObject() == firstSingleConfig,
+            "equivalent Single and Batch configs were not semantically equal");
+    require(batchEntry.value(QStringLiteral("statistics")).toObject().keys() ==
+                firstSingleEntry.value(QStringLiteral("statistics")).toObject().keys(),
+            "Single and Batch ResultDocument statistics shapes differed");
+
+    overwrite = true;
+    const auto retainedSingleCopyPath = directory.filePath("retained-single-copy.json");
+    selectedOutput = retainedSingleCopyPath;
+    exportButton->click();
+    require(readFile(retainedSingleCopyPath) == firstSinglePayload,
+            "Batch changed the retained Single result snapshot");
+
+    sampling->setCurrentIndex(sampling->findData(1));
+    run->click();
+    waitForCompleted(window);
+    selectedOutput = secondSinglePath;
+    exportButton->click();
+    const auto secondSingleRoot = QJsonDocument::fromJson(readFile(secondSinglePath)).object();
+    requireMemoryV2DocumentShape(secondSingleRoot, QStringLiteral("single"), 1);
+    require(readFile(firstSinglePath) == firstSinglePayload &&
+                readFile(batchPath) == batchPayload &&
+                QJsonDocument::fromJson(readFile(firstSinglePath)).object()
+                .value(QStringLiteral("measurement")).toObject()
+                .value(QStringLiteral("memorySamplingIntervalMilliseconds")) == 4 &&
+                QJsonDocument::fromJson(readFile(batchPath)).object()
+                    .value(QStringLiteral("measurement")).toObject()
+                    .value(QStringLiteral("memorySamplingIntervalMilliseconds")) == 4,
+            "previous 4 ms Single/Batch outputs were changed by the later Single run");
     clearScenario();
 }
 
@@ -1335,6 +1483,8 @@ int main(int argc, char* argv[])
         testFailedAndReuse();
         std::cout << "CASE single-json-export\n";
         testSingleJsonExport();
+        std::cout << "CASE single-batch-single-parity\n";
+        testSingleBatchMemoryV2ParityAndSnapshotIsolation();
         std::cout << "CASE batch-gui\n";
         testBatchGui();
         std::cout << "CASE batch-run-cancel\n";
