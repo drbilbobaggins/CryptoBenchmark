@@ -1,4 +1,5 @@
 #include "../src/gui/MainWindow.h"
+#include "../src/gui/MemoryPresentation.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -6,6 +7,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QGroupBox>
+#include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -160,8 +163,38 @@ void testIdleAndConfiguration()
             "Cancel was enabled while idle");
     require(!widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Export JSON was enabled before a Completed result");
+    auto* recommendation = widget<QLabel>(window, "runDurationRecommendationLabel");
+    require(recommendation->isVisible() && recommendation->text() == QStringLiteral(
+                "Recommendation: aim for at least ~1 second of measured cryptographic work per run. Shorter runs may be more sensitive to fixed overhead and system noise."),
+            "fixed run-duration recommendation was not presented exactly");
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    require(sampling->count() == 5 && sampling->isEnabled(),
+            "global measurement selector did not expose the required idle defaults");
+    for (int index = 0; index < 5; ++index) {
+        require(sampling->itemText(index) == QStringLiteral("%1 ms").arg(index + 1) &&
+                    sampling->itemData(index).toUInt() == static_cast<uint>(index + 1),
+                "global measurement selector values were not ordered 1 ms through 5 ms");
+    }
+    require(sampling->currentText() == QStringLiteral("5 ms") &&
+                sampling->currentData().toUInt() == 5,
+            "global measurement selector did not default to 5 ms");
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0,
             "initial results table was not empty");
+    require(widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
+                !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible(),
+            "initial Memory phase breakdown was not empty and hidden");
+
+    const core::Statistics<double> negativeReady{-2048.0, -2048.0, -4096.0, -1024.0, 512.0};
+    const auto negativeUnit = gui::memoryDisplayUnit(negativeReady);
+    require(negativeUnit.suffix == QStringLiteral("KiB") &&
+                gui::formatMemoryStatistic(-2048.0, negativeUnit) == QStringLiteral("-2"),
+            "negative ReadyState formatting lost its sign or selected the wrong unit");
+    const core::Statistics<double> largeNegativeReady{-1'048'576.0, -1'048'576.0,
+                                                       -2'097'152.0, -524'288.0, 0.0};
+    const auto largeNegativeUnit = gui::memoryDisplayUnit(largeNegativeReady);
+    require(largeNegativeUnit.suffix == QStringLiteral("MiB") &&
+                gui::formatMemoryStatistic(-1'048'576.0, largeNegativeUnit) == QStringLiteral("-1"),
+            "large negative ReadyState formatting did not use magnitude-based units");
 
     configureSignatureAndKeyEstablishmentTransitions(window);
     configureHash(window);
@@ -179,21 +212,56 @@ void testIdleAndConfiguration()
 
 void waitForCompleted(MainWindow& window)
 {
-    waitUntil([&] {
-        return status(window) == QStringLiteral(
-            "Completed; Memory v2 statistics are not supported by this view.");
-    }, 20'000);
+    waitUntil([&] { return status(window) == QStringLiteral("Completed"); }, 20'000);
 }
 
-void requireMemoryV2InterimPresentation(MainWindow& window)
+void requireStatisticRow(QTableWidget* table, int row, const QString& label)
+{
+    require(table->item(row, 0) != nullptr && table->item(row, 0)->text() == label,
+            "Memory result row label was not canonical");
+    for (int column = 1; column < 6; ++column) {
+        const auto text = table->item(row, column) == nullptr
+            ? QString{}
+            : table->item(row, column)->text();
+        require(!text.isEmpty() &&
+                    (text.endsWith(QStringLiteral(" B")) ||
+                     text.endsWith(QStringLiteral(" KiB")) ||
+                     text.endsWith(QStringLiteral(" MiB")) ||
+                     text.endsWith(QStringLiteral(" ns")) ||
+                     text.endsWith(QStringLiteral(" µs")) ||
+                     text.endsWith(QStringLiteral(" ms"))),
+                "Memory result row is missing a statistic cell");
+    }
+}
+
+void requireMemoryV2Presentation(MainWindow& window)
 {
     auto* table = widget<QTableWidget>(window, "resultsTable");
-    require(table->rowCount() == 0, "Memory v2 completion populated the legacy results table");
-    require(widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible(),
-            "Memory v2 completion hid the results placeholder");
-    require(status(window) == QStringLiteral(
-                "Completed; Memory v2 statistics are not supported by this view."),
-            "Memory v2 completion did not report the exact interim GUI status");
+    require(status(window) == QStringLiteral("Completed"),
+            "Memory v2 completion did not report Completed");
+    require(!widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible(),
+            "Completed Memory v2 result left the placeholder visible");
+    require(table->rowCount() == 4, "Completed Memory v2 result did not populate four primary rows");
+    requireStatisticRow(table, 0, QStringLiteral("Wall-clock / operation"));
+    requireStatisticRow(table, 1, QStringLiteral("Process CPU time / operation"));
+    requireStatisticRow(table, 2, QStringLiteral("Operational peak PrivateUsage delta"));
+    requireStatisticRow(table, 3, QStringLiteral("Ready-state PrivateUsage delta"));
+    for (int row = 0; row < table->rowCount(); ++row) {
+        require(!table->item(row, 0)->text().startsWith(QStringLiteral("Peak PrivateUsage delta")),
+                "Completed Memory v2 result retained the legacy peak row");
+    }
+
+    auto* breakdownGroup = widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox");
+    auto* breakdown = widget<QTableWidget>(window, "memoryPhaseBreakdownTable");
+    require(breakdownGroup->isVisible() && breakdown->rowCount() == 2,
+            "Memory phase breakdown was not displayed with two rows");
+    requireStatisticRow(breakdown, 0, QStringLiteral("Preparation peak PrivateUsage delta"));
+    requireStatisticRow(breakdown, 1, QStringLiteral("Execution peak PrivateUsage delta"));
+    require(table->horizontalScrollBarPolicy() == Qt::ScrollBarAsNeeded &&
+                breakdown->horizontalScrollBarPolicy() == Qt::ScrollBarAsNeeded &&
+                !table->horizontalHeader()->stretchLastSection() &&
+                !breakdown->horizontalHeader()->stretchLastSection(),
+            "Memory result tables did not retain content-sized scrolling behavior");
 }
 
 void requireStatisticGroup(const QJsonObject& group, const char* name)
@@ -212,7 +280,7 @@ void requireStatisticGroup(const QJsonObject& group, const char* name)
             std::string("non-numeric statistic member in ") + name);
 }
 
-void requireMemoryV2Export(const QJsonObject& root)
+void requireMemoryV2Export(const QJsonObject& root, int expectedInterval = 5)
 {
     require(root.value(QStringLiteral("format")) == QStringLiteral("cryptobenchmark-result") &&
                 root.value(QStringLiteral("schemaVersion")) == 2 &&
@@ -221,7 +289,7 @@ void requireMemoryV2Export(const QJsonObject& root)
             "GUI export had incorrect canonical document metadata");
 
     const auto measurement = root.value(QStringLiteral("measurement")).toObject();
-    require(measurement.value(QStringLiteral("memorySamplingIntervalMilliseconds")) == 5 &&
+    require(measurement.value(QStringLiteral("memorySamplingIntervalMilliseconds")) == expectedInterval &&
                 measurement.value(QStringLiteral("memoryModel")) == QStringLiteral("memoryV2") &&
                 measurement.value(QStringLiteral("workerLifecycle")) ==
                     QStringLiteral("freshWorkerPerLogicalRun"),
@@ -260,17 +328,76 @@ void requireMemoryV2Export(const QJsonObject& root)
             "GUI export contained obsolete legacy memory fields");
 }
 
+void requireMemoryV2DocumentShape(const QJsonObject& root,
+                                  const QString& mode,
+                                  int expectedInterval)
+{
+    require(root.value(QStringLiteral("format")) == QStringLiteral("cryptobenchmark-result") &&
+                root.value(QStringLiteral("schemaVersion")) == 2 &&
+                root.value(QStringLiteral("mode")) == mode &&
+                root.value(QStringLiteral("status")) == QStringLiteral("completed"),
+            "integrated workflow document metadata was incorrect");
+    const auto measurement = root.value(QStringLiteral("measurement")).toObject();
+    require(measurement.value(QStringLiteral("memorySamplingIntervalMilliseconds")) == expectedInterval &&
+                measurement.value(QStringLiteral("memoryModel")) == QStringLiteral("memoryV2") &&
+                measurement.value(QStringLiteral("workerLifecycle")) ==
+                    QStringLiteral("freshWorkerPerLogicalRun"),
+            "integrated workflow measurement metadata was incorrect");
+
+    const auto entries = root.value(QStringLiteral("entries")).toArray();
+    require(entries.size() == 1 &&
+                entries.at(0).toObject().value(QStringLiteral("status")) ==
+                    QStringLiteral("completed"),
+            "integrated workflow did not contain one Completed entry");
+    const auto statistics = entries.at(0).toObject()
+        .value(QStringLiteral("statistics")).toObject();
+    requireStatisticGroup(
+        statistics.value(QStringLiteral("wallClockNanosecondsPerOperation")).toObject(),
+        "wallClockNanosecondsPerOperation");
+    requireStatisticGroup(
+        statistics.value(QStringLiteral("processCpuNanosecondsPerOperation")).toObject(),
+        "processCpuNanosecondsPerOperation");
+    const auto memory = statistics.value(QStringLiteral("memory")).toObject();
+    require(memory.value(QStringLiteral("unit")) == QStringLiteral("bytes") &&
+                memory.contains(QStringLiteral("readyStateDelta")) &&
+                memory.contains(QStringLiteral("preparationPeakDelta")) &&
+                memory.contains(QStringLiteral("executionPeakDelta")) &&
+                memory.contains(QStringLiteral("operationalPeakDelta")),
+            "integrated workflow lacked the Memory v2 statistic groups");
+    requireStatisticGroup(memory.value(QStringLiteral("readyStateDelta")).toObject(),
+                          "readyStateDelta");
+    requireStatisticGroup(memory.value(QStringLiteral("preparationPeakDelta")).toObject(),
+                          "preparationPeakDelta");
+    requireStatisticGroup(memory.value(QStringLiteral("executionPeakDelta")).toObject(),
+                          "executionPeakDelta");
+    requireStatisticGroup(memory.value(QStringLiteral("operationalPeakDelta")).toObject(),
+                          "operationalPeakDelta");
+    require(!statistics.contains(QStringLiteral("peakDeltaBytes")) &&
+                !statistics.contains(QStringLiteral("peakPrivateUsageDeltaBytes")) &&
+                !memory.contains(QStringLiteral("peakDeltaBytes")) &&
+                !memory.contains(QStringLiteral("peakPrivateUsageDeltaBytes")),
+            "integrated workflow contained legacy memory fields");
+}
+
 void testCompletedAndReplacement()
 {
     setScenario("completed");
     MainWindow window;
     window.show();
     configureHash(window);
+    auto* resultTable = widget<QTableWidget>(window, "resultsTable");
+    auto* breakdownTable = widget<QTableWidget>(window, "memoryPhaseBreakdownTable");
+    resultTable->setColumnWidth(0, 1);
+    breakdownTable->setColumnWidth(0, 1);
+    const int forcedResultWidth = resultTable->columnWidth(0);
+    const int forcedBreakdownWidth = breakdownTable->columnWidth(0);
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    sampling->setCurrentIndex(sampling->findData(2));
     auto* run = widget<QPushButton>(window, "runButton");
     auto* cancel = widget<QPushButton>(window, "cancelButton");
     run->click();
     require(!run->isEnabled() && !widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
-                cancel->isEnabled(),
+                cancel->isEnabled() && !sampling->isEnabled(),
             "Running state did not lock configuration and enable Cancel");
     waitForCompleted(window);
     require(!cancel->isEnabled(), "Cancel remained enabled after completion");
@@ -278,16 +405,22 @@ void testCompletedAndReplacement()
             "Completed result did not enable Export JSON");
     require(widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
             "configuration was not restored after completion");
-    requireMemoryV2InterimPresentation(window);
+    require(sampling->isEnabled(), "measurement selector was not restored after completion");
+    requireMemoryV2Presentation(window);
+    require(resultTable->columnWidth(0) > forcedResultWidth &&
+                breakdownTable->columnWidth(0) > forcedBreakdownWidth,
+            "result population did not resize forced-narrow metric columns");
 
     widget<QSpinBox>(window, "workloadSizeSpinBox")->setValue(16);
     run->click();
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
                 widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible() &&
+                widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
+                !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible() &&
                 !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "old result was not cleared at new Run start");
     waitForCompleted(window);
-    requireMemoryV2InterimPresentation(window);
+    requireMemoryV2Presentation(window);
     clearScenario();
 }
 
@@ -299,22 +432,25 @@ void testCancelAndReuse()
     configureHash(window);
     auto* run = widget<QPushButton>(window, "runButton");
     auto* cancel = widget<QPushButton>(window, "cancelButton");
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
     run->click();
     waitUntil([&] { return cancel->isEnabled(); }, 5'000);
     cancel->click();
     require(status(window) == QStringLiteral("Cancelling...") && !cancel->isEnabled() &&
-                !run->isEnabled(),
+                !run->isEnabled() && !sampling->isEnabled(),
             "Cancel did not enter the Cancelling presentation state");
     waitUntil([&] { return status(window) == QStringLiteral("Benchmark cancelled"); }, 10'000);
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
                 widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
+                widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
+                !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible() &&
                 !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Cancelled result did not restore an empty idle GUI");
 
     setScenario("completed");
     run->click();
     waitForCompleted(window);
-    requireMemoryV2InterimPresentation(window);
+    requireMemoryV2Presentation(window);
     clearScenario();
 }
 
@@ -332,13 +468,15 @@ void testFailedAndReuse()
     require(!widget<QPushButton>(window, "cancelButton")->isEnabled() &&
                 widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
                 widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
+                widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
+                !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible() &&
                 !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Failed result did not restore the idle empty GUI");
 
     setScenario("completed");
     run->click();
     waitForCompleted(window);
-    requireMemoryV2InterimPresentation(window);
+    requireMemoryV2Presentation(window);
     clearScenario();
 }
 
@@ -364,6 +502,8 @@ void testSingleJsonExport()
     MainWindow window;
     window.show();
     configureHash(window);
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    sampling->setCurrentIndex(sampling->findData(2));
 
     QString target;
     bool overwrite = false;
@@ -386,17 +526,28 @@ void testSingleJsonExport()
     const auto document = QJsonDocument::fromJson(firstPayload, &parseError);
     require(parseError.error == QJsonParseError::NoError && document.isObject(),
             "successful export was not canonical JSON");
-    requireMemoryV2Export(document.object());
+    requireMemoryV2Export(document.object(), 2);
     require(messageTitle == QStringLiteral("Export complete"),
             "successful export did not report completion");
 
-        target.clear();
-        messageTitle.clear();
-        exportButton->click();
-        require(messageTitle.isEmpty() && exportButton->isEnabled(),
-            "cancelling the Single export target changed the retained Completed result");
+    sampling->setCurrentIndex(sampling->findData(4));
+    widget<QPushButton>(window, "runButton")->click();
+    waitForCompleted(window);
+    target = directory.filePath("second-single-result.json");
+    exportButton->click();
+    const auto secondPayload = readFile(target);
+    const auto secondDocument = QJsonDocument::fromJson(secondPayload, &parseError);
+    require(parseError.error == QJsonParseError::NoError && secondDocument.isObject(),
+            "second Single export was not canonical JSON");
+    requireMemoryV2Export(secondDocument.object(), 4);
 
-            target = directory.filePath("single-result.json");
+    target.clear();
+    messageTitle.clear();
+    exportButton->click();
+    require(messageTitle.isEmpty() && exportButton->isEnabled(),
+        "cancelling the Single export target changed the retained Completed result");
+
+    target = directory.filePath("single-result.json");
     const QByteArray original = "existing target";
     writeFile(target, original);
     overwrite = false;
@@ -405,22 +556,118 @@ void testSingleJsonExport()
 
     overwrite = true;
     exportButton->click();
-    require(readFile(target) == firstPayload, "approved overwrite did not replace the target");
+    require(readFile(target) == secondPayload, "approved overwrite did not replace the target");
 
     const auto parentFile = directory.filePath("not-a-directory");
     writeFile(parentFile, "parent");
     target = parentFile + "/result.json";
     exportButton->click();
-    require(status(window) == QStringLiteral(
-                "Completed; Memory v2 statistics are not supported by this view."),
+    require(status(window) == QStringLiteral("Completed"),
             "export failure changed the visible Completed status");
     require(exportButton->isEnabled(), "export failure discarded the retained result");
     require(messageTitle == QStringLiteral("Export failed"), "export failure was not reported");
 
     target = directory.filePath("retry-result.json");
     exportButton->click();
-    require(readFile(target) == firstPayload, "retry export did not persist the retained result");
+    require(readFile(target) == secondPayload, "retry export did not persist the retained result");
     require(exportButton->isEnabled(), "successful export discarded the retained result");
+    clearScenario();
+}
+
+void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
+{
+    setScenario("completed");
+    QTemporaryDir directory;
+    require(directory.isValid(), "integrated workflow directory was not created");
+
+    const auto batchInputPath = directory.filePath("equivalent-batch.json");
+    writeFile(batchInputPath,
+              R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[{"id":"equivalent","profileId":"sha256","operation":"hash","iterationsPerRun":2,"runs":2,"parameters":{"inputSizeBytes":8}}]})");
+    const auto firstSinglePath = directory.filePath("single-4ms.json");
+    const auto batchPath = directory.filePath("batch-4ms.json");
+    const auto secondSinglePath = directory.filePath("single-1ms.json");
+
+    QString selectedInput;
+    QString selectedOutput;
+    bool overwrite = false;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
+    callbacks.reportMessage = [](QWidget*, const QString&, const QString&) {};
+
+    MainWindow window;
+    window.show();
+    window.setDialogCallbacks(std::move(callbacks));
+    configureHash(window);
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    sampling->setCurrentIndex(sampling->findData(4));
+    auto* run = widget<QPushButton>(window, "runButton");
+    auto* exportButton = widget<QPushButton>(window, "exportJsonButton");
+
+    run->click();
+    require(!sampling->isEnabled(), "Single did not lock the global selector");
+    waitForCompleted(window);
+    require(sampling->isEnabled() && exportButton->isEnabled(),
+            "Single did not return to Idle with an exportable result");
+
+    selectedOutput = firstSinglePath;
+    exportButton->click();
+    const auto firstSinglePayload = readFile(firstSinglePath);
+    const auto firstSingleRoot = QJsonDocument::fromJson(firstSinglePayload).object();
+    requireMemoryV2DocumentShape(firstSingleRoot, QStringLiteral("single"), 4);
+    const auto firstSingleEntry = firstSingleRoot.value(QStringLiteral("entries"))
+        .toArray().at(0).toObject();
+    const auto firstSingleConfig = firstSingleEntry.value(QStringLiteral("config")).toObject();
+
+    selectedInput = batchInputPath;
+    widget<QPushButton>(window, "batchInputBrowseButton")->click();
+    selectedOutput = batchPath;
+    widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+    auto* batchRun = widget<QPushButton>(window, "batchRunButton");
+    batchRun->click();
+    require(!run->isEnabled() && !exportButton->isEnabled() && !sampling->isEnabled(),
+            "Batch did not preserve Single/Batch mutual exclusion and selector lock");
+    waitUntil([&] {
+        return widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed");
+    }, 30'000);
+    require(sampling->isEnabled() && batchRun->isEnabled() && exportButton->isEnabled(),
+            "Batch did not return to Idle with the retained Single result exportable");
+
+    const auto batchPayload = readFile(batchPath);
+    const auto batchRoot = QJsonDocument::fromJson(batchPayload).object();
+    requireMemoryV2DocumentShape(batchRoot, QStringLiteral("batch"), 4);
+    const auto batchEntry = batchRoot.value(QStringLiteral("entries"))
+        .toArray().at(0).toObject();
+    require(batchEntry.value(QStringLiteral("config")).toObject() == firstSingleConfig,
+            "equivalent Single and Batch configs were not semantically equal");
+    require(batchEntry.value(QStringLiteral("statistics")).toObject().keys() ==
+                firstSingleEntry.value(QStringLiteral("statistics")).toObject().keys(),
+            "Single and Batch ResultDocument statistics shapes differed");
+
+    overwrite = true;
+    const auto retainedSingleCopyPath = directory.filePath("retained-single-copy.json");
+    selectedOutput = retainedSingleCopyPath;
+    exportButton->click();
+    require(readFile(retainedSingleCopyPath) == firstSinglePayload,
+            "Batch changed the retained Single result snapshot");
+
+    sampling->setCurrentIndex(sampling->findData(1));
+    run->click();
+    waitForCompleted(window);
+    selectedOutput = secondSinglePath;
+    exportButton->click();
+    const auto secondSingleRoot = QJsonDocument::fromJson(readFile(secondSinglePath)).object();
+    requireMemoryV2DocumentShape(secondSingleRoot, QStringLiteral("single"), 1);
+    require(readFile(firstSinglePath) == firstSinglePayload &&
+                readFile(batchPath) == batchPayload &&
+                QJsonDocument::fromJson(readFile(firstSinglePath)).object()
+                .value(QStringLiteral("measurement")).toObject()
+                .value(QStringLiteral("memorySamplingIntervalMilliseconds")) == 4 &&
+                QJsonDocument::fromJson(readFile(batchPath)).object()
+                    .value(QStringLiteral("measurement")).toObject()
+                    .value(QStringLiteral("memorySamplingIntervalMilliseconds")) == 4,
+            "previous 4 ms Single/Batch outputs were changed by the later Single run");
     clearScenario();
 }
 
@@ -564,6 +811,10 @@ void testBatchRunAndCancel()
     auto* outputBrowse = widget<QPushButton>(window, "batchOutputBrowseButton");
     auto* run = widget<QPushButton>(window, "batchRunButton");
     auto* cancel = widget<QPushButton>(window, "batchCancelButton");
+    auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+    require(sampling->count() == 5 && sampling->currentData().toUInt() == 5,
+        "Batch did not expose the global measurement selector");
+    sampling->setCurrentIndex(sampling->findData(3));
     inputBrowse->click();
     require(!run->isEnabled(), "valid batch without an output target enabled Run Batch");
     outputBrowse->click();
@@ -581,6 +832,7 @@ void testBatchRunAndCancel()
     run->click();
     require(!run->isEnabled() && cancel->isEnabled() &&
         !inputBrowse->isEnabled() && !outputBrowse->isEnabled() &&
+        !sampling->isEnabled() &&
         !widget<QPushButton>(window, "runButton")->isEnabled() &&
         !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
         "BatchRunning did not enforce mutual exclusion and control locking");
@@ -592,7 +844,7 @@ void testBatchRunAndCancel()
     require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed"),
             "Batch completion did not reach the Completed terminal status");
     require(!cancel->isEnabled() && run->isEnabled() && inputBrowse->isEnabled() &&
-        outputBrowse->isEnabled(),
+        outputBrowse->isEnabled() && sampling->isEnabled(),
         "completed Batch did not return to Idle presentation");
     require(widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("2 / 2"),
             "terminal Batch did not retain the controller-supplied current entry");
@@ -609,6 +861,9 @@ void testBatchRunAndCancel()
     require(parseError.error == QJsonParseError::NoError && document.isObject() &&
         document.object().value("mode") == QStringLiteral("batch"),
         "BatchController did not produce a batch result document");
+    require(document.object().value("measurement").toObject()
+                .value("memorySamplingIntervalMilliseconds").toInt() == 3,
+            "Batch export did not preserve the selected measurement settings snapshot");
     clearScenario();
 
     setScenario("wait-before-measurement");
@@ -626,6 +881,7 @@ void testBatchRunAndCancel()
     widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->click();
     widget<QPushButton>(cancelWindow, "batchOutputBrowseButton")->click();
     auto* batchCancel = widget<QPushButton>(cancelWindow, "batchCancelButton");
+    auto* cancelSampling = widget<QComboBox>(cancelWindow, "memorySamplingIntervalComboBox");
     widget<QPushButton>(cancelWindow, "batchRunButton")->click();
     require(batchCancel->isEnabled(), "Batch Run did not enter BatchRunning presentation");
     waitUntil([&] {
@@ -638,7 +894,7 @@ void testBatchRunAndCancel()
     require(cancelWindow.isVisible(), "active Batch close with No unexpectedly closed the window");
     batchCancel->click();
     require(widget<QLabel>(cancelWindow, "batchStatusLabel")->text() == QStringLiteral("Cancelling...") &&
-                !batchCancel->isEnabled(),
+                !batchCancel->isEnabled() && !cancelSampling->isEnabled(),
         "Batch Cancel did not enter BatchCancelling presentation");
     QTimer::singleShot(0, [&] { answerMessageBox(QMessageBox::No); });
     cancelWindow.close();
@@ -1185,8 +1441,7 @@ void testModalDialogRace()
     QTimer pollTimer;
     pollTimer.setInterval(10);
     QObject::connect(&pollTimer, &QTimer::timeout, &window, [&] {
-        if (!dialogAnswered && status(window) == QStringLiteral(
-            "Completed; Memory v2 statistics are not supported by this view.")) {
+        if (!dialogAnswered && status(window) == QStringLiteral("Completed")) {
             completionObserved = true;
             dialogAnswered = tryAnswerMessageBox(QMessageBox::Yes);
             if (dialogAnswered) pollTimer.stop();
@@ -1228,6 +1483,8 @@ int main(int argc, char* argv[])
         testFailedAndReuse();
         std::cout << "CASE single-json-export\n";
         testSingleJsonExport();
+        std::cout << "CASE single-batch-single-parity\n";
+        testSingleBatchMemoryV2ParityAndSnapshotIsolation();
         std::cout << "CASE batch-gui\n";
         testBatchGui();
         std::cout << "CASE batch-run-cancel\n";

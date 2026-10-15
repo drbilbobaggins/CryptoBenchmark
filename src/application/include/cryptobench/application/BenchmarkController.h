@@ -27,6 +27,7 @@ public:
         core::MeasurementSettings measurementSettings = core::defaultMeasurementSettings());
     ~BenchmarkController() override;
 
+    void setMeasurementSettings(core::MeasurementSettings measurementSettings);
     void start(const core::BenchmarkConfig& config) override;
     void requestCancel() override;
     bool isBusy() const noexcept override;

@@ -22,6 +22,15 @@ BatchController::BatchController(QObject* parent)
     };
 }
 
+BatchController::BatchController(MeasurementSettingsProvider settingsProvider, QObject* parent)
+    : BatchController(parent)
+{
+    if (!settingsProvider) {
+        throw std::invalid_argument("BatchController requires a measurement settings provider");
+    }
+    settingsProvider_ = std::move(settingsProvider);
+}
+
 BatchController::BatchController(
     std::unique_ptr<BenchmarkSessionExecutor> executor,
     SnapshotPersister persister,

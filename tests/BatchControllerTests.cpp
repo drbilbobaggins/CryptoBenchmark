@@ -917,16 +917,18 @@ void testReentrantRestartRetiresPreviousExecutorSafely()
 
 void testMeasurementSettingsProvenanceBoundaries()
 {
-    const auto batchDefinition = definition(1);
+    const auto batchDefinition = definition(2);
     for (std::uint32_t interval = 1; interval <= 5; ++interval) {
         std::vector<std::string> events;
         std::vector<QJsonObject> snapshots;
         std::optional<MeasurementSettings> factorySettings;
+        std::size_t providerCalls = 0;
         BatchController controller(
             [&](const MeasurementSettings& settings) {
                 factorySettings = settings;
                 auto executor = std::make_unique<FakeExecutor>(
-                    std::vector<BenchmarkStatus>{BenchmarkStatus::Completed}, events);
+                    std::vector<BenchmarkStatus>{BenchmarkStatus::Completed,
+                                                 BenchmarkStatus::Completed}, events);
                 executor->setDefinitions(&batchDefinition.entries());
                 executor->setMeasurementSettings(settings);
                 return executor;
@@ -934,22 +936,35 @@ void testMeasurementSettingsProvenanceBoundaries()
             [&](const QString&, const QByteArray& payload) {
                 snapshots.push_back(QJsonDocument::fromJson(payload).object());
                 return WriteResult{true, {}};
-            }, {}, [interval] { return MeasurementSettings{interval}; });
+            }, {}, [&providerCalls, interval] {
+                ++providerCalls;
+                return MeasurementSettings{interval};
+            });
 
         controller.start(batchDefinition, QStringLiteral("provenance.json"));
         for (int iteration = 0; iteration < 20 && controller.isBusy(); ++iteration) {
             QCoreApplication::processEvents();
         }
 
-        require(!controller.isBusy() && factorySettings.has_value() &&
+        require(!controller.isBusy() && providerCalls == 1 && factorySettings.has_value() &&
                     factorySettings->memorySamplingIntervalMilliseconds == interval &&
                     controller.state().measurementSettings.has_value() &&
-                    controller.state().measurementSettings->memorySamplingIntervalMilliseconds == interval,
+                controller.state().measurementSettings->memorySamplingIntervalMilliseconds == interval &&
+                controller.state().entries.size() == 2 &&
+                controller.state().entries[0].result.has_value() &&
+                controller.state().entries[1].result.has_value() &&
+                controller.state().entries[0].result->measurementSettings.has_value() &&
+                controller.state().entries[1].result->measurementSettings.has_value() &&
+                controller.state().entries[0].result->measurementSettings->memorySamplingIntervalMilliseconds == interval &&
+                controller.state().entries[1].result->measurementSettings->memorySamplingIntervalMilliseconds == interval,
                 "valid measurement settings were not retained consistently");
-        require(!snapshots.empty() &&
+        require(snapshots.size() >= 3 &&
                     snapshots.front().value("measurement").toObject()
                             .value("memorySamplingIntervalMilliseconds").toInt() == interval,
-                "initial checkpoint did not preserve the settings snapshot");
+            "initial and intermediate checkpoints were not captured");
+        require(snapshots.back().value("measurement").toObject()
+                .value("memorySamplingIntervalMilliseconds").toInt() == interval,
+            "final checkpoint did not preserve the settings snapshot");
         for (const auto& snapshot : snapshots) {
             require(snapshot.value("measurement").toObject()
                             .value("memorySamplingIntervalMilliseconds").toInt() == interval,

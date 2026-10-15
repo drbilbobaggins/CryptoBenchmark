@@ -50,6 +50,7 @@ private:
     };
 
     void populateCategories();
+    void populateMeasurementSettings();
     void populateProfiles(cryptobench::core::PrimitiveCategory category, bool preserveOperation);
     void populateOperations(const cryptobench::core::AlgorithmProfileId* profileId, bool preserveOperation);
     void updateInputControls();

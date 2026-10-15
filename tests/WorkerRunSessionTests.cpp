@@ -270,11 +270,13 @@ void testCleanupWatchdogRearmsWhileWorkerRemainsActive()
     int killRequests = 0;
     int cleanupTimeoutsArmed = 0;
     int terminalSignals = 0;
+    bool processFinishedObserved = false;
     application::WorkerRunSessionTestHooks hooks;
     hooks.workerStarted = [&](qint64 pid) { workerPid = pid; };
     hooks.processState = [&] { return simulatedState; };
     hooks.killProcess = [&] { ++killRequests; };
     hooks.cleanupTimeoutArmed = [&] { ++cleanupTimeoutsArmed; };
+    hooks.processFinishedObserved = [&] { processFinishedObserved = true; };
     hooks.cleanupTimeoutMilliseconds = [] { return 1; };
     application::WorkerRunSession session(nullptr, {}, std::move(hooks));
     bool cancelled = false;
@@ -292,10 +294,14 @@ void testCleanupWatchdogRearmsWhileWorkerRemainsActive()
 
         waitUntil([&] { return workerPid > 0 && !processIsRunning(static_cast<DWORD>(workerPid)); },
               "active cleanup test worker did not terminate after kill");
-    simulatedState = QProcess::NotRunning;
-    QMetaObject::invokeMethod(&session, "onCleanupTimeout", Qt::DirectConnection);
+        QMetaObject::invokeMethod(&session, [&] {
+            simulatedState = QProcess::NotRunning;
+            QMetaObject::invokeMethod(&session, "onCleanupTimeout", Qt::DirectConnection);
+        }, Qt::QueuedConnection);
     waitUntil([&] { return !session.isActive(); },
           "cleanup did not finalize after simulated NotRunning state");
+    waitUntil([&] { return processFinishedObserved; },
+              "real process-finished notification was not observed before destruction");
     clearScenario();
     require(cancelled && terminalSignals == 1,
         "active cleanup did not emit exactly one cancellation after termination");
@@ -309,6 +315,7 @@ void testCleanupRefreshesAlreadyObservedNotRunningState()
     QProcess::ProcessState simulatedState = QProcess::Running;
     qint64 workerPid = 0;
     int terminalSignals = 0;
+    bool processFinishedObserved = false;
     application::WorkerRunSessionTestHooks hooks;
     hooks.workerStarted = [&](qint64 pid) { workerPid = pid; };
     hooks.processState = [&] { return simulatedState; };
@@ -317,6 +324,7 @@ void testCleanupRefreshesAlreadyObservedNotRunningState()
     terminateProcess(static_cast<DWORD>(workerPid));
     simulatedState = QProcess::NotRunning;
     };
+    hooks.processFinishedObserved = [&] { processFinishedObserved = true; };
     application::WorkerRunSession session(nullptr, {}, std::move(hooks));
     bool cancelled = false;
     QObject::connect(&session, &application::WorkerRunSession::cancelled,
@@ -328,6 +336,8 @@ void testCleanupRefreshesAlreadyObservedNotRunningState()
     session.cancel();
     waitUntil([&] { return !session.isActive(); },
           "cleanup did not refresh the already observed NotRunning state");
+    waitUntil([&] { return processFinishedObserved; },
+              "real process-finished notification was not observed before destruction");
     clearScenario();
     require(cancelled && terminalSignals == 1,
         "already observed NotRunning state did not produce one cancellation");
