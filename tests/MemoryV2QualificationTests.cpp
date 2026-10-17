@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -10,6 +11,7 @@
 #include <QTemporaryDir>
 
 #include <iostream>
+#include <array>
 #include <stdexcept>
 #include <vector>
 
@@ -718,6 +720,100 @@ void testExecutionLifetimeStructure()
             "synthetic CPU work is inside the execution allocation lifetime");
 }
 
+void testConfirmatoryManifestB0()
+{
+    auto manifest = tests::defaultExploratoryPilotManifest();
+    manifest.phase = QStringLiteral("confirmatory");
+    manifest.campaignId = QStringLiteral("in-memory-confirmatory-test");
+    manifest.repetitions = 1;
+    const auto encoded = tests::encodeQualificationCampaignManifest(manifest);
+    const auto reparsed = tests::parseQualificationCampaignManifest(encoded);
+    require(reparsed.phase == QStringLiteral("confirmatory") &&
+                reparsed.campaignId == manifest.campaignId &&
+                reparsed.repetitions == 1 && reparsed.modes.size() == manifest.modes.size() &&
+                reparsed.cases.size() == manifest.cases.size(),
+            "confirmatory in-memory manifest round-trip changed semantics");
+    require(manifest.modes.front().mode == tests::QualificationSamplingMode::BoundaryOnlyControl,
+            "confirmatory OFF mode was not preserved");
+
+    auto invalidPhase = encoded.object();
+    invalidPhase.insert("phase", QStringLiteral("gate-c"));
+    requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(QJsonDocument(invalidPhase))); },
+                   "unsupported manifest phase was accepted");
+    auto unknownField = encoded.object();
+    unknownField.insert("unexpected", true);
+    requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(QJsonDocument(unknownField))); },
+                   "unknown confirmatory manifest field was accepted");
+    const auto duplicatePhase = QStringLiteral(
+        "{\"format\":\"cryptobenchmark-memory-v2-campaign\",\"schemaVersion\":1,"
+        "\"campaignId\":\"m19.2-gate-b-confirmatory-v1\",\"phase\":\"confirmatory\","
+        "\"\\u0070hase\":\"pilot\",\"seed\":\"2026101701\",\"repetitions\":20,"
+        "\"modes\":[],\"cases\":[]}");
+    requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(duplicatePhase)); },
+                   "escaped duplicate phase field was accepted");
+}
+
+int validateFrozenManifestFile(const QString& path)
+{
+    QFile file(path);
+    require(file.open(QIODevice::ReadOnly), "frozen manifest could not be read");
+    const auto bytes = file.readAll();
+    const auto expectedHash = QStringLiteral(
+        "460B8B483A4A2349EF3B455388C9676EC0DCFC90AF2A8E7643FF70C33274E707");
+    require(QString::fromLatin1(
+                QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()).toUpper() ==
+                expectedHash,
+            "frozen confirmatory manifest hash mismatch");
+    const auto manifest = tests::parseQualificationCampaignManifest(QString::fromUtf8(bytes));
+    require(manifest.campaignId == QStringLiteral("m19.2-gate-b-confirmatory-v1") &&
+                manifest.phase == QStringLiteral("confirmatory") &&
+                manifest.seed == 2'026'101'701ULL && manifest.repetitions == 20 &&
+                manifest.cases.size() == 12 && manifest.modes.size() == 4,
+            "frozen confirmatory manifest identity mismatch");
+    require(manifest.modes[0].mode == tests::QualificationSamplingMode::BoundaryOnlyControl &&
+                manifest.modes[1].intervalMilliseconds == 5 &&
+                manifest.modes[2].intervalMilliseconds == 2 &&
+                manifest.modes[3].intervalMilliseconds == 1,
+            "frozen confirmatory mode ordering mismatch");
+    struct ExpectedCase {
+        const char* id;
+        std::uint64_t preparation;
+        std::uint64_t execution;
+        std::uint32_t preparationHold;
+        std::uint32_t executionHold;
+        bool releasePreparation;
+        bool releaseExecution;
+    };
+    const std::array<ExpectedCase, 12> expected{{
+        ExpectedCase{"quiet", 0, 0, 80, 80, true, true},
+        {"preparation-retained", 8388608, 0, 80, 80, false, true},
+        {"execution-retained", 0, 8388608, 80, 80, true, false},
+        {"preparation-transient-20ms", 8388608, 0, 20, 80, true, true},
+        {"execution-transient-20ms", 0, 8388608, 80, 20, true, true},
+        {"distinct-phases", 8388608, 16777216, 80, 80, false, false},
+        {"preparation-transient-1ms", 8388608, 0, 1, 80, true, true},
+        {"execution-transient-1ms", 0, 8388608, 80, 1, true, true},
+        {"preparation-transient-2ms", 8388608, 0, 2, 80, true, true},
+        {"execution-transient-2ms", 0, 8388608, 80, 2, true, true},
+        {"preparation-transient-5ms", 8388608, 0, 5, 80, true, true},
+        {"execution-transient-5ms", 0, 8388608, 80, 5, true, true}}};
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        const auto& actual = manifest.cases[index];
+        const auto& wanted = expected[index];
+        require(actual.caseId == QString::fromLatin1(wanted.id) &&
+                    actual.scenario.preparationBytes == wanted.preparation &&
+                    actual.scenario.executionBytes == wanted.execution &&
+                    actual.scenario.preparationHoldMilliseconds == wanted.preparationHold &&
+                    actual.scenario.executionHoldMilliseconds == wanted.executionHold &&
+                    actual.scenario.releasePreparationBeforeBoundary == wanted.releasePreparation &&
+                    actual.scenario.releaseExecutionBeforeEnd == wanted.releaseExecution,
+                "frozen confirmatory case mismatch");
+    }
+    require(manifest.cases.size() * manifest.modes.size() * manifest.repetitions == 960,
+            "frozen confirmatory planned count is not 960");
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -725,6 +821,9 @@ int main(int argc, char* argv[])
     QCoreApplication application(argc, argv);
     try {
         const auto arguments = application.arguments();
+        if (arguments.size() == 3 && arguments[1] == QStringLiteral("--validate-frozen-manifest")) {
+            return validateFrozenManifestFile(arguments[2]);
+        }
         if (arguments.size() == 3 && arguments[1] == QStringLiteral("--smoke-output")) {
             return smokeToPath(arguments[2]);
         }
@@ -754,6 +853,7 @@ int main(int argc, char* argv[])
         testCampaignVerifierRejectsPersistedMutations();
         testIndeterminateCountsAndRawCollision();
         testExecutionLifetimeStructure();
+        testConfirmatoryManifestB0();
         std::cout << "PASS Memory v2 qualification foundation\n";
         return 0;
     } catch (const std::exception& error) {

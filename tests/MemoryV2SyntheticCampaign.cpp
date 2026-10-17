@@ -62,7 +62,8 @@ void validateCampaignIdentifier(const QString& value, const char* field)
 void validateCampaignManifest(const QualificationCampaignManifest& manifest)
 {
     validateCampaignIdentifier(manifest.campaignId, "campaignId");
-    if (manifest.phase != QStringLiteral("pilot") || manifest.repetitions == 0 ||
+        if ((manifest.phase != QStringLiteral("pilot") &&
+            manifest.phase != QStringLiteral("confirmatory")) || manifest.repetitions == 0 ||
         manifest.repetitions > 100 || manifest.modes.empty() || manifest.cases.empty()) {
         throw std::invalid_argument("campaign manifest bounds or phase are invalid");
     }
@@ -498,7 +499,9 @@ QualificationCampaignManifest parseQualificationCampaignManifest(const QJsonDocu
     result.phase = object.value("phase").toString();
     result.seed = requiredU64(object, "seed");
     result.repetitions = requiredU32(object, "repetitions");
-    if (result.campaignId.isEmpty() || result.phase != QStringLiteral("pilot") || result.repetitions == 0) {
+    if (result.campaignId.isEmpty() ||
+        (result.phase != QStringLiteral("pilot") && result.phase != QStringLiteral("confirmatory")) ||
+        result.repetitions == 0) {
         throw std::invalid_argument("manifest identity or repetitions are invalid");
     }
     for (const auto& value : object.value("modes").toArray()) {
