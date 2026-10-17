@@ -803,6 +803,56 @@ add_dependencies(CryptoBenchmarkWorkerMemorySamplerTests CryptoBenchmarkWorker)
 
 add_test(NAME CryptoBenchmarkWorkerMemorySamplerTests COMMAND CryptoBenchmarkWorkerMemorySamplerTests)
 
+add_executable(CryptoBenchmarkMemoryV2SyntheticWorker
+	MemoryV2SyntheticWorker.cpp
+	MemoryV2SyntheticScenario.cpp
+	MemoryV2SyntheticScenario.h
+)
+
+set_target_properties(CryptoBenchmarkMemoryV2SyntheticWorker
+	PROPERTIES
+		OUTPUT_NAME SyntheticMemoryV2Worker
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkMemoryV2SyntheticWorker
+	PRIVATE
+		cryptobench_ipc
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_executable(CryptoBenchmarkMemoryV2QualificationTests
+	MemoryV2Qualification.cpp
+	MemoryV2Qualification.h
+	MemoryV2QualificationTests.cpp
+	MemoryV2SyntheticScenario.cpp
+	MemoryV2SyntheticScenario.h
+)
+
+set_target_properties(CryptoBenchmarkMemoryV2QualificationTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkMemoryV2QualificationTests
+	PRIVATE
+		cryptobench_application
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+target_compile_definitions(CryptoBenchmarkMemoryV2QualificationTests
+	PRIVATE
+		CRYPTOBENCH_QUALIFICATION_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+)
+
+add_dependencies(CryptoBenchmarkMemoryV2QualificationTests CryptoBenchmarkMemoryV2SyntheticWorker)
+
+add_test(NAME CryptoBenchmarkMemoryV2QualificationTests COMMAND CryptoBenchmarkMemoryV2QualificationTests)
+
 add_executable(CryptoBenchmarkWindowsWorkerProcessTests
 	WindowsWorkerProcessTests.cpp
 )
