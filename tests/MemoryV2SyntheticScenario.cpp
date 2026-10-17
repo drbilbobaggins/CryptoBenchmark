@@ -161,6 +161,12 @@ QString syntheticOutcomeName(SyntheticOutcome outcome)
 
 void validateSyntheticScenario(const SyntheticScenario& scenario)
 {
+    if (scenario.outcome != SyntheticOutcome::Completed &&
+        scenario.outcome != SyntheticOutcome::WorkerFailure &&
+        scenario.outcome != SyntheticOutcome::AbnormalExit &&
+        scenario.outcome != SyntheticOutcome::WaitForCancellation) {
+        throw std::invalid_argument("synthetic outcome enum is invalid");
+    }
     if (scenario.preparationBytes > kMaximumAllocationBytes ||
         scenario.executionBytes > kMaximumAllocationBytes) {
         throw std::invalid_argument("synthetic allocation exceeds qualification limit");

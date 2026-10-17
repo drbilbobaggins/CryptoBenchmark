@@ -1,8 +1,12 @@
 #include "MemoryV2Qualification.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QSaveFile>
 #include <QTemporaryDir>
 
 #include <iostream>
@@ -84,8 +88,9 @@ void testNoAllocationBoundaryOnlyAndArtifact()
             "qualification did not restore the caller environment");
     if (wasSet) qputenv("CRYPTOBENCH_M19_SYNTHETIC_SCENARIO", previous);
     else qunsetenv("CRYPTOBENCH_M19_SYNTHETIC_SCENARIO");
-    require(run.status == QStringLiteral("completed") && run.normalExit,
-            "boundary-only no-allocation run did not complete");
+        require(run.status == QStringLiteral("completed") && run.normalExit,
+            (std::string("boundary-only no-allocation run did not complete: ") +
+             run.error.toStdString()).c_str());
     requireLifecycle(run);
     require(run.raw.preparationSampleCount == 0 && run.raw.executionSampleCount == 0,
             "boundary-only control produced periodic samples");
@@ -272,6 +277,94 @@ void testFailureCancellationAndParserRejection()
     requireInvalid([] { tests::parseSyntheticScenario("{\"preparationBytes\":\"1\",\"executionBytes\":\"2\",\"preparationHoldMilliseconds\":\"10\",\"executionHoldMilliseconds\":\"10\",\"releasePreparationBeforeBoundary\":\"true\",\"releaseExecutionBeforeEnd\":true,\"outcome\":\"completed\"}"); }, "invalid boolean accepted");
 }
 
+    void testCampaignManifestSummaryAndCollision()
+    {
+        auto manifest = tests::defaultExploratoryPilotManifest();
+        manifest.repetitions = 1;
+        manifest.cases.resize(1);
+        manifest.modes.resize(1);
+        QTemporaryDir firstDirectory;
+        QTemporaryDir secondDirectory;
+        require(firstDirectory.isValid() && secondDirectory.isValid(),
+            "campaign temporary directories unavailable");
+        const auto encoded = tests::encodeQualificationCampaignManifest(manifest);
+        const auto parsed = tests::parseQualificationCampaignManifest(encoded);
+        require(parsed.campaignId == manifest.campaignId && parsed.seed == manifest.seed &&
+            parsed.cases.size() == 1 && parsed.modes.size() == 1,
+            "campaign manifest round-trip changed identity or grid");
+        const auto first = tests::runQualificationCampaign(parsed, firstDirectory.path());
+        const auto second = tests::runQualificationCampaign(parsed, secondDirectory.path());
+        tests::verifyQualificationCampaign(firstDirectory.path());
+        tests::verifyQualificationCampaign(secondDirectory.path());
+        require(first.object().value("manifestSha256") == second.object().value("manifestSha256"),
+            "seeded campaign manifest identity was not stable");
+        require(first.object().value("runs").toArray().size() == 1 &&
+            first.object().value("groups").toObject().size() == 1,
+            "campaign summary did not retain one raw run and one group");
+        requireInvalid([&] { static_cast<void>(tests::runQualificationCampaign(parsed, firstDirectory.path())); },
+               "campaign output collision was silently overwritten");
+        auto invalid = encoded.object();
+        invalid.insert("modes", QJsonArray{QStringLiteral("3")});
+        requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(QJsonDocument(invalid))); },
+               "unsupported campaign mode was accepted");
+        auto duplicateModeObject = encoded.object();
+        duplicateModeObject.insert("modes", QJsonArray{QStringLiteral("off"), QStringLiteral("off")});
+        requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(QJsonDocument(duplicateModeObject))); },
+                       "duplicate campaign mode was accepted");
+        auto duplicateCaseObject = encoded.object();
+        duplicateCaseObject.insert("cases", QJsonArray{
+            QJsonObject{{"caseId", "duplicate"}, {"scenario", encoded.object().value("cases").toArray().first().toObject().value("scenario")} },
+            QJsonObject{{"caseId", "duplicate"}, {"scenario", encoded.object().value("cases").toArray().first().toObject().value("scenario")} }});
+        requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(QJsonDocument(duplicateCaseObject))); },
+                       "duplicate campaign case was accepted");
+        auto unsafeCaseObject = encoded.object();
+        auto unsafeCases = unsafeCaseObject.value("cases").toArray();
+        auto unsafeCase = unsafeCases.first().toObject();
+        unsafeCase.insert("caseId", "../unsafe");
+        unsafeCases[0] = unsafeCase;
+        unsafeCaseObject.insert("cases", unsafeCases);
+        requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(QJsonDocument(unsafeCaseObject))); },
+                       "unsafe campaign case identifier was accepted");
+        const auto duplicateManifest = QStringLiteral(
+            "{\"format\":\"cryptobenchmark-memory-v2-campaign\",\"schemaVersion\":1,"
+            "\"campaignId\":\"x\",\"phase\":\"pilot\",\"seed\":\"1\","
+            "\"repetitions\":1,\"modes\":[\"off\"],\"cases\":[],"
+            "\"\\u0063ampaignId\":\"y\"}");
+        requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(duplicateManifest)); },
+                       "escaped duplicate manifest field was accepted");
+        auto unknownCaseObject = encoded.object();
+        auto unknownCases = unknownCaseObject.value("cases").toArray();
+        auto unknownCase = unknownCases.first().toObject();
+        unknownCase.insert("unexpected", true);
+        unknownCases[0] = unknownCase;
+        unknownCaseObject.insert("cases", unknownCases);
+        requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(QJsonDocument(unknownCaseObject))); },
+                       "unknown campaign case member was accepted");
+        auto reservedCaseObject = encoded.object();
+        auto reservedCases = reservedCaseObject.value("cases").toArray();
+        auto reservedCase = reservedCases.first().toObject();
+        reservedCase.insert("caseId", "CON");
+        reservedCases[0] = reservedCase;
+        reservedCaseObject.insert("cases", reservedCases);
+        requireInvalid([&] { static_cast<void>(tests::parseQualificationCampaignManifest(QJsonDocument(reservedCaseObject))); },
+                       "reserved Windows case identifier was accepted");
+        auto invalidEnum = manifest;
+        invalidEnum.modes[0].mode = static_cast<tests::QualificationSamplingMode>(99);
+        requireInvalid([&] { static_cast<void>(tests::encodeQualificationCampaignManifest(invalidEnum)); },
+                       "invalid direct campaign mode enum was accepted");
+        auto invalidOutcome = manifest;
+        invalidOutcome.cases[0].scenario.outcome = static_cast<tests::SyntheticOutcome>(99);
+        requireInvalid([&] { static_cast<void>(tests::encodeQualificationCampaignManifest(invalidOutcome)); },
+                       "invalid direct synthetic outcome enum was accepted");
+        auto failedManifest = manifest;
+        failedManifest.cases.front().scenario.outcome = tests::SyntheticOutcome::WorkerFailure;
+        QTemporaryDir failedDirectory;
+        const auto failedSummary = tests::runQualificationCampaign(failedManifest, failedDirectory.path());
+        require(failedSummary.object().value("status") == QStringLiteral("failed") &&
+                    failedSummary.object().value("failedRuns").toInt() == 1,
+                "failed campaign was reported as completed");
+    }
+
 int smokeToPath(const QString& path)
 {
     const tests::SyntheticScenario scenario{8ULL * 1024U * 1024U, 8ULL * 1024U * 1024U,
@@ -285,6 +378,346 @@ int smokeToPath(const QString& path)
     return run.status == QStringLiteral("completed") ? 0 : 1;
 }
 
+void testCampaignVerifierRejectsPersistedMutations()
+{
+    auto manifest = tests::defaultExploratoryPilotManifest();
+    manifest.repetitions = 1;
+    manifest.cases.resize(1);
+    manifest.modes.resize(1);
+    QTemporaryDir sourceDirectory;
+    require(sourceDirectory.isValid(), "verifier source directory unavailable");
+    static_cast<void>(tests::runQualificationCampaign(manifest, sourceDirectory.path()));
+
+    const auto copyCampaign = [&](QTemporaryDir& destination, const QString& source) {
+        require(destination.isValid(), "verifier mutation directory unavailable");
+        QDir().mkpath(destination.filePath(QStringLiteral("runs")));
+        for (const auto& name : {QStringLiteral("manifest.json"), QStringLiteral("summary.json")}) {
+            require(QFile::copy(QDir(source).filePath(name), destination.filePath(name)),
+                    "verifier fixture copy failed");
+        }
+        const auto files = QDir(QDir(source).filePath(QStringLiteral("runs")))
+            .entryList(QStringList{QStringLiteral("*.json")}, QDir::Files);
+        for (const auto& file : files) {
+            require(QFile::copy(QDir(QDir(source).filePath(QStringLiteral("runs"))).filePath(file),
+                                QDir(destination.filePath(QStringLiteral("runs"))).filePath(file)),
+                    "verifier raw fixture copy failed");
+        }
+    };
+    const auto requireRejected = [](const QString& path, const char* message,
+                                    const char* expectedDiagnostic = nullptr) {
+        bool rejected = false;
+        try { tests::verifyQualificationCampaign(path); }
+        catch (const std::invalid_argument& error) {
+            rejected = expectedDiagnostic == nullptr ||
+                QString::fromUtf8(error.what()).contains(QString::fromLatin1(expectedDiagnostic));
+        }
+        if (!rejected) throw std::runtime_error(message);
+    };
+
+    QTemporaryDir aggregateDirectory;
+    copyCampaign(aggregateDirectory, sourceDirectory.path());
+    {
+        QFile file(aggregateDirectory.filePath(QStringLiteral("summary.json")));
+        require(file.open(QIODevice::ReadOnly), "summary fixture open failed");
+        auto document = QJsonDocument::fromJson(file.readAll());
+        file.close();
+        auto root = document.object();
+        auto groups = root.value("groups").toObject();
+        auto group = groups.begin();
+        auto groupObject = group.value().toObject();
+        groupObject.insert("completed", groupObject.value("completed").toInt() + 1);
+        groups.insert(group.key(), groupObject);
+        root.insert("groups", groups);
+        QSaveFile output(aggregateDirectory.filePath(QStringLiteral("summary.json")));
+        require(output.open(QIODevice::WriteOnly), "summary fixture write failed");
+        const auto bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+        require(output.write(bytes) == bytes.size() && output.commit(), "summary fixture commit failed");
+    }
+    requireRejected(aggregateDirectory.path(), "aggregate statistic tampering was accepted");
+
+    QTemporaryDir corruptDirectory;
+    copyCampaign(corruptDirectory, sourceDirectory.path());
+    const auto rawFiles = QDir(corruptDirectory.filePath(QStringLiteral("runs"))).entryList(QStringList{"*.json"}, QDir::Files);
+    QFile corrupt(QDir(corruptDirectory.filePath(QStringLiteral("runs"))).filePath(rawFiles.front()));
+    require(corrupt.open(QIODevice::Append), "raw corruption fixture open failed");
+    corrupt.write("x");
+    corrupt.close();
+    requireRejected(corruptDirectory.path(), "raw corruption was accepted");
+
+    QTemporaryDir missingDirectory;
+    copyCampaign(missingDirectory, sourceDirectory.path());
+    require(QFile::remove(QDir(missingDirectory.filePath(QStringLiteral("runs"))).filePath(rawFiles.front())),
+            "raw removal fixture failed");
+    requireRejected(missingDirectory.path(), "missing raw artifact was accepted");
+
+    QTemporaryDir extraDirectory;
+    copyCampaign(extraDirectory, sourceDirectory.path());
+    require(QFile::copy(QDir(extraDirectory.filePath(QStringLiteral("runs"))).filePath(rawFiles.front()),
+                        QDir(extraDirectory.filePath(QStringLiteral("runs"))).filePath(QStringLiteral("extra.json"))),
+            "extra raw fixture failed");
+    requireRejected(extraDirectory.path(), "extra raw artifact was accepted");
+
+    auto multiManifest = manifest;
+    multiManifest.repetitions = 2;
+    QTemporaryDir multiDirectory;
+    require(multiDirectory.isValid(), "multi-run verifier fixture unavailable");
+    static_cast<void>(tests::runQualificationCampaign(multiManifest, multiDirectory.path()));
+    const auto multiRawFiles = QDir(multiDirectory.filePath(QStringLiteral("runs")))
+        .entryList(QStringList{QStringLiteral("*.json")}, QDir::Files);
+    require(multiRawFiles.size() == 2, "multi-run verifier fixture did not produce two runs");
+
+    const auto mutateRawAndUpdateHash = [&](const QString& directory,
+                                            const QString& fileName,
+                                            const std::function<void(QJsonObject&)>& mutation) {
+        const auto rawPath = QDir(directory).filePath(QStringLiteral("runs/") + fileName);
+        QFile rawFile(rawPath);
+        require(rawFile.open(QIODevice::ReadOnly),
+            (std::string("mutation raw open failed: ") + rawPath.toStdString()).c_str());
+        auto document = QJsonDocument::fromJson(rawFile.readAll());
+        rawFile.close();
+        auto root = document.object();
+        mutation(root);
+        QSaveFile output(rawPath);
+        require(output.open(QIODevice::WriteOnly), "mutation raw write failed");
+        const auto bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+        require(output.write(bytes) == bytes.size() && output.commit(), "mutation raw commit failed");
+        QFile summaryFile(QDir(directory).filePath(QStringLiteral("summary.json")));
+        require(summaryFile.open(QIODevice::ReadOnly), "mutation summary open failed");
+        auto summary = QJsonDocument::fromJson(summaryFile.readAll()).object();
+        summaryFile.close();
+        auto runs = summary.value("runs").toArray();
+        for (int index = 0; index < runs.size(); ++index) {
+            auto entry = runs[index].toObject();
+            if (entry.value("path").toString() == QStringLiteral("runs/") + fileName) {
+                entry.insert("sha256", QString::fromLatin1(
+                    QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()));
+                runs[index] = entry;
+            }
+        }
+        summary.insert("runs", runs);
+        QSaveFile summaryOutput(QDir(directory).filePath(QStringLiteral("summary.json")));
+        require(summaryOutput.open(QIODevice::WriteOnly), "mutation summary write failed");
+        const auto summaryBytes = QJsonDocument(summary).toJson(QJsonDocument::Indented);
+        require(summaryOutput.write(summaryBytes) == summaryBytes.size() && summaryOutput.commit(),
+                "mutation summary commit failed");
+    };
+
+    const auto secondRaw = multiRawFiles[1];
+    const auto firstRaw = multiRawFiles[0];
+    QTemporaryDir identityDirectory;
+    copyCampaign(identityDirectory, multiDirectory.path());
+    const auto identitySource = QDir(multiDirectory.path()).filePath(QStringLiteral("runs/") + firstRaw);
+    const auto identityTarget = QDir(multiDirectory.path()).filePath(QStringLiteral("runs/") + secondRaw);
+    QFile firstIdentityFile(identitySource);
+    QFile secondIdentityFile(identityTarget);
+    require(firstIdentityFile.open(QIODevice::ReadOnly) && secondIdentityFile.open(QIODevice::ReadOnly),
+            "identity fixture open failed");
+    const auto firstIdentity = QJsonDocument::fromJson(firstIdentityFile.readAll()).object()
+        .value("lifecycle").toObject();
+    static_cast<void>(QJsonDocument::fromJson(secondIdentityFile.readAll()));
+    secondIdentityFile.close();
+    mutateRawAndUpdateHash(identityDirectory.path(), secondRaw, [&](QJsonObject& root) {
+        auto lifecycle = root.value("lifecycle").toObject();
+        lifecycle.insert("workerPid", firstIdentity.value("workerPid"));
+        lifecycle.insert("processCreationTime100ns", firstIdentity.value("processCreationTime100ns"));
+        root.insert("lifecycle", lifecycle);
+    });
+    requireRejected(identityDirectory.path(), "worker identity reuse was accepted", "worker identity was reused");
+
+    QTemporaryDir indeterminateDirectory;
+    copyCampaign(indeterminateDirectory, multiDirectory.path());
+    mutateRawAndUpdateHash(indeterminateDirectory.path(), secondRaw, [&](QJsonObject& root) {
+        auto lifecycle = root.value("lifecycle").toObject();
+        lifecycle.insert("terminationStatus", "indeterminate");
+        root.insert("lifecycle", lifecycle);
+    });
+    requireRejected(indeterminateDirectory.path(), "indeterminate termination was accepted", "lifecycle proof");
+
+    QTemporaryDir lifetimeDirectory;
+    copyCampaign(lifetimeDirectory, multiDirectory.path());
+    mutateRawAndUpdateHash(lifetimeDirectory.path(), firstRaw, [&](QJsonObject& root) {
+        auto scenario = root.value("scenario").toObject();
+        scenario.remove("observedPreparationLifetimeNanoseconds");
+        root.insert("scenario", scenario);
+    });
+    requireRejected(lifetimeDirectory.path(), "missing lifetime evidence was accepted", "lifetime evidence");
+
+    QTemporaryDir scenarioDirectory;
+    copyCampaign(scenarioDirectory, multiDirectory.path());
+    mutateRawAndUpdateHash(scenarioDirectory.path(), firstRaw, [&](QJsonObject& root) {
+        auto scenario = root.value("scenario").toObject();
+        scenario.insert("releasePreparationBeforeBoundary", !scenario.value("releasePreparationBeforeBoundary").toBool());
+        root.insert("scenario", scenario);
+    });
+    requireRejected(scenarioDirectory.path(), "scenario mismatch was accepted", "scenario mismatch");
+
+    auto statisticsManifest = tests::defaultExploratoryPilotManifest();
+    statisticsManifest.repetitions = 2;
+    statisticsManifest.cases = {
+        {QStringLiteral("preparation-retained"), {8ULL * 1024U * 1024U, 0, 80, 80, false, true}},
+        {QStringLiteral("execution-retained"), {0, 8ULL * 1024U * 1024U, 80, 80, true, false}},
+        {QStringLiteral("preparation-transient"), {8ULL * 1024U * 1024U, 0, 80, 80, true, true}}};
+    statisticsManifest.modes = {{tests::QualificationSamplingMode::Periodic, 5}};
+    QTemporaryDir statisticsSource;
+    require(statisticsSource.isValid(), "statistics fixture unavailable");
+    static_cast<void>(tests::runQualificationCampaign(statisticsManifest, statisticsSource.path()));
+    const auto mutateGroupsAndReject = [&](const char* name,
+                                           const std::function<void(QJsonObject&)>& mutation) {
+        QTemporaryDir directory;
+        copyCampaign(directory, statisticsSource.path());
+        QFile file(directory.filePath(QStringLiteral("summary.json")));
+        require(file.open(QIODevice::ReadOnly), "group mutation summary open failed");
+        auto root = QJsonDocument::fromJson(file.readAll()).object();
+        file.close();
+        auto groups = root.value("groups").toObject();
+        mutation(groups);
+        root.insert("groups", groups);
+        QSaveFile output(directory.filePath(QStringLiteral("summary.json")));
+        require(output.open(QIODevice::WriteOnly), "group mutation summary write failed");
+        const auto bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+        require(output.write(bytes) == bytes.size() && output.commit(), "group mutation summary commit failed");
+        requireRejected(directory.path(), name, "campaign group statistics mismatch");
+    };
+    mutateGroupsAndReject("group add mutation was accepted", [](QJsonObject& groups) {
+        groups.insert("unexpected/5", QJsonObject{});
+    });
+    mutateGroupsAndReject("group removal mutation was accepted", [](QJsonObject& groups) {
+        groups.remove(QStringLiteral("preparation-retained/5"));
+    });
+    mutateGroupsAndReject("group rename mutation was accepted", [](QJsonObject& groups) {
+        const auto value = groups.take(QStringLiteral("preparation-retained/5"));
+        groups.insert(QStringLiteral("renamed/5"), value);
+    });
+    mutateGroupsAndReject("preparation peak ratio mutation was accepted", [](QJsonObject& groups) {
+        auto value = groups.value("preparation-retained/5").toObject();
+        auto ratio = value.value("preparationPeakRatio").toObject();
+        ratio.insert("median", ratio.value("median").toDouble() + 0.25);
+        value.insert("preparationPeakRatio", ratio);
+        groups.insert("preparation-retained/5", value);
+    });
+    mutateGroupsAndReject("execution peak ratio mutation was accepted", [](QJsonObject& groups) {
+        auto value = groups.value("execution-retained/5").toObject();
+        auto ratio = value.value("executionPeakRatio").toObject();
+        ratio.insert("max", ratio.value("max").toDouble() + 0.25);
+        value.insert("executionPeakRatio", ratio);
+        groups.insert("execution-retained/5", value);
+    });
+    mutateGroupsAndReject("Wilson interval mutation was accepted", [](QJsonObject& groups) {
+        auto value = groups.value("preparation-transient/5").toObject();
+        auto interval = value.value("transientCaptureWilson95").toObject();
+        interval.insert("low", interval.value("low").toDouble() + 0.01);
+        value.insert("transientCaptureWilson95", interval);
+        groups.insert("preparation-transient/5", value);
+    });
+    mutateGroupsAndReject("boundary residual mutation was accepted", [](QJsonObject& groups) {
+        auto value = groups.value("execution-retained/5").toObject();
+        auto residual = value.value("executionBoundaryResidual").toObject();
+        residual.insert("median", QString::number(residual.value("median").toString().toLongLong() + 1));
+        value.insert("executionBoundaryResidual", residual);
+        groups.insert("execution-retained/5", value);
+    });
+    mutateGroupsAndReject("sample distribution mutation was accepted", [](QJsonObject& groups) {
+        auto value = groups.value("preparation-retained/5").toObject();
+        auto distribution = value.value("preparationSampleCountDistribution").toObject();
+        distribution.insert("max", QString::number(distribution.value("max").toString().toULongLong() + 1));
+        value.insert("preparationSampleCountDistribution", distribution);
+        groups.insert("preparation-retained/5", value);
+    });
+    mutateGroupsAndReject("phase consistency mutation was accepted", [](QJsonObject& groups) {
+        auto value = groups.value("preparation-retained/5").toObject();
+        value.insert("phaseConsistencyNumerator", value.value("phaseConsistencyNumerator").toInt() - 1);
+        groups.insert("preparation-retained/5", value);
+    });
+}
+
+void testIndeterminateCountsAndRawCollision()
+{
+    auto manifest = tests::defaultExploratoryPilotManifest();
+    manifest.repetitions = 1;
+    manifest.cases.resize(1);
+    manifest.modes = {{tests::QualificationSamplingMode::BoundaryOnlyControl, 5}};
+    QTemporaryDir indeterminateDirectory;
+    require(indeterminateDirectory.isValid(), "indeterminate fixture unavailable");
+    qputenv("CRYPTOBENCH_M19_FORCE_INDETERMINATE", "1");
+    const auto summary = tests::runQualificationCampaign(manifest, indeterminateDirectory.path());
+    qunsetenv("CRYPTOBENCH_M19_FORCE_INDETERMINATE");
+    require(summary.object().value("status") == QStringLiteral("failed") &&
+                summary.object().value("plannedRuns").toInt() == 1 &&
+                summary.object().value("attemptedRuns").toInt() == 1 &&
+                summary.object().value("completedRuns").toInt() == 0 &&
+                summary.object().value("failedRuns").toInt() == 0 &&
+                summary.object().value("cancelledRuns").toInt() == 0 &&
+                summary.object().value("missingRuns").toInt() == 0 &&
+                summary.object().value("indeterminateRuns").toInt() == 1,
+            "indeterminate campaign terminal counts were not mutually exclusive");
+    try {
+        tests::verifyQualificationCampaign(indeterminateDirectory.path());
+    } catch (const std::invalid_argument& error) {
+        throw std::runtime_error(std::string("indeterminate verifier rejected truthful campaign: ") + error.what());
+    }
+
+    QFile originalSummaryFile(indeterminateDirectory.filePath(QStringLiteral("summary.json")));
+    require(originalSummaryFile.open(QIODevice::ReadOnly), "indeterminate summary open failed");
+    const auto originalSummaryBytes = originalSummaryFile.readAll();
+    originalSummaryFile.close();
+    for (const auto field : {"attemptedRuns", "completedRuns", "indeterminateRuns"}) {
+        QFile file(indeterminateDirectory.filePath(QStringLiteral("summary.json")));
+        require(file.open(QIODevice::ReadOnly), "indeterminate summary mutation open failed");
+        auto root = QJsonDocument::fromJson(file.readAll()).object();
+        file.close();
+        root.insert(QString::fromLatin1(field), root.value(QString::fromLatin1(field)).toInt() + 1);
+        QSaveFile output(indeterminateDirectory.filePath(QStringLiteral("summary.json")));
+        require(output.open(QIODevice::WriteOnly), "indeterminate summary mutation output failed");
+        const auto bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+        require(output.write(bytes) == bytes.size() && output.commit(), "indeterminate summary mutation failed");
+        bool rejected = false;
+        try { tests::verifyQualificationCampaign(indeterminateDirectory.path()); }
+        catch (const std::invalid_argument& error) {
+            rejected = QString::fromUtf8(error.what()).contains(QStringLiteral("terminal counts/status"));
+        }
+        require(rejected, "indeterminate terminal count mutation was accepted");
+        QSaveFile restore(indeterminateDirectory.filePath(QStringLiteral("summary.json")));
+        require(restore.open(QIODevice::WriteOnly), "indeterminate summary restore failed");
+        require(restore.write(originalSummaryBytes) == originalSummaryBytes.size() && restore.commit(),
+                "indeterminate summary restore failed");
+    }
+
+    QTemporaryDir collisionDirectory;
+    require(collisionDirectory.isValid(), "collision fixture unavailable");
+    QDir().mkpath(collisionDirectory.filePath(QStringLiteral("runs")));
+    const auto collisionPath = QDir(collisionDirectory.filePath(QStringLiteral("runs")))
+        .filePath(QStringLiteral("00000-quiet-off-0.json"));
+    QFile collisionFile(collisionPath);
+    require(collisionFile.open(QIODevice::WriteOnly), "collision sentinel open failed");
+    const QByteArray sentinel = "raw-sentinel";
+    require(collisionFile.write(sentinel) == sentinel.size(), "collision sentinel write failed");
+    collisionFile.close();
+    bool collisionRejected = false;
+    try { static_cast<void>(tests::runQualificationCampaign(manifest, collisionDirectory.path())); }
+    catch (const std::invalid_argument& error) {
+        collisionRejected = QString::fromUtf8(error.what()).contains(QStringLiteral("raw artifact collision"));
+    }
+    require(collisionRejected, "pre-existing raw artifact was overwritten or accepted");
+    QFile verifySentinel(collisionPath);
+    require(verifySentinel.open(QIODevice::ReadOnly) && verifySentinel.readAll() == sentinel,
+            "pre-existing raw artifact bytes changed");
+}
+
+void testExecutionLifetimeStructure()
+{
+    const auto sourcePath = QFileInfo(
+        QDir(QCoreApplication::applicationDirPath()).filePath(
+            QStringLiteral("../../tests/MemoryV2SyntheticWorker.cpp"))).absoluteFilePath();
+    QFile sourceFile(sourcePath);
+    require(sourceFile.open(QIODevice::ReadOnly), "synthetic worker source unavailable for structural test");
+    const auto source = QString::fromUtf8(sourceFile.readAll());
+    const auto cpuPosition = source.indexOf(QStringLiteral("consumeCpuFor(5);"));
+    const auto allocationPosition = source.indexOf(QStringLiteral("Allocation execution(scenario.executionBytes);"));
+    const auto timerPosition = source.indexOf(QStringLiteral("executionLifetimeTimer.start();"));
+    require(cpuPosition >= 0 && allocationPosition > cpuPosition && timerPosition > allocationPosition,
+            "synthetic CPU work is inside the execution allocation lifetime");
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -295,12 +728,32 @@ int main(int argc, char* argv[])
         if (arguments.size() == 3 && arguments[1] == QStringLiteral("--smoke-output")) {
             return smokeToPath(arguments[2]);
         }
+        if (arguments.size() == 3 && arguments[1] == QStringLiteral("--pilot-output")) {
+            const auto summary = tests::runQualificationCampaign(
+                tests::defaultExploratoryPilotManifest(), arguments[2]);
+            tests::verifyQualificationCampaign(arguments[2]);
+            return summary.object().value("status") == QStringLiteral("completed") ? 0 : 1;
+        }
+        if (arguments.size() == 5 && arguments[1] == QStringLiteral("--manifest") &&
+            arguments[3] == QStringLiteral("--output-dir")) {
+            QFile file(arguments[2]);
+            if (!file.open(QIODevice::ReadOnly)) return 2;
+            const auto manifest = tests::parseQualificationCampaignManifest(
+                QString::fromUtf8(file.readAll()));
+            const auto summary = tests::runQualificationCampaign(manifest, arguments[4]);
+            tests::verifyQualificationCampaign(arguments[4]);
+            return summary.object().value("status") == QStringLiteral("completed") ? 0 : 1;
+        }
         if (arguments.size() != 1) return 2;
         testNoAllocationBoundaryOnlyAndArtifact();
         testPreparationAndExecutionObservability();
         testReleasedPhaseAllocationsAndIntervals();
         testTimingAndFreshWorkerRepetitions();
         testFailureCancellationAndParserRejection();
+        testCampaignManifestSummaryAndCollision();
+        testCampaignVerifierRejectsPersistedMutations();
+        testIndeterminateCountsAndRawCollision();
+        testExecutionLifetimeStructure();
         std::cout << "PASS Memory v2 qualification foundation\n";
         return 0;
     } catch (const std::exception& error) {

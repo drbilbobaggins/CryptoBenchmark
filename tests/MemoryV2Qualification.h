@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace cryptobench::tests {
 
@@ -48,6 +49,8 @@ struct QualificationRun {
     std::uint64_t processCreationTime100ns = 0;
     bool processCreationTimeObserved = false;
     ProcessTerminationStatus terminationStatus = ProcessTerminationStatus::Indeterminate;
+    std::optional<std::uint64_t> observedPreparationLifetimeNanoseconds;
+    std::optional<std::uint64_t> observedExecutionLifetimeNanoseconds;
 };
 
 QString syntheticWorkerPath();
@@ -64,5 +67,32 @@ QJsonDocument makeQualificationArtifact(const QualificationRun& run,
                             const QualificationIdentity& identity = {});
 void requireQualificationArtifact(const QJsonDocument& document);
 void writeQualificationArtifact(const QString& path, const QJsonDocument& document);
+
+struct QualificationCampaignMode {
+    QualificationSamplingMode mode;
+    std::uint32_t intervalMilliseconds;
+};
+
+struct QualificationCampaignCase {
+    QString caseId;
+    SyntheticScenario scenario;
+};
+
+struct QualificationCampaignManifest {
+    QString campaignId;
+    QString phase;
+    std::uint64_t seed = 0;
+    std::uint32_t repetitions = 0;
+    std::vector<QualificationCampaignMode> modes;
+    std::vector<QualificationCampaignCase> cases;
+};
+
+QualificationCampaignManifest defaultExploratoryPilotManifest();
+QualificationCampaignManifest parseQualificationCampaignManifest(const QJsonDocument& document);
+QualificationCampaignManifest parseQualificationCampaignManifest(const QString& encoded);
+QJsonDocument encodeQualificationCampaignManifest(const QualificationCampaignManifest& manifest);
+QJsonDocument runQualificationCampaign(const QualificationCampaignManifest& manifest,
+                                       const QString& outputDirectory);
+void verifyQualificationCampaign(const QString& outputDirectory);
 
 } // namespace cryptobench::tests

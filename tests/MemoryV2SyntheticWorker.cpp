@@ -6,6 +6,9 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
 
 #include <windows.h>
 
@@ -71,6 +74,25 @@ void consumeCpuFor(std::uint32_t milliseconds)
     static_cast<void>(accumulator);
 }
 
+void writeLifetimeEvidence(const QString& path,
+                           std::uint32_t workerPid,
+                           std::uint64_t creationTime100ns,
+                           std::uint64_t preparationLifetime,
+                           std::uint64_t executionLifetime)
+{
+    if (path.isEmpty()) return;
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) return;
+    const auto document = QJsonDocument(QJsonObject{
+        {"workerPid", static_cast<qint64>(workerPid)},
+        {"processCreationTime100ns", QString::number(creationTime100ns)},
+        {"schemaVersion", 1},
+        {"preparationLifetimeNanoseconds", QString::number(preparationLifetime)},
+        {"executionLifetimeNanoseconds", QString::number(executionLifetime)}});
+    const auto bytes = document.toJson(QJsonDocument::Compact);
+    if (file.write(bytes) == bytes.size()) static_cast<void>(file.commit());
+}
+
 int run(const QString& endpoint)
 {
     const auto scenario = cryptobench::tests::parseSyntheticScenario(
@@ -81,9 +103,12 @@ int run(const QString& endpoint)
     channel.sendWorkerReady();
     const auto request = channel.receiveBenchmarkRunRequest();
     channel.beginAlgorithmPreparation(request.logicalRunIndex);
+    QElapsedTimer preparationLifetimeTimer;
+    preparationLifetimeTimer.start();
     Allocation preparation(scenario.preparationBytes);
     hold(scenario.preparationHoldMilliseconds);
     if (scenario.releasePreparationBeforeBoundary) preparation.release();
+    const auto preparationLifetime = static_cast<std::uint64_t>(preparationLifetimeTimer.nsecsElapsed());
     channel.finishAlgorithmPreparation(request.logicalRunIndex);
 
     channel.beforeMeasurement(request.logicalRunIndex);
@@ -91,12 +116,23 @@ int run(const QString& endpoint)
     QElapsedTimer wallTimer;
     wallTimer.start();
     const auto cpuBefore = cpuTimeSource.currentProcessCpuTimeNanoseconds();
-    Allocation execution(scenario.executionBytes);
     consumeCpuFor(5);
+    Allocation execution(scenario.executionBytes);
+    QElapsedTimer executionLifetimeTimer;
+    executionLifetimeTimer.start();
     hold(scenario.executionHoldMilliseconds);
     if (scenario.releaseExecutionBeforeEnd) execution.release();
+    const auto executionLifetime = static_cast<std::uint64_t>(executionLifetimeTimer.nsecsElapsed());
     const auto elapsedNanoseconds = static_cast<std::uint64_t>(wallTimer.nsecsElapsed());
     const auto cpuAfter = cpuTimeSource.currentProcessCpuTimeNanoseconds();
+    FILETIME creationTime{}, exitTime{}, kernelTime{}, userTime{};
+    std::uint64_t creationTicks = 0;
+    if (GetProcessTimes(GetCurrentProcess(), &creationTime, &exitTime, &kernelTime, &userTime)) {
+        creationTicks = (static_cast<std::uint64_t>(creationTime.dwHighDateTime) << 32U) |
+            static_cast<std::uint64_t>(creationTime.dwLowDateTime);
+    }
+    writeLifetimeEvidence(qEnvironmentVariable("CRYPTOBENCH_M19_SYNTHETIC_LIFETIME_FILE"),
+                          GetCurrentProcessId(), creationTicks, preparationLifetime, executionLifetime);
     if (scenario.outcome == cryptobench::tests::SyntheticOutcome::WaitForCancellation) {
         hold(10'000);
     }

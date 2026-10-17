@@ -827,6 +827,7 @@ add_executable(CryptoBenchmarkMemoryV2QualificationTests
 	MemoryV2Qualification.cpp
 	MemoryV2Qualification.h
 	MemoryV2QualificationTests.cpp
+	MemoryV2SyntheticCampaign.cpp
 	MemoryV2SyntheticScenario.cpp
 	MemoryV2SyntheticScenario.h
 )

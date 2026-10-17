@@ -11,6 +11,7 @@
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QJsonObject>
+#include <QJsonDocument>
 #include <QProcess>
 #include <QSaveFile>
 #include <QSysInfo>
@@ -20,6 +21,7 @@
 #include <psapi.h>
 
 #include <functional>
+#include <cmath>
 #include <stdexcept>
 
 namespace cryptobench::tests {
@@ -32,19 +34,19 @@ void require(bool condition, const char* message)
 
 class EnvironmentGuard final {
 public:
-    EnvironmentGuard()
-        : wasSet_(qEnvironmentVariableIsSet("CRYPTOBENCH_M19_SYNTHETIC_SCENARIO")),
-          previous_(qgetenv("CRYPTOBENCH_M19_SYNTHETIC_SCENARIO"))
+    explicit EnvironmentGuard(const char* name)
+        : name_(name), wasSet_(qEnvironmentVariableIsSet(name)), previous_(qgetenv(name))
     {
     }
 
     ~EnvironmentGuard()
     {
-        if (wasSet_) qputenv("CRYPTOBENCH_M19_SYNTHETIC_SCENARIO", previous_);
-        else qunsetenv("CRYPTOBENCH_M19_SYNTHETIC_SCENARIO");
+        if (wasSet_) qputenv(name_, previous_);
+        else qunsetenv(name_);
     }
 
 private:
+    QByteArray name_;
     bool wasSet_;
     QByteArray previous_;
 };
@@ -205,7 +207,10 @@ QualificationRun runQualification(QualificationSamplingMode mode,
         throw std::invalid_argument("qualification sampling interval is invalid");
     }
 
-    EnvironmentGuard environmentGuard;
+    EnvironmentGuard environmentGuard("CRYPTOBENCH_M19_SYNTHETIC_SCENARIO");
+    EnvironmentGuard lifetimeEnvironmentGuard("CRYPTOBENCH_M19_SYNTHETIC_LIFETIME_FILE");
+    EnvironmentGuard expectedPidEnvironmentGuard("CRYPTOBENCH_M19_SYNTHETIC_EXPECTED_PID");
+    EnvironmentGuard expectedCreationEnvironmentGuard("CRYPTOBENCH_M19_SYNTHETIC_EXPECTED_CREATION");
     qputenv("CRYPTOBENCH_M19_SYNTHETIC_SCENARIO",
             encodeSyntheticScenario(scenario).toJson(QJsonDocument::Compact));
 
@@ -216,6 +221,11 @@ QualificationRun runQualification(QualificationSamplingMode mode,
     platform::windows::WorkerMemorySampler sampler;
     application::WorkerRunSessionTestHooks hooks;
     QualificationRun result;
+    const auto lifetimeEvidencePath = QDir(QDir::tempPath()).filePath(
+        QStringLiteral("CryptoBenchmark_M19_2_Lifetime_%1.json")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    QFile::remove(lifetimeEvidencePath);
+    qputenv("CRYPTOBENCH_M19_SYNTHETIC_LIFETIME_FILE", lifetimeEvidencePath.toUtf8());
     hooks.endpointFactory = endpoint;
     hooks.cleanupTimeoutMilliseconds = [] { return 1'000; };
     hooks.workerStarted = [&](qint64 pid) {
@@ -225,6 +235,10 @@ QualificationRun runQualification(QualificationSamplingMode mode,
         result.workerPid = identityValue.pid;
         result.processCreationTime100ns = identityValue.creationTime100ns;
         result.processCreationTimeObserved = identityValue.creationTimeObserved;
+        qputenv("CRYPTOBENCH_M19_SYNTHETIC_EXPECTED_PID",
+            QByteArray::number(identityValue.pid));
+        qputenv("CRYPTOBENCH_M19_SYNTHETIC_EXPECTED_CREATION",
+            QByteArray::number(identityValue.creationTime100ns));
         result.workerStarted = true;
         result.startEventOrdinal = eventOrdinal;
     };
@@ -283,10 +297,45 @@ QualificationRun runQualification(QualificationSamplingMode mode,
     processEventsUntil(session, [&] { return !session.isActive(); });
     result.workerPid = workerPid;
     result.terminationStatus = workerProcessTerminationStatus(workerPid);
+    if (qEnvironmentVariableIntValue("CRYPTOBENCH_M19_FORCE_INDETERMINATE") == 1) {
+        result.status = QStringLiteral("indeterminate");
+        result.error = QStringLiteral("test-injected indeterminate worker termination");
+        result.terminationStatus = ProcessTerminationStatus::Indeterminate;
+    }
     if (cancelled) result.status = QStringLiteral("cancelled");
     if (result.status == QStringLiteral("completed")) {
         result.derived = core::calculateMemoryV2DerivedMetrics(result.raw);
         require(result.derived.has_value(), "qualification raw observations were invalid");
+    }
+    QFile lifetimeEvidence(lifetimeEvidencePath);
+    bool lifetimeEvidenceValid = false;
+    if (lifetimeEvidence.open(QIODevice::ReadOnly)) {
+        QJsonParseError parseError{};
+        const auto document = QJsonDocument::fromJson(lifetimeEvidence.readAll(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+            const auto object = document.object();
+            const auto pidValue = object.value("workerPid");
+            const auto pidOk = pidValue.isDouble() && pidValue.toDouble() >= 0.0 &&
+                std::floor(pidValue.toDouble()) == pidValue.toDouble();
+            const auto evidencePid = pidValue.toInt();
+            bool creationOk = false;
+            const auto evidenceCreation = object.value("processCreationTime100ns").toString().toULongLong(&creationOk);
+            bool ok = false;
+            const auto preparation = object.value("preparationLifetimeNanoseconds").toString().toULongLong(&ok);
+            if (ok) result.observedPreparationLifetimeNanoseconds = preparation;
+            ok = false;
+            const auto execution = object.value("executionLifetimeNanoseconds").toString().toULongLong(&ok);
+            if (ok) result.observedExecutionLifetimeNanoseconds = execution;
+            lifetimeEvidenceValid = object.value("schemaVersion").toInt() == 1 && pidOk && creationOk &&
+                static_cast<std::uint32_t>(evidencePid) == result.workerPid &&
+                evidenceCreation == result.processCreationTime100ns &&
+                result.observedPreparationLifetimeNanoseconds.has_value() &&
+                result.observedExecutionLifetimeNanoseconds.has_value();
+        }
+    }
+    QFile::remove(lifetimeEvidencePath);
+    if (result.status == QStringLiteral("completed")) {
+        require(lifetimeEvidenceValid, "completed run lifetime evidence is missing or mismatched");
     }
     return result;
 }
@@ -348,6 +397,14 @@ QJsonDocument makeQualificationArtifact(const QualificationRun& run,
         {"releaseExecutionBeforeEnd", scenario.releaseExecutionBeforeEnd},
         {"outcome", syntheticOutcomeName(scenario.outcome)}
     };
+    scenarioObject.insert("observedPreparationLifetimeNanoseconds",
+        run.observedPreparationLifetimeNanoseconds
+            ? QJsonValue(QString::number(*run.observedPreparationLifetimeNanoseconds))
+            : QJsonValue(QJsonValue::Null));
+    scenarioObject.insert("observedExecutionLifetimeNanoseconds",
+        run.observedExecutionLifetimeNanoseconds
+            ? QJsonValue(QString::number(*run.observedExecutionLifetimeNanoseconds))
+            : QJsonValue(QJsonValue::Null));
     QJsonObject lifecycle{
         {"workerPid", static_cast<qint64>(run.workerPid)},
         {"processCreationTime100ns", QString::number(run.processCreationTime100ns)},
@@ -384,7 +441,9 @@ QJsonDocument makeQualificationArtifact(const QualificationRun& run,
                 ? QJsonValue(QString::number(run.workerMeasurement.processCpuNanoseconds))
                 : QJsonValue(QJsonValue::Null)}}}
     };
-    if (run.status == QStringLiteral("completed")) {
+    const auto hasCompletedMeasurements = run.status == QStringLiteral("completed") ||
+        (run.status == QStringLiteral("indeterminate") && run.derived.has_value());
+    if (hasCompletedMeasurements) {
         const auto& raw = run.raw;
         const auto& derived = *run.derived;
         root.insert("observations", QJsonObject{
@@ -416,7 +475,9 @@ void requireQualificationArtifact(const QJsonDocument& document)
     require(object.value("identity").toObject().contains("repetitionId"),
             "qualification artifact omitted run identity");
     const auto timing = object.value("timing").toObject();
-    if (object.value("status") == QStringLiteral("completed")) {
+    const auto hasMeasurements = object.value("status") == QStringLiteral("completed") ||
+        object.value("status") == QStringLiteral("indeterminate");
+    if (hasMeasurements && object.contains("observations") && object.contains("derived")) {
         require(timing.value("observationStatus") == QStringLiteral("observed") &&
                     timing.value("wallClockNanoseconds").isString() &&
                     timing.value("processCpuNanoseconds").isString(),
@@ -429,9 +490,14 @@ void requireQualificationArtifact(const QJsonDocument& document)
         require(object.value("derived").toObject().contains("operationalPeakDeltaBytes"),
                 "qualification artifact omitted derived metrics");
     } else {
-        require(timing.value("observationStatus") == QStringLiteral("unavailable") &&
-                    timing.value("wallClockNanoseconds").isNull() &&
-                    timing.value("processCpuNanoseconds").isNull(),
+        const auto truthfulIndeterminateTiming = object.value("status") == QStringLiteral("indeterminate") &&
+            timing.value("observationStatus") == QStringLiteral("observed") &&
+            timing.value("wallClockNanoseconds").isString() &&
+            timing.value("processCpuNanoseconds").isString();
+        const auto unavailableFailureTiming = timing.value("observationStatus") == QStringLiteral("unavailable") &&
+            timing.value("wallClockNanoseconds").isNull() &&
+            timing.value("processCpuNanoseconds").isNull();
+        require(truthfulIndeterminateTiming || unavailableFailureTiming,
                 "incomplete artifact fabricated timing");
         require(!object.contains("observations") && !object.contains("derived"),
                 "incomplete qualification artifact fabricated observations");
