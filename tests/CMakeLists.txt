@@ -854,6 +854,36 @@ add_dependencies(CryptoBenchmarkMemoryV2QualificationTests CryptoBenchmarkMemory
 
 add_test(NAME CryptoBenchmarkMemoryV2QualificationTests COMMAND CryptoBenchmarkMemoryV2QualificationTests)
 
+add_executable(CryptoBenchmarkMemoryV2SamplingOverheadTests
+	MemoryV2SamplingOverhead.cpp
+	MemoryV2SamplingOverhead.h
+	MemoryV2SamplingOverheadTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkMemoryV2SamplingOverheadTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkMemoryV2SamplingOverheadTests
+	PRIVATE
+		cryptobench_application
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkMemoryV2SamplingOverheadTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkMemoryV2SamplingOverheadTests
+	COMMAND CryptoBenchmarkMemoryV2SamplingOverheadTests
+)
+
+set_tests_properties(CryptoBenchmarkMemoryV2SamplingOverheadTests
+	PROPERTIES
+		TIMEOUT 120
+)
+
 add_executable(CryptoBenchmarkWindowsWorkerProcessTests
 	WindowsWorkerProcessTests.cpp
 )
