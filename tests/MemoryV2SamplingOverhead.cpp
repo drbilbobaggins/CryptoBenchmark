@@ -24,6 +24,12 @@
 #include <psapi.h>
 
 #include <stdexcept>
+#include <algorithm>
+#include <array>
+#include <functional>
+#include <map>
+#include <random>
+#include <utility>
 #include <vector>
 
 namespace cryptobench::tests {
@@ -126,28 +132,77 @@ QString modeName(SamplingOverheadMode mode)
         ? QStringLiteral("boundaryOnlyControl") : QStringLiteral("periodic");
 }
 
+QString workloadName(SamplingOverheadWorkload workload)
+{
+    return workload == SamplingOverheadWorkload::Sha256
+        ? QStringLiteral("sha256") : QStringLiteral("aes256-gcm-encrypt");
+}
+
+void enterEventLoopUnlessTerminal(
+    QEventLoop& loop,
+    const std::function<bool()>& terminalObserved,
+    const std::function<void()>& beforeEntry)
+{
+    if (!terminalObserved()) {
+        beforeEntry();
+        loop.exec();
+    }
+}
+
+SamplingOverheadWorkloadSpec workloadSpec(SamplingOverheadWorkload workload)
+{
+    if (workload == SamplingOverheadWorkload::Sha256) {
+        return {workload, QStringLiteral("sha256"), QStringLiteral("sha256"),
+                QStringLiteral("hash"), 8};
+    }
+    return {workload, QStringLiteral("aes256-gcm-encrypt"), QStringLiteral("aes256-gcm"),
+            QStringLiteral("encrypt"), 16};
+}
+
+core::BenchmarkConfig workloadConfig(SamplingOverheadWorkload workload,
+                                     std::uint64_t iterationsPerRun)
+{
+    const auto spec = workloadSpec(workload);
+    if (workload == SamplingOverheadWorkload::Sha256) {
+        return {core::AlgorithmProfileId::Sha256, core::BenchmarkOperation::Hash,
+                iterationsPerRun, 1, core::HashConfig{spec.inputBytes}};
+    }
+    return {core::AlgorithmProfileId::Aes256Gcm, core::BenchmarkOperation::Encrypt,
+            iterationsPerRun, 1, core::AeadConfig{spec.inputBytes}};
+}
+
 } // namespace
+
+SamplingOverheadWorkloadSpec samplingOverheadWorkloadSpec(SamplingOverheadWorkload workload)
+{
+    return workloadSpec(workload);
+}
+
+std::vector<SamplingOverheadWorkloadSpec> supportedSamplingOverheadWorkloads()
+{
+    return {workloadSpec(SamplingOverheadWorkload::Sha256),
+            workloadSpec(SamplingOverheadWorkload::Aes256GcmEncrypt)};
+}
 
 SamplingOverheadRun runRealSamplingOverheadSmoke(
     SamplingOverheadMode mode,
     std::uint32_t intervalMilliseconds,
     std::uint64_t iterationsPerRun,
-    std::uint32_t executionOrder)
+    std::uint32_t executionOrder,
+    SamplingOverheadWorkload workload,
+    std::uint32_t watchdogMilliseconds)
 {
     if (mode != SamplingOverheadMode::BoundaryOnlyControl &&
         !(intervalMilliseconds == 1 || intervalMilliseconds == 2 || intervalMilliseconds == 5)) {
         throw std::invalid_argument("sampling-overhead interval is invalid");
     }
     if (iterationsPerRun == 0) throw std::invalid_argument("sampling-overhead iterations must be positive");
+    if (watchdogMilliseconds == 0) throw std::invalid_argument("sampling-overhead watchdog must be positive");
 
     const auto workerExecutable = workerPath();
     const auto endpointName = endpoint();
-    const core::BenchmarkConfig config{
-        core::AlgorithmProfileId::Sha256,
-        core::BenchmarkOperation::Hash,
-        iterationsPerRun,
-        1,
-        core::HashConfig{8}};
+    const auto spec = workloadSpec(workload);
+    const auto config = workloadConfig(workload, iterationsPerRun);
     application::WorkerRunSessionTestHooks hooks;
     platform::windows::WorkerMemorySampler sampler;
     SamplingOverheadRun result;
@@ -160,11 +215,17 @@ SamplingOverheadRun runRealSamplingOverheadSmoke(
     result.architecture = QSysInfo::currentCpuArchitecture();
     result.iterationsPerRun = iterationsPerRun;
     result.executionOrder = executionOrder;
+    result.workload = workload;
+    result.algorithmProfile = spec.algorithmProfile;
+    result.operation = spec.operation;
+    result.inputBytes = spec.inputBytes;
     bool samplerActive = false;
     std::uint32_t workerPid = 0;
     QElapsedTimer sessionTimer;
     std::uint64_t parentCpuBefore = 0;
     std::uint64_t parentCpuAfter = 0;
+    bool parentCpuBeforeObserved = false;
+    bool parentCpuAfterObserved = false;
     core::MemoryV2RawObservations boundaryOnlyMemory{};
     hooks.endpointFactory = endpoint;
     hooks.workerStarted = [&](qint64 pid) {
@@ -173,12 +234,14 @@ SamplingOverheadRun runRealSamplingOverheadSmoke(
         result.workerCreationTime100ns = processCreationTime100ns(workerPid);
         sessionTimer.start();
         parentCpuBefore = currentProcessCpuNanoseconds();
+        parentCpuBeforeObserved = true;
     };
     hooks.processFinishedObserved = [&] {
         if (sessionTimer.isValid()) {
             result.parentSessionWallNanoseconds = static_cast<std::uint64_t>(sessionTimer.nsecsElapsed());
         }
         parentCpuAfter = currentProcessCpuNanoseconds();
+        parentCpuAfterObserved = true;
     };
     if (mode == SamplingOverheadMode::BoundaryOnlyControl) {
         hooks.startSampler = [&](std::uint32_t pid, const core::MeasurementSettings&) {
@@ -213,19 +276,23 @@ SamplingOverheadRun runRealSamplingOverheadSmoke(
     watchdog.setSingleShot(true);
     QObject::connect(&session, &application::WorkerRunSession::completed,
                      [&] (const application::WorkerRunSessionResult& value) {
-                         result.memory = value.memory;
-                         result.memoryObserved = true;
-                         result.workerMeasurement = value.workerMeasurement;
-                         result.workerMeasurementObserved = true;
-                         result.normalExit = true;
-                         result.status = QStringLiteral("completed");
+                         if (!deadlineExpired) {
+                             result.memory = value.memory;
+                             result.memoryObserved = true;
+                             result.workerMeasurement = value.workerMeasurement;
+                             result.workerMeasurementObserved = true;
+                             result.normalExit = true;
+                             result.status = QStringLiteral("completed");
+                         }
                          terminal = true;
                          waitLoop.quit();
                      });
     QObject::connect(&session, &application::WorkerRunSession::failed,
                      [&] (const core::ErrorInfo& error) {
-                         result.status = QStringLiteral("failed");
-                         result.error = QString::fromStdString(error.technicalMessage);
+                         if (!deadlineExpired) {
+                             result.status = QStringLiteral("failed");
+                             result.error = QString::fromStdString(error.technicalMessage);
+                         }
                          terminal = true;
                          waitLoop.quit();
                      });
@@ -236,9 +303,10 @@ SamplingOverheadRun runRealSamplingOverheadSmoke(
         session.cancel();
         waitLoop.quit();
     });
+    watchdog.start(static_cast<int>(watchdogMilliseconds));
     session.start(config, 0, {intervalMilliseconds});
-    watchdog.start(30'000);
-    waitLoop.exec();
+    enterEventLoopUnlessTerminal(
+        waitLoop, [&] { return terminal || deadlineExpired; }, [] {});
     watchdog.stop();
     if (deadlineExpired && session.isActive()) {
         QEventLoop cleanupLoop;
@@ -259,7 +327,7 @@ SamplingOverheadRun runRealSamplingOverheadSmoke(
     require(terminal || deadlineExpired, "real sampling-overhead smoke had no terminal result");
     result.mode = mode;
     result.intervalMilliseconds = intervalMilliseconds;
-    if (parentCpuAfter >= parentCpuBefore) {
+    if (parentCpuBeforeObserved && parentCpuAfterObserved && parentCpuAfter >= parentCpuBefore) {
         result.parentSessionCpuNanoseconds = parentCpuAfter - parentCpuBefore;
     }
     if (result.status == QStringLiteral("completed")) {
@@ -278,6 +346,7 @@ QJsonDocument samplingOverheadRunArtifact(const SamplingOverheadRun& run)
         {"format", "cryptobenchmark-memory-v2-sampling-overhead"},
         {"schemaVersion", 1}, {"status", run.status}, {"error", run.error},
         {"samplingMode", modeName(run.mode)},
+        {"workload", workloadName(run.workload)},
         {"intervalMilliseconds", static_cast<qint64>(run.intervalMilliseconds)},
         {"logicalRunIndex", static_cast<qint64>(run.logicalRunIndex)},
         {"executionOrder", static_cast<qint64>(run.executionOrder)},
@@ -406,12 +475,13 @@ void validateSamplingOverheadBatchArtifact(const QJsonDocument& document)
     }
 }
 
-bool eventDrivenWatchdogSelfTest(std::uint32_t deadlineMilliseconds)
+bool eventDrivenWatchdogSelfTest(std::uint32_t deadlineMilliseconds, QString* diagnostic)
 {
     if (deadlineMilliseconds == 0) throw std::invalid_argument("watchdog deadline must be positive");
     QEventLoop loop;
     QTimer watchdog;
     watchdog.setSingleShot(true);
+    watchdog.setTimerType(Qt::PreciseTimer);
     bool timedOut = false;
     QObject::connect(&watchdog, &QTimer::timeout, [&] {
         timedOut = true;
@@ -420,11 +490,259 @@ bool eventDrivenWatchdogSelfTest(std::uint32_t deadlineMilliseconds)
     QElapsedTimer elapsed;
     elapsed.start();
     watchdog.start(static_cast<int>(deadlineMilliseconds));
+    bool loopExited = false;
     loop.exec();
+    loopExited = true;
     const auto elapsedMilliseconds = elapsed.elapsed();
-    const auto lowerBound = deadlineMilliseconds > 5 ? deadlineMilliseconds - 5U : 0U;
-    return timedOut && elapsedMilliseconds >= static_cast<qint64>(lowerBound) &&
+    const auto passed = timedOut && loopExited &&
+        elapsedMilliseconds > 0 &&
         elapsedMilliseconds < static_cast<qint64>(deadlineMilliseconds) + 5'000;
+    if (diagnostic != nullptr) {
+        *diagnostic = QStringLiteral("timedOut=%1 elapsedMilliseconds=%2 requestedDeadlineMilliseconds=%3 "
+                                     "timerType=PreciseTimer loopExited=%4")
+            .arg(timedOut).arg(elapsedMilliseconds).arg(deadlineMilliseconds).arg(loopExited);
+    }
+    return passed;
+}
+
+bool eventDrivenTerminalBeforeExecSelfTest()
+{
+    QEventLoop loop;
+    bool terminal = false;
+    bool entered = false;
+    terminal = true;
+    enterEventLoopUnlessTerminal(loop, [&] { return terminal; }, [&] { entered = true; });
+    return terminal && !entered;
+}
+
+bool calibrationSelectionSelfTest()
+{
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> observations{
+        {1'000, 100'000'000}, {10'000, 950'000'000}, {100'000, 1'200'000'000}};
+    std::optional<std::uint64_t> selected;
+    std::size_t attempted = 0;
+    for (const auto& [iterations, elapsed] : observations) {
+        ++attempted;
+        if (elapsed >= 900'000'000) {
+            selected = iterations;
+            break;
+        }
+    }
+    return selected == 10'000 && attempted == 2;
+}
+
+QString calibrationStatusForRunStatus(const QString& runStatus)
+{
+    return runStatus == QStringLiteral("incomplete")
+        ? QStringLiteral("deadline") : QStringLiteral("failedWorker");
+}
+
+bool calibrationStatusMappingSelfTest()
+{
+    return calibrationStatusForRunStatus(QStringLiteral("incomplete")) == QStringLiteral("deadline") &&
+        calibrationStatusForRunStatus(QStringLiteral("failed")) == QStringLiteral("failedWorker");
+}
+
+QJsonDocument runSamplingOverheadCalibration(
+    SamplingOverheadWorkload workload,
+    const std::vector<std::uint64_t>& candidates,
+    std::uint32_t maxWorkers,
+    std::uint32_t maxSeconds)
+{
+    require(!candidates.empty() && candidates.size() <= 8,
+            "calibration candidate count is outside the bounded limit");
+    require(maxWorkers > 0 && maxWorkers <= candidates.size() && maxSeconds > 0 && maxSeconds <= 120,
+            "calibration limits are outside the bounded range");
+    for (const auto candidate : candidates) require(candidate > 0, "calibration candidate N must be positive");
+
+    QJsonArray observations;
+    QElapsedTimer budget;
+    budget.start();
+    std::optional<std::uint64_t> selectedIterations;
+    QString calibrationStatus = QStringLiteral("noSuitableCandidate");
+    std::uint32_t workers = 0;
+    for (const auto candidate : candidates) {
+        const auto remainingMilliseconds = static_cast<qint64>(maxSeconds) * 1'000 - budget.elapsed();
+        if (workers >= maxWorkers) {
+            calibrationStatus = QStringLiteral("noSuitableCandidate");
+            break;
+        }
+        if (remainingMilliseconds <= 5'000) {
+            calibrationStatus = QStringLiteral("deadline");
+            break;
+        }
+        const auto run = runRealSamplingOverheadSmoke(
+            SamplingOverheadMode::BoundaryOnlyControl, 5, candidate, workers, workload,
+            static_cast<std::uint32_t>(std::min<qint64>(remainingMilliseconds - 5'000, 30'000)));
+        ++workers;
+        auto observation = samplingOverheadRunArtifact(run).object();
+        observation.insert(QStringLiteral("calibrationCandidateIterations"),
+                           QString::number(candidate));
+        observations.append(observation);
+        if (run.status != QStringLiteral("completed")) {
+            calibrationStatus = calibrationStatusForRunStatus(run.status);
+            break;
+        }
+        if (run.workerMeasurement.elapsedNanoseconds >= 900'000'000) {
+            selectedIterations = candidate;
+            calibrationStatus = QStringLiteral("success");
+            break;
+        }
+        if (budget.elapsed() >= static_cast<qint64>(maxSeconds) * 1'000) {
+            calibrationStatus = QStringLiteral("deadline");
+            break;
+        }
+    }
+    return QJsonDocument(QJsonObject{
+        {"format", "cryptobenchmark-memory-v2-sampling-overhead-calibration"},
+        {"schemaVersion", 1}, {"workload", workloadName(workload)},
+        {"targetCanonicalMeasuredWallNanoseconds", "1000000000"},
+        {"selectedIterationsPerRun", optionalU64(selectedIterations)},
+        {"status", calibrationStatus},
+        {"maxWorkers", static_cast<qint64>(maxWorkers)},
+        {"maxSeconds", static_cast<qint64>(maxSeconds)},
+        {"observations", observations}});
+}
+
+QJsonDocument prepareSamplingOverheadPilot(
+    std::uint64_t seed,
+    std::uint32_t repetitions,
+    std::uint64_t sha256Iterations,
+    std::uint64_t aes256GcmIterations)
+{
+    require(repetitions > 0 && repetitions <= 16 && sha256Iterations > 0 &&
+                aes256GcmIterations > 0,
+            "pilot preparation parameters are outside the bounded range");
+    struct Trial {
+        SamplingOverheadWorkload workload;
+        SamplingOverheadMode mode;
+        std::uint32_t repetition;
+        std::uint32_t intervalMilliseconds;
+    };
+    std::vector<Trial> trials;
+    for (std::uint32_t repetition = 0; repetition < repetitions; ++repetition) {
+        for (const auto workload : {SamplingOverheadWorkload::Sha256,
+                                    SamplingOverheadWorkload::Aes256GcmEncrypt}) {
+            trials.push_back({workload, SamplingOverheadMode::BoundaryOnlyControl, repetition, 0});
+            trials.push_back({workload, SamplingOverheadMode::Periodic, repetition, 5});
+            trials.push_back({workload, SamplingOverheadMode::Periodic, repetition, 2});
+            trials.push_back({workload, SamplingOverheadMode::Periodic, repetition, 1});
+        }
+    }
+    std::mt19937_64 generator(seed);
+    std::shuffle(trials.begin(), trials.end(), generator);
+    QJsonArray encoded;
+    std::uint32_t executionOrder = 0;
+    for (std::uint32_t trialIndex = 0; trialIndex < trials.size(); ++trialIndex) {
+        const auto& trial = trials[trialIndex];
+        const auto spec = workloadSpec(trial.workload);
+        const auto iterations = trial.workload == SamplingOverheadWorkload::Sha256
+            ? sha256Iterations : aes256GcmIterations;
+        encoded.append(QJsonObject{
+            {"trialIndex", static_cast<qint64>(trialIndex)},
+            {"executionOrder", static_cast<qint64>(executionOrder++)},
+            {"repetition", static_cast<qint64>(trial.repetition)},
+            {"workload", spec.stableId}, {"samplingMode", modeName(trial.mode)},
+            {"intervalMilliseconds", static_cast<qint64>(trial.intervalMilliseconds)},
+            {"iterationsPerRun", QString::number(iterations)},
+            {"status", "notExecuted"}, {"executed", false}});
+    }
+    return QJsonDocument(QJsonObject{
+        {"format", "cryptobenchmark-memory-v2-sampling-overhead-pilot-plan"},
+        {"schemaVersion", 1}, {"seed", QString::number(seed)},
+        {"executed", false}, {"repetitions", static_cast<qint64>(repetitions)},
+        {"trialCount", static_cast<qint64>(encoded.size())}, {"trials", encoded}});
+}
+
+void validateSamplingOverheadCalibration(const QJsonDocument& document)
+{
+    require(document.isObject() && document.object().value("format") ==
+                QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-calibration") &&
+                document.object().value("schemaVersion").toInt() == 1,
+            "calibration artifact format mismatch");
+    const auto object = document.object();
+    const auto status = object.value("status").toString();
+    require(status == QStringLiteral("success") || status == QStringLiteral("noSuitableCandidate") ||
+                status == QStringLiteral("deadline") || status == QStringLiteral("failedWorker"),
+            "calibration status is invalid");
+    const auto observations = object.value("observations").toArray();
+    require(!observations.isEmpty() && observations.size() <= object.value("maxWorkers").toInt(),
+            "calibration artifact worker bound is invalid");
+    for (const auto& observation : observations) {
+        const auto run = observation.toObject();
+        validateSamplingOverheadRunArtifact(QJsonDocument(run));
+        require(run.value("calibrationCandidateIterations").isString(),
+                "calibration candidate is missing");
+    }
+    require(status == QStringLiteral("success")
+                ? object.value("selectedIterationsPerRun").isString()
+                : object.value("selectedIterationsPerRun").isNull(),
+            "calibration selection does not match its status");
+}
+
+void validateSamplingOverheadPilot(const QJsonDocument& document)
+{
+    require(document.isObject() && document.object().value("format") ==
+                QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-pilot-plan") &&
+                document.object().value("schemaVersion").toInt() == 1 &&
+                !document.object().value("executed").toBool(),
+            "pilot plan is invalid or already executed");
+    const auto object = document.object();
+    const auto trials = object.value("trials").toArray();
+    const auto repetitions = object.value("repetitions").toInt();
+    require(repetitions > 0 && trials.size() == object.value("trialCount").toInt() &&
+                trials.size() == repetitions * 8 && !trials.isEmpty(),
+            "pilot trial count is invalid");
+    std::vector<bool> orders(static_cast<std::size_t>(trials.size()), false);
+    std::vector<bool> indexes(static_cast<std::size_t>(trials.size()), false);
+    std::map<std::string, std::uint32_t> conditionCounts;
+    std::map<std::string, std::string> workloadIterations;
+    for (const auto& value : trials) {
+        const auto trial = value.toObject();
+        const auto order = trial.value("executionOrder").toInt(-1);
+        const auto index = trial.value("trialIndex").toInt(-1);
+        const auto repetition = trial.value("repetition").toInt(-1);
+        const auto workload = trial.value("workload").toString().toStdString();
+        const auto mode = trial.value("samplingMode").toString();
+        const auto interval = trial.value("intervalMilliseconds").toInt(-1);
+        const auto iterationsValue = trial.value("iterationsPerRun");
+        bool iterationsOk = false;
+        const auto iterations = iterationsValue.toString().toULongLong(&iterationsOk);
+        const auto iterationsText = iterationsValue.toString().toStdString();
+        require(order >= 0 && order < static_cast<int>(orders.size()) && !orders[order] &&
+                    index >= 0 && index < static_cast<int>(indexes.size()) && !indexes[index] &&
+                    repetition >= 0 && repetition < repetitions &&
+                    (workload == "sha256" || workload == "aes256-gcm-encrypt") &&
+                    ((mode == QStringLiteral("boundaryOnlyControl") && interval == 0) ||
+                     (mode == QStringLiteral("periodic") &&
+                      (interval == 5 || interval == 2 || interval == 1))) &&
+                                        iterationsValue.isString() && iterationsOk && iterations > 0 &&
+                                        QString::number(iterations) == iterationsValue.toString() &&
+                    !trial.value("executed").toBool() &&
+                    trial.value("status") == QStringLiteral("notExecuted"),
+                "pilot trial ordering or execution state is invalid");
+        orders[order] = true;
+        indexes[index] = true;
+        const auto previousIterations = workloadIterations.find(workload);
+        if (previousIterations == workloadIterations.end()) {
+            workloadIterations.emplace(workload, iterationsText);
+        } else {
+            require(previousIterations->second == iterationsText,
+                    "pilot workload iterationsPerRun is inconsistent");
+        }
+        const auto condition = mode == QStringLiteral("boundaryOnlyControl")
+            ? std::string("off") : "periodic:" + std::to_string(interval);
+        ++conditionCounts[workload + ":" + std::to_string(repetition) + ":" + condition];
+    }
+    for (const auto workload : {std::string("sha256"), std::string("aes256-gcm-encrypt")}) {
+        for (int repetition = 0; repetition < repetitions; ++repetition) {
+            for (const auto condition : {std::string("off"), std::string("periodic:5"),
+                                         std::string("periodic:2"), std::string("periodic:1")}) {
+                require(conditionCounts[workload + ":" + std::to_string(repetition) + ":" + condition] == 1,
+                        "pilot condition matrix is unbalanced");
+            }
+        }
+    }
 }
 
 void writeSamplingOverheadArtifact(const QString& destination, const QJsonDocument& document)
@@ -433,6 +751,10 @@ void writeSamplingOverheadArtifact(const QString& destination, const QJsonDocume
     require(!QFileInfo::exists(destination), "sampling-overhead artifact destination already exists");
     if (document.object().value("format") == QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-batch")) {
         validateSamplingOverheadBatchArtifact(document);
+    } else if (document.object().value("format") == QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-calibration")) {
+        validateSamplingOverheadCalibration(document);
+    } else if (document.object().value("format") == QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-pilot-plan")) {
+        validateSamplingOverheadPilot(document);
     } else {
         validateSamplingOverheadRunArtifact(document);
     }
@@ -450,6 +772,10 @@ QJsonDocument readSamplingOverheadArtifact(const QString& source)
     require(error.error == QJsonParseError::NoError, "sampling-overhead artifact JSON is malformed");
     if (document.object().value("format") == QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-batch")) {
         validateSamplingOverheadBatchArtifact(document);
+    } else if (document.object().value("format") == QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-calibration")) {
+        validateSamplingOverheadCalibration(document);
+    } else if (document.object().value("format") == QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-pilot-plan")) {
+        validateSamplingOverheadPilot(document);
     } else {
         validateSamplingOverheadRunArtifact(document);
     }

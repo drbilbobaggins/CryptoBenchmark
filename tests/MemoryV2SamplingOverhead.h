@@ -17,11 +17,25 @@ enum class SamplingOverheadMode {
     Periodic
 };
 
+enum class SamplingOverheadWorkload {
+    Sha256,
+    Aes256GcmEncrypt
+};
+
+struct SamplingOverheadWorkloadSpec {
+    SamplingOverheadWorkload workload;
+    QString stableId;
+    QString algorithmProfile;
+    QString operation;
+    std::uint64_t inputBytes;
+};
+
 struct SamplingOverheadRun {
     SamplingOverheadMode mode = SamplingOverheadMode::BoundaryOnlyControl;
     std::uint32_t intervalMilliseconds = 5;
     std::uint32_t logicalRunIndex = 0;
     std::uint32_t executionOrder = 0;
+    SamplingOverheadWorkload workload = SamplingOverheadWorkload::Sha256;
     std::uint32_t workerPid = 0;
     std::optional<std::uint64_t> workerCreationTime100ns;
     std::optional<std::uint64_t> parentSessionWallNanoseconds;
@@ -54,11 +68,33 @@ SamplingOverheadRun runRealSamplingOverheadSmoke(
     SamplingOverheadMode mode,
     std::uint32_t intervalMilliseconds,
     std::uint64_t iterationsPerRun,
-    std::uint32_t executionOrder = 0);
+    std::uint32_t executionOrder = 0,
+    SamplingOverheadWorkload workload = SamplingOverheadWorkload::Sha256,
+    std::uint32_t watchdogMilliseconds = 30'000);
+
+SamplingOverheadWorkloadSpec samplingOverheadWorkloadSpec(SamplingOverheadWorkload workload);
+std::vector<SamplingOverheadWorkloadSpec> supportedSamplingOverheadWorkloads();
+
+QJsonDocument runSamplingOverheadCalibration(
+    SamplingOverheadWorkload workload,
+    const std::vector<std::uint64_t>& candidates,
+    std::uint32_t maxWorkers,
+    std::uint32_t maxSeconds);
+QJsonDocument prepareSamplingOverheadPilot(
+    std::uint64_t seed,
+    std::uint32_t repetitions,
+    std::uint64_t sha256Iterations,
+    std::uint64_t aes256GcmIterations);
+void validateSamplingOverheadCalibration(const QJsonDocument& document);
+void validateSamplingOverheadPilot(const QJsonDocument& document);
 
 QJsonDocument samplingOverheadBatchArtifact(const std::vector<SamplingOverheadRun>& runs);
 void validateSamplingOverheadBatchArtifact(const QJsonDocument& document);
-bool eventDrivenWatchdogSelfTest(std::uint32_t deadlineMilliseconds);
+bool eventDrivenWatchdogSelfTest(std::uint32_t deadlineMilliseconds,
+                                 QString* diagnostic = nullptr);
+bool eventDrivenTerminalBeforeExecSelfTest();
+bool calibrationSelectionSelfTest();
+bool calibrationStatusMappingSelfTest();
 
 QJsonDocument samplingOverheadRunArtifact(const SamplingOverheadRun& run);
 void validateSamplingOverheadRunArtifact(const QJsonDocument& document);

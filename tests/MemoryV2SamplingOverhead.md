@@ -1,4 +1,4 @@
-# Memory v2 real-worker sampling-overhead Stage A
+# Memory v2 real-worker sampling-overhead Stage B1
 
 This test-only target proves instrumentation on the real OpenSSL worker path.
 
@@ -7,11 +7,14 @@ CLI:
 ```powershell
 build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe
 build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe --self-test --output C:\path\stage-a.json
+build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe --calibrate sha256 --output C:\path\sha256-calibration.json
+build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe --prepare-pilot --seed 42 --repetitions 4 --sha256-n 10000000 --aes256-gcm-n 100000 --output C:\path\pilot-plan.json
 ```
 
-The normal CTest invocation is bounded and self-contained. It runs four fresh
-workers: one qualification-only OFF boundary reference and periodic 5, 2 and
-1 ms runs. It uses SHA-256 Hash, 8 input bytes, `runs=1`, and fixed
+The normal CTest invocation is bounded and self-contained. It runs five fresh
+workers: one SHA-256 qualification-only OFF boundary reference, one AES-256-GCM
+qualification-only OFF boundary reference, and SHA-256 periodic 5, 2 and 1 ms
+runs. The SHA-256 smoke uses Hash, 8 input bytes, `runs=1`, and fixed
 `iterationsPerRun=10000`. This is a smoke, not a pilot and not a quantitative
 conclusion. `--output` selects a persistent destination. The writer rejects an
 existing destination and uses the existing `AtomicFileWriter`/QSaveFile path
@@ -19,6 +22,34 @@ for atomic commit. The output is a versioned batch document retaining all four
 observations, with `logicalRunIndex=0` and distinct `executionOrder` values
 `0..3`. The self-test also reads the committed JSON back and checks exact
 round-trip equality.
+
+The supported workload allowlist is repository-backed and validated by the
+normal self-test:
+
+- `sha256`: `AlgorithmProfileId::Sha256`, `Hash`, `HashConfig{8}`;
+- `aes256-gcm-encrypt`: `AlgorithmProfileId::Aes256Gcm`, `Encrypt`,
+  `AeadConfig{16}`.
+
+The explicit `--calibrate` path uses only the selected workload, OFF reference
+runs, a fixed bounded candidate-N list, at most six fresh workers and a
+120-second wall budget including the active worker/cleanup allowance. It stops
+immediately at the first candidate whose canonical worker measured wall time
+reaches the approximately-one-second target. It records status as
+`success`, `noSuitableCandidate`, `deadline`, or `failedWorker`, and records
+every attempted candidate. Coarse candidate spacing can overshoot the target;
+that result is calibration guidance, not a final measurement setting.
+Calibration is not sampling-overhead evidence and was not executed as part of
+B1 validation.
+
+The explicit `--prepare-pilot` path creates, but does not execute, a
+deterministically seeded and shuffled plan. Before shuffling, every
+workload/repetition block receives exactly four condition identities: OFF
+boundary-only (`intervalMilliseconds=0`), periodic 5 ms, periodic 2 ms and
+periodic 1 ms. It contains provisional repetitions, shared per-workload N
+across all modes, distinct trial index and actual execution order, and
+`notExecuted` status. The validator checks the full per-workload/per-repetition
+condition matrix and rejects missing or duplicate conditions. It is rejected if
+marked executed. No pilot or confirmatory campaign is run in B1.
 
 Fields include PID and Windows process creation time in 100 ns FILETIME ticks,
 worker executable path and SHA-256, Git HEAD and dirty state, build type, OS,

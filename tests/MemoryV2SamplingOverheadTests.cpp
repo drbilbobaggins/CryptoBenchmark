@@ -3,11 +3,13 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QUuid>
 
 #include <iostream>
 #include <stdexcept>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -128,6 +130,107 @@ void testInvalidIntervals()
     require(rejected, "unsupported Stage A interval was accepted");
 }
 
+void testB1WorkloadsAndPlanning()
+{
+    const auto workloads = tests::supportedSamplingOverheadWorkloads();
+    require(workloads.size() == 2 && workloads[0].stableId == QStringLiteral("sha256") &&
+                workloads[0].algorithmProfile == QStringLiteral("sha256") &&
+                workloads[0].operation == QStringLiteral("hash") && workloads[0].inputBytes == 8 &&
+                workloads[1].stableId == QStringLiteral("aes256-gcm-encrypt") &&
+                workloads[1].algorithmProfile == QStringLiteral("aes256-gcm") &&
+                workloads[1].operation == QStringLiteral("encrypt") && workloads[1].inputBytes == 16,
+            "supported B1 workload identity is not canonical");
+    const auto aes = tests::runRealSamplingOverheadSmoke(
+        tests::SamplingOverheadMode::BoundaryOnlyControl, 5, 100, 20,
+        tests::SamplingOverheadWorkload::Aes256GcmEncrypt);
+    require(aes.status == QStringLiteral("completed") && aes.workerMeasurementObserved &&
+                aes.algorithmProfile == QStringLiteral("aes256-gcm") &&
+                aes.operation == QStringLiteral("encrypt"),
+            "canonical AES-256-GCM workload did not complete");
+
+    require(tests::eventDrivenTerminalBeforeExecSelfTest(),
+            "synchronous terminal-before-event-loop regression failed");
+        require(tests::calibrationSelectionSelfTest(),
+            "calibration selection did not stop at the first suitable candidate");
+            require(tests::calibrationStatusMappingSelfTest(),
+                "calibration incomplete/failed status mapping is incorrect");
+
+    bool rejected = false;
+    try {
+        static_cast<void>(tests::runSamplingOverheadCalibration(
+            tests::SamplingOverheadWorkload::Sha256, {1, 2, 3, 4, 5, 6, 7, 8, 9}, 9, 1));
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    require(rejected, "calibration candidate bound was not enforced");
+
+    for (const auto seed : {1ULL, 42ULL, 99ULL}) {
+        for (const auto repetitions : {1U, 2U, 3U}) {
+            const auto pilot = tests::prepareSamplingOverheadPilot(seed, repetitions, 1000, 2000);
+            tests::validateSamplingOverheadPilot(pilot);
+            require(pilot.object().value("trialCount").toInt() == static_cast<int>(repetitions * 8),
+                    "pilot plan did not contain the expected total trial count");
+            std::map<QString, int> counts;
+            for (const auto& value : pilot.object().value("trials").toArray()) {
+                const auto trial = value.toObject();
+                const auto condition = trial.value("samplingMode").toString() + QStringLiteral(":") +
+                    QString::number(trial.value("intervalMilliseconds").toInt());
+                const auto key = trial.value("workload").toString() + QStringLiteral(":") +
+                    QString::number(trial.value("repetition").toInt()) + QStringLiteral(":") + condition;
+                ++counts[key];
+            }
+            for (const auto workload : {QStringLiteral("sha256"), QStringLiteral("aes256-gcm-encrypt")}) {
+                for (const auto condition : {QStringLiteral("boundaryOnlyControl:0"),
+                                             QStringLiteral("periodic:5"), QStringLiteral("periodic:2"),
+                                             QStringLiteral("periodic:1")}) {
+                    for (unsigned repetition = 0; repetition < repetitions; ++repetition) {
+                        require(counts[workload + QStringLiteral(":") + QString::number(repetition) +
+                                        QStringLiteral(":") + condition] == 1,
+                                "pilot condition matrix is not balanced");
+                    }
+                }
+            }
+            const auto repeated = tests::prepareSamplingOverheadPilot(seed, repetitions, 1000, 2000);
+            require(pilot == repeated, "pilot seed did not produce deterministic ordering");
+
+            auto tamperedObject = pilot.object();
+            auto tamperedTrials = tamperedObject.value("trials").toArray();
+            tamperedTrials.removeLast();
+            tamperedObject.insert("trials", tamperedTrials);
+            tamperedObject.insert("trialCount", tamperedTrials.size());
+            bool rejectedTampering = false;
+            try {
+                tests::validateSamplingOverheadPilot(QJsonDocument(tamperedObject));
+            } catch (const std::runtime_error&) {
+                rejectedTampering = true;
+            }
+            require(rejectedTampering, "unbalanced pilot manifest was accepted");
+
+            auto nTamperedObject = pilot.object();
+            auto nTamperedTrials = nTamperedObject.value("trials").toArray();
+            auto nTamperedTrial = nTamperedTrials[0].toObject();
+            nTamperedTrial.insert("iterationsPerRun", QStringLiteral("9999"));
+            nTamperedTrials[0] = nTamperedTrial;
+            nTamperedObject.insert("trials", nTamperedTrials);
+            bool rejectedInconsistentN = false;
+            try {
+                tests::validateSamplingOverheadPilot(QJsonDocument(nTamperedObject));
+            } catch (const std::runtime_error&) {
+                rejectedInconsistentN = true;
+            }
+            require(rejectedInconsistentN, "inconsistent per-workload N was accepted");
+        }
+    }
+
+    tests::SamplingOverheadRun failed;
+    failed.status = QStringLiteral("failed");
+    failed.error = QStringLiteral("worker startup failed");
+    const auto failedArtifact = tests::samplingOverheadRunArtifact(failed);
+    const auto windows = failedArtifact.object().value("measurementWindows").toObject();
+    require(windows.value("parentSessionCpuNanoseconds").isNull(),
+            "unobserved parent CPU was serialized as zero");
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -135,18 +238,83 @@ int main(int argc, char* argv[])
     QCoreApplication application(argc, argv);
     try {
         QString output;
+        QString calibrationWorkload;
+        bool preparePilot = false;
+        std::uint64_t seed = 0;
+        std::uint32_t repetitions = 0;
+        std::uint64_t sha256Iterations = 0;
+        std::uint64_t aes256GcmIterations = 0;
         for (int index = 1; index < argc; ++index) {
             const auto argument = QString::fromLocal8Bit(argv[index]);
             if (argument == QStringLiteral("--self-test")) continue;
+            if (argument == QStringLiteral("--calibrate") && index + 1 < argc) {
+                calibrationWorkload = QString::fromLocal8Bit(argv[++index]);
+                continue;
+            }
+            if (argument == QStringLiteral("--prepare-pilot")) {
+                preparePilot = true;
+                continue;
+            }
             if (argument == QStringLiteral("--output") && index + 1 < argc) {
                 output = QString::fromLocal8Bit(argv[++index]);
                 continue;
             }
+            if (argument == QStringLiteral("--seed") && index + 1 < argc) {
+                seed = QString::fromLocal8Bit(argv[++index]).toULongLong();
+                continue;
+            }
+            if (argument == QStringLiteral("--repetitions") && index + 1 < argc) {
+                repetitions = QString::fromLocal8Bit(argv[++index]).toUInt();
+                continue;
+            }
+            if (argument == QStringLiteral("--sha256-n") && index + 1 < argc) {
+                sha256Iterations = QString::fromLocal8Bit(argv[++index]).toULongLong();
+                continue;
+            }
+            if (argument == QStringLiteral("--aes256-gcm-n") && index + 1 < argc) {
+                aes256GcmIterations = QString::fromLocal8Bit(argv[++index]).toULongLong();
+                continue;
+            }
             throw std::invalid_argument("usage: --self-test [--output <path>]");
         }
-        require(tests::eventDrivenWatchdogSelfTest(25),
-            "event-driven watchdog deadline regression failed");
+        if (!calibrationWorkload.isEmpty()) {
+            require(!output.isEmpty(), "calibration requires --output");
+            const auto workload = calibrationWorkload == QStringLiteral("sha256")
+                ? tests::SamplingOverheadWorkload::Sha256
+                : calibrationWorkload == QStringLiteral("aes256-gcm-encrypt")
+                    ? tests::SamplingOverheadWorkload::Aes256GcmEncrypt
+                    : throw std::invalid_argument("unsupported calibration workload");
+            const std::vector<std::uint64_t> candidates = workload ==
+                tests::SamplingOverheadWorkload::Sha256
+                ? std::vector<std::uint64_t>{1'000, 10'000, 100'000, 1'000'000, 10'000'000, 100'000'000}
+                : std::vector<std::uint64_t>{1, 10, 100, 1'000, 10'000, 100'000, 1'000'000};
+            const auto calibration = tests::runSamplingOverheadCalibration(workload, candidates, 6, 120);
+            tests::validateSamplingOverheadCalibration(calibration);
+            tests::writeSamplingOverheadArtifact(output, calibration);
+            static_cast<void>(tests::readSamplingOverheadArtifact(output));
+            std::cout << "PASS bounded calibration artifact\n";
+            return 0;
+        }
+        if (preparePilot) {
+            require(!output.isEmpty() && repetitions > 0 && seed > 0 &&
+                        sha256Iterations > 0 && aes256GcmIterations > 0,
+                    "pilot preparation requires --output, --seed, --repetitions, --sha256-n and --aes256-gcm-n");
+            const auto pilot = tests::prepareSamplingOverheadPilot(
+                seed, repetitions, sha256Iterations, aes256GcmIterations);
+            tests::validateSamplingOverheadPilot(pilot);
+            tests::writeSamplingOverheadArtifact(output, pilot);
+            static_cast<void>(tests::readSamplingOverheadArtifact(output));
+            std::cout << "PASS pilot plan preparation (not executed)\n";
+            return 0;
+        }
+        QString watchdogDiagnostic;
+        if (!tests::eventDrivenWatchdogSelfTest(25, &watchdogDiagnostic)) {
+            throw std::runtime_error(
+                "event-driven watchdog deadline regression failed: " +
+                watchdogDiagnostic.toStdString());
+        }
         testInvalidIntervals();
+        testB1WorkloadsAndPlanning();
         const auto runs = testTimingAndArtifactModes();
         testArtifactFailureAndMalformedInputs();
         if (!output.isEmpty()) {
@@ -156,7 +324,7 @@ int main(int argc, char* argv[])
             const auto roundTrip = tests::readSamplingOverheadArtifact(output);
             require(roundTrip == batch, "persisted batch artifact did not round-trip exactly");
         }
-        std::cout << "PASS real Memory v2 sampling overhead Stage A self-tests\n";
+        std::cout << "PASS real Memory v2 sampling overhead Stage B1 self-tests\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';
