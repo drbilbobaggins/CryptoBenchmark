@@ -287,7 +287,8 @@ int main(int argc, char* argv[])
             const std::vector<std::uint64_t> candidates = workload ==
                 tests::SamplingOverheadWorkload::Sha256
                 ? std::vector<std::uint64_t>{1'000, 10'000, 100'000, 1'000'000, 10'000'000, 100'000'000}
-                : std::vector<std::uint64_t>{1, 10, 100, 1'000, 10'000, 100'000, 1'000'000};
+                : std::vector<std::uint64_t>{1'000'000, 2'000'000, 3'000'000,
+                                             4'000'000, 5'000'000, 6'000'000};
             const auto calibration = tests::runSamplingOverheadCalibration(workload, candidates, 6, 120);
             tests::validateSamplingOverheadCalibration(calibration);
             tests::writeSamplingOverheadArtifact(output, calibration);
