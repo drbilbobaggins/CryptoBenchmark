@@ -17,6 +17,7 @@
 #include <QJsonArray>
 #include <QProcess>
 #include <QSysInfo>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QUuid>
 
@@ -24,6 +25,7 @@
 #include <psapi.h>
 
 #include <stdexcept>
+#include <iostream>
 #include <algorithm>
 #include <array>
 #include <functional>
@@ -124,6 +126,17 @@ QString executableSha256(const QString& path)
 QJsonValue optionalU64(const std::optional<std::uint64_t>& value)
 {
     return value ? QJsonValue(QString::number(*value)) : QJsonValue(QJsonValue::Null);
+}
+
+std::uint64_t requiredDecimalU64(const QJsonValue& value, const char* field)
+{
+    bool ok = false;
+    const auto text = value.toString();
+    const auto parsed = text.toULongLong(&ok);
+    require(value.isString() && ok && !text.isEmpty() &&
+                QString::number(parsed) == text,
+            field);
+    return parsed;
 }
 
 QString modeName(SamplingOverheadMode mode)
@@ -350,7 +363,7 @@ QJsonDocument samplingOverheadRunArtifact(const SamplingOverheadRun& run)
         {"intervalMilliseconds", static_cast<qint64>(run.intervalMilliseconds)},
         {"logicalRunIndex", static_cast<qint64>(run.logicalRunIndex)},
         {"executionOrder", static_cast<qint64>(run.executionOrder)},
-        {"workerPid", static_cast<qint64>(run.workerPid)},
+        {"workerPid", QString::number(run.workerPid)},
         {"workerCreationTime100ns", optionalU64(run.workerCreationTime100ns)},
         {"workerMeasurementObserved", run.workerMeasurementObserved},
         {"normalExit", run.normalExit},
@@ -416,7 +429,8 @@ void validateSamplingOverheadRunArtifact(const QJsonDocument& document)
     if (status != QStringLiteral("completed")) {
         require(!object.value("error").toString().isEmpty(), "failed artifact has no error");
     }
-    require(object.value("workerPid").toInt() >= 0 && object.value("provenance").isObject() &&
+    require((object.value("workerPid").isString() || object.value("workerPid").isNull()) &&
+                object.value("provenance").isObject() &&
                 object.value("configuration").isObject() && object.value("measurementWindows").isObject(),
             "sampling-overhead provenance is incomplete");
     const auto windows = object.value("measurementWindows").toObject();
@@ -443,13 +457,21 @@ void validateSamplingOverheadRunArtifact(const QJsonDocument& document)
                     object.value("memoryObserved").toBool(),
                 "completed sampling-overhead artifact is incomplete");
         const auto provenance = object.value("provenance").toObject();
-        require(object.value("workerCreationTime100ns").isString() &&
-                    !provenance.value("workerExecutableSha256").toString().isEmpty() &&
-                    !provenance.value("gitHead").toString().isEmpty() &&
-                    !provenance.value("buildType").toString().isEmpty() &&
-                    !provenance.value("operatingSystem").toString().isEmpty() &&
-                    !provenance.value("architecture").toString().isEmpty(),
-                "completed sampling-overhead artifact lacks provenance");
+        if (!(object.value("workerCreationTime100ns").isString() &&
+              !provenance.value("workerExecutableSha256").toString().isEmpty() &&
+              !provenance.value("gitHead").toString().isEmpty() &&
+              !provenance.value("buildType").toString().isEmpty() &&
+              !provenance.value("operatingSystem").toString().isEmpty() &&
+              !provenance.value("architecture").toString().isEmpty())) {
+            throw std::runtime_error(
+                "completed sampling-overhead artifact lacks provenance: " +
+                object.value("workerCreationTime100ns").toString().toStdString() + "," +
+                provenance.value("workerExecutableSha256").toString().toStdString() + "," +
+                provenance.value("gitHead").toString().toStdString() + "," +
+                provenance.value("buildType").toString().toStdString() + "," +
+                provenance.value("operatingSystem").toString().toStdString() + "," +
+                provenance.value("architecture").toString().toStdString());
+        }
         const auto configuration = object.value("configuration").toObject();
         require(!configuration.value("algorithmProfile").toString().isEmpty() &&
                     !configuration.value("operation").toString().isEmpty() &&
@@ -457,6 +479,41 @@ void validateSamplingOverheadRunArtifact(const QJsonDocument& document)
                     configuration.value("iterationsPerRun").isString() &&
                     configuration.value("runs").toInt() == 1,
                 "completed sampling-overhead artifact lacks configuration");
+        const auto workerPid = requiredDecimalU64(object.value("workerPid"),
+                                                  "worker PID is malformed");
+        const auto creation = requiredDecimalU64(object.value("workerCreationTime100ns"),
+                                                 "worker creation identity is malformed");
+        require(workerPid > 0 && creation > 0, "worker process identity is invalid");
+        const auto windows = object.value("measurementWindows").toObject();
+        const auto workerWall = requiredDecimalU64(
+            windows.value("workerElapsedNanoseconds"), "worker wall time is malformed");
+        const auto workerCpu = requiredDecimalU64(
+            windows.value("workerProcessCpuNanoseconds"), "worker CPU time is malformed");
+        static_cast<void>(workerWall);
+        static_cast<void>(workerCpu);
+        const auto memory = object.value("memory").toObject();
+        const auto b0 = requiredDecimalU64(memory.value("b0PrivateUsageBytes"), "B0 is malformed");
+        const auto b1 = requiredDecimalU64(memory.value("b1PrivateUsageBytes"), "B1 is malformed");
+        const auto e = requiredDecimalU64(memory.value("ePrivateUsageBytes"), "E is malformed");
+        require(b0 > 0 && b1 > 0 && e > 0, "boundary memory observations are invalid");
+        const auto preparationSamples = requiredDecimalU64(
+            memory.value("preparationSampleCount"), "preparation sample count is malformed");
+        const auto executionSamples = requiredDecimalU64(
+            memory.value("executionSampleCount"), "execution sample count is malformed");
+        const auto preparationPeak = memory.value("preparationPeakSampledPrivateUsageBytes");
+        const auto executionPeak = memory.value("executionPeakSampledPrivateUsageBytes");
+        require(preparationSamples == 0 ? preparationPeak.isNull() : preparationPeak.isString(),
+                "preparation peak/sample consistency is invalid");
+        require(executionSamples == 0 ? executionPeak.isNull() : executionPeak.isString(),
+                "execution peak/sample consistency is invalid");
+        if (preparationPeak.isString()) static_cast<void>(requiredDecimalU64(
+            preparationPeak, "preparation peak is malformed"));
+        if (executionPeak.isString()) static_cast<void>(requiredDecimalU64(
+            executionPeak, "execution peak is malformed"));
+        require(windows.value("parentSessionWallNanoseconds").isString(),
+                "parent session wall time is unavailable");
+        static_cast<void>(requiredDecimalU64(
+            windows.value("parentSessionWallNanoseconds"), "parent session wall time is malformed"));
     }
 }
 
@@ -780,6 +837,623 @@ QJsonDocument readSamplingOverheadArtifact(const QString& source)
         validateSamplingOverheadRunArtifact(document);
     }
     return document;
+}
+
+namespace {
+
+struct PilotTrialDetails {
+    SamplingOverheadWorkload workload;
+    SamplingOverheadMode mode;
+    std::uint32_t intervalMilliseconds;
+    std::uint64_t iterationsPerRun;
+    std::uint32_t trialIndex;
+    std::uint32_t executionOrder;
+    std::uint32_t repetition;
+    QString workloadId;
+};
+
+QString fileSha256(const QString& path)
+{
+    QFile file(path);
+    require(file.open(QIODevice::ReadOnly), "could not open pilot input for SHA-256");
+    return QString::fromLatin1(
+        QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256).toHex());
+}
+
+QString strictGitValue(const QStringList& arguments)
+{
+    const auto root = sourceRoot();
+    require(!root.isEmpty(), "Git repository root is unavailable");
+    QProcess process;
+    process.setWorkingDirectory(root);
+    process.start(QStringLiteral("git"), arguments);
+    require(process.waitForFinished(5'000), "Git query timed out");
+    require(process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0,
+            "Git query failed");
+    return QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
+}
+
+PilotTrialDetails pilotTrial(const QJsonObject& value)
+{
+    const auto workloadId = value.value("workload").toString();
+    const auto workload = workloadId == QStringLiteral("sha256")
+        ? SamplingOverheadWorkload::Sha256
+        : workloadId == QStringLiteral("aes256-gcm-encrypt")
+            ? SamplingOverheadWorkload::Aes256GcmEncrypt
+            : throw std::invalid_argument("pilot plan contains an unsupported workload");
+    const auto modeNameValue = value.value("samplingMode").toString();
+    const auto mode = modeNameValue == QStringLiteral("boundaryOnlyControl")
+        ? SamplingOverheadMode::BoundaryOnlyControl
+        : modeNameValue == QStringLiteral("periodic")
+            ? SamplingOverheadMode::Periodic
+            : throw std::invalid_argument("pilot plan contains an unsupported sampling mode");
+    bool iterationsOk = false;
+    const auto iterations = value.value("iterationsPerRun").toString().toULongLong(&iterationsOk);
+    require(iterationsOk && iterations > 0, "pilot plan iterations are invalid");
+    return {workload, mode,
+            static_cast<std::uint32_t>(value.value("intervalMilliseconds").toInt()), iterations,
+            static_cast<std::uint32_t>(value.value("trialIndex").toInt()),
+            static_cast<std::uint32_t>(value.value("executionOrder").toInt()),
+            static_cast<std::uint32_t>(value.value("repetition").toInt()), workloadId};
+}
+
+std::vector<PilotTrialDetails> validatedPilotTrials(const QJsonDocument& document)
+{
+    validateSamplingOverheadPilot(document);
+    const auto object = document.object();
+    require(object.value("repetitions").toInt() == 3 &&
+                object.value("trialCount").toInt() == 24,
+            "pilot executor requires exactly 3 repetitions and 24 trials");
+    std::vector<PilotTrialDetails> trials;
+    for (const auto& value : object.value("trials").toArray()) {
+        trials.push_back(pilotTrial(value.toObject()));
+    }
+    require(trials.size() == 24, "pilot executor trial count is invalid");
+    std::sort(trials.begin(), trials.end(),
+              [](const auto& left, const auto& right) {
+                  return left.executionOrder < right.executionOrder;
+              });
+    for (std::size_t index = 0; index < trials.size(); ++index) {
+        require(trials[index].executionOrder == index,
+                "pilot execution order is not a complete canonical sequence");
+    }
+    return trials;
+}
+
+struct CalibrationSelection {
+    std::uint64_t iterationsPerRun;
+    QString historicGitHead;
+    QString calibrationHash;
+    QString workerHash;
+};
+
+CalibrationSelection validateSuccessfulCalibration(
+    const QString& path,
+    const QString& expectedWorkload,
+    const QString& currentWorkerHash)
+{
+    const auto document = readSamplingOverheadArtifact(path);
+    validateSamplingOverheadCalibration(document);
+    const auto object = document.object();
+    require(object.value("status") == QStringLiteral("success") &&
+                object.value("workload") == expectedWorkload,
+            "calibration is not a successful matching workload");
+    bool selectedOk = false;
+    const auto selected = object.value("selectedIterationsPerRun").toString().toULongLong(&selectedOk);
+    require(selectedOk && selected > 0, "calibration selected N is invalid");
+    bool found = false;
+    QString historicGitHead;
+    QString workerHash;
+    for (const auto& value : object.value("observations").toArray()) {
+        const auto run = value.toObject();
+        if (run.value("calibrationCandidateIterations").toString() != QString::number(selected) ||
+            run.value("status") != QStringLiteral("completed")) continue;
+        const auto timing = run.value("measurementWindows").toObject();
+        bool wallOk = false;
+        const auto wall = timing.value("workerElapsedNanoseconds").toString().toULongLong(&wallOk);
+        const auto provenance = run.value("provenance").toObject();
+                const auto configuration = run.value("configuration").toObject();
+                const auto memory = run.value("memory").toObject();
+                require(wallOk && wall >= 900'000'000 &&
+                                        run.value("workload") == expectedWorkload &&
+                                        run.value("samplingMode") == QStringLiteral("boundaryOnlyControl") &&
+                                        run.value("intervalMilliseconds").toInt() == 5 &&
+                                        configuration.value("iterationsPerRun").toString() == QString::number(selected) &&
+                                        configuration.value("runs").toInt() == 1 &&
+                                        ((expectedWorkload == QStringLiteral("sha256") &&
+                                            configuration.value("algorithmProfile") == QStringLiteral("sha256") &&
+                                            configuration.value("operation") == QStringLiteral("hash") &&
+                                            configuration.value("inputBytes").toString() == QStringLiteral("8")) ||
+                                         (expectedWorkload == QStringLiteral("aes256-gcm-encrypt") &&
+                                            configuration.value("algorithmProfile") == QStringLiteral("aes256-gcm") &&
+                                            configuration.value("operation") == QStringLiteral("encrypt") &&
+                                            configuration.value("inputBytes").toString() == QStringLiteral("16"))) &&
+                                        memory.value("preparationSampleCount").toString() == QStringLiteral("0") &&
+                                        memory.value("executionSampleCount").toString() == QStringLiteral("0") &&
+                                        memory.value("preparationPeakSampledPrivateUsageBytes").isNull() &&
+                                        memory.value("executionPeakSampledPrivateUsageBytes").isNull() &&
+                    !provenance.value("gitHead").toString().isEmpty() &&
+                                        provenance.value("gitDirty").toBool() == false &&
+                                        !provenance.value("buildType").toString().isEmpty() &&
+                    provenance.value("workerExecutableSha256").toString() == currentWorkerHash,
+                "selected calibration observation lacks valid provenance or duration");
+        historicGitHead = provenance.value("gitHead").toString();
+        workerHash = provenance.value("workerExecutableSha256").toString();
+        found = true;
+        break;
+    }
+    require(found, "selected calibration observation was not found");
+    return {selected, historicGitHead, fileSha256(path), workerHash};
+}
+
+void persistPilotJson(const QString& path, const QJsonDocument& document)
+{
+    require(!QFileInfo::exists(path), "pilot output destination already exists");
+    const auto result = application::AtomicFileWriter{}.writeAtomically(
+        path, document.toJson(QJsonDocument::Indented));
+    if (!result.success) throw std::runtime_error(result.technicalMessage.toStdString());
+}
+
+void validatePersistedPilotRecords(
+    const QString& outputDirectory,
+    const std::vector<PilotTrialDetails>& trials,
+    const QJsonObject& manifest)
+{
+    const auto files = QDir(outputDirectory).entryList(
+        {QStringLiteral("trial-*.json")}, QDir::Files, QDir::Name);
+    require(files.size() == 24, "pilot terminal record count is not 24");
+    for (const auto& trial : trials) {
+        const auto path = QDir(outputDirectory).filePath(
+            QStringLiteral("trial-%1.json").arg(trial.executionOrder, 3, 10, QLatin1Char('0')));
+        QFile file(path);
+        require(file.open(QIODevice::ReadOnly), "pilot terminal record cannot be read back");
+        QJsonParseError parseError{};
+        const auto document = QJsonDocument::fromJson(file.readAll(), &parseError);
+        require(parseError.error == QJsonParseError::NoError && document.isObject(),
+                "pilot terminal record JSON is malformed");
+        const auto object = document.object();
+        const auto expectedPeriodic = trial.mode == SamplingOverheadMode::Periodic;
+        const auto result = object.value("result").toObject();
+        const auto configuration = result.value("configuration").toObject();
+        const auto provenance = result.value("provenance").toObject();
+        const auto memory = result.value("memory").toObject();
+        require(object.value("format") == QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-pilot-trial") &&
+                    object.value("schemaVersion").toInt() == 1 &&
+                    object.value("trialIndex").toInt() == static_cast<int>(trial.trialIndex) &&
+                    object.value("executionOrder").toInt() == static_cast<int>(trial.executionOrder) &&
+                    object.value("repetition").toInt() == static_cast<int>(trial.repetition) &&
+                    object.value("workload").toString() == trial.workloadId &&
+                    object.value("samplingMode").toString() == modeName(trial.mode) &&
+                    object.value("intervalMilliseconds").toInt() ==
+                        static_cast<int>(trial.intervalMilliseconds) &&
+                    object.value("periodicSamplingEnabled").toBool() == expectedPeriodic &&
+                    object.value("iterationsPerRun").toString() == QString::number(trial.iterationsPerRun) &&
+                    object.value("status").toString() == QStringLiteral("completed"),
+                "pilot terminal record identity is inconsistent");
+        validateSamplingOverheadRunArtifact(QJsonDocument(result));
+        require(result.value("status") == QStringLiteral("completed") &&
+                    result.value("normalExit").toBool() &&
+                    result.value("workerMeasurementObserved").toBool() &&
+                    result.value("memoryObserved").toBool() &&
+                    result.value("samplingMode").toString() == modeName(trial.mode) &&
+                    result.value("workload").toString() == trial.workloadId &&
+                    result.value("periodicSamplingEnabled").toBool() == expectedPeriodic &&
+                    result.value("intervalMilliseconds").toInt() ==
+                        static_cast<int>(trial.intervalMilliseconds) &&
+                    result.value("executionOrder").toInt() == static_cast<int>(trial.executionOrder) &&
+                    configuration.value("iterationsPerRun").toString() == QString::number(trial.iterationsPerRun) &&
+                    configuration.value("runs").toInt() == 1 &&
+                    configuration.value("algorithmProfile").toString() ==
+                        (trial.workload == SamplingOverheadWorkload::Sha256 ? QStringLiteral("sha256") : QStringLiteral("aes256-gcm")) &&
+                    configuration.value("operation").toString() ==
+                        (trial.workload == SamplingOverheadWorkload::Sha256 ? QStringLiteral("hash") : QStringLiteral("encrypt")) &&
+                    configuration.value("inputBytes").toString() ==
+                        QString::number(trial.workload == SamplingOverheadWorkload::Sha256 ? 8 : 16),
+                "pilot terminal result is not completed or misordered");
+        const auto simulated = manifest.value("simulated").toBool();
+        require(provenance.value("workerExecutableSha256") ==
+                    manifest.value("workerExecutableSha256") &&
+                    provenance.value("gitHead") == manifest.value("currentGitHead") &&
+                    provenance.value("gitDirty").toBool() == false &&
+                    provenance.value("buildType") == manifest.value("buildType"),
+                "pilot terminal provenance does not match manifest");
+        if (simulated) {
+            require(provenance.value("workerExecutablePath") == QStringLiteral("simulated-worker"),
+                    "simulated terminal provenance is not explicit");
+        } else {
+            require(provenance.value("workerExecutableSha256").toString() ==
+                        manifest.value("workerExecutableSha256").toString() &&
+                        requiredDecimalU64(result.value("workerPid"), "worker PID is malformed") > 0 &&
+                        result.value("workerCreationTime100ns").isString(),
+                    "real terminal worker identity is unavailable");
+        }
+        require(result.value("workerCreationTime100ns").isString() &&
+                    !result.value("measurementWindows").toObject()
+                        .value("workerElapsedNanoseconds").toString().isEmpty() &&
+                    !result.value("measurementWindows").toObject()
+                        .value("workerProcessCpuNanoseconds").toString().isEmpty(),
+                "canonical worker measurement is unavailable");
+        if (!expectedPeriodic) {
+            require(memory.value("preparationSampleCount") == QStringLiteral("0") &&
+                        memory.value("executionSampleCount") == QStringLiteral("0") &&
+                        memory.value("preparationPeakSampledPrivateUsageBytes").isNull() &&
+                        memory.value("executionPeakSampledPrivateUsageBytes").isNull(),
+                    "OFF terminal record contains periodic sampling evidence");
+        }
+    }
+}
+
+QJsonObject simulationSummary(
+    const std::vector<QString>& terminalStatuses,
+    std::uint32_t attempted,
+    std::uint32_t completed,
+    std::uint32_t persisted,
+    bool interrupted,
+    bool persistenceFailed,
+    bool validationFailed = false)
+{
+    const auto planned = 24U;
+    return QJsonObject{
+        {"format", "cryptobenchmark-memory-v2-sampling-overhead-pilot-summary"},
+        {"schemaVersion", 1}, {"complete", completed == planned && persisted == planned &&
+                                     !interrupted && !persistenceFailed && !validationFailed},
+        {"status", completed == planned && persisted == planned && !interrupted &&
+                    !persistenceFailed && !validationFailed
+            ? QJsonValue("completed") : QJsonValue("incomplete")},
+        {"plannedCount", static_cast<qint64>(planned)},
+        {"attemptedCount", static_cast<qint64>(attempted)},
+        {"completedCount", static_cast<qint64>(completed)},
+        {"persistedCount", static_cast<qint64>(persisted)},
+        {"notStartedCount", static_cast<qint64>(planned - attempted)},
+        {"interrupted", interrupted}, {"persistenceFailed", persistenceFailed},
+        {"validationFailed", validationFailed},
+        {"terminalStatuses", [&] {
+            QJsonArray values;
+            for (const auto& status : terminalStatuses) values.append(status);
+            return values;
+        }()}};
+}
+
+using PilotWorkerCallback = std::function<SamplingOverheadRun(const PilotTrialDetails&)>;
+
+SamplingOverheadRun simulatedRun(const PilotTrialDetails& trial, const QString& status)
+{
+    SamplingOverheadRun run;
+    run.mode = trial.mode;
+    run.intervalMilliseconds = trial.intervalMilliseconds;
+    run.logicalRunIndex = 0;
+    run.executionOrder = trial.executionOrder;
+    run.workload = trial.workload;
+    run.workerPid = 10'000 + trial.executionOrder;
+    run.workerCreationTime100ns = 100'000 + trial.executionOrder;
+    run.parentSessionWallNanoseconds = 1'000'000;
+    run.parentSessionCpuNanoseconds = 100'000;
+    run.workerExecutablePath = QStringLiteral("simulated-worker");
+    run.workerExecutableSha256 = QStringLiteral("simulated-worker-sha256");
+    run.gitHead = QStringLiteral("simulated-git-head");
+    run.buildType = QStringLiteral("Simulation");
+    run.operatingSystem = QStringLiteral("simulated");
+    run.architecture = QStringLiteral("simulated");
+    run.algorithmProfile = trial.workload == SamplingOverheadWorkload::Sha256
+        ? QStringLiteral("sha256") : QStringLiteral("aes256-gcm");
+    run.operation = trial.workload == SamplingOverheadWorkload::Sha256
+        ? QStringLiteral("hash") : QStringLiteral("encrypt");
+    run.inputBytes = trial.workload == SamplingOverheadWorkload::Sha256 ? 8 : 16;
+    run.iterationsPerRun = trial.iterationsPerRun;
+    run.status = status;
+    run.error = status == QStringLiteral("completed") ? QString{} : QStringLiteral("simulated failure");
+    if (status == QStringLiteral("completed")) {
+        run.workerMeasurementObserved = true;
+        run.memoryObserved = true;
+        run.normalExit = true;
+        run.workerMeasurement = {0, 1'000'000, 100'000};
+        run.memory = {1, 2, std::nullopt, std::nullopt, 3, 0, 0};
+    }
+    return run;
+}
+
+int runPilotOrchestration(
+    const std::vector<PilotTrialDetails>& trials,
+    const QString& outputDirectory,
+    const QJsonDocument& manifest,
+    const PilotWorkerCallback& workerCallback,
+    std::optional<std::uint32_t> failPersistenceAfter = {},
+    std::optional<std::uint32_t> stopBeforeTrial = {},
+    bool failFinalValidation = false,
+    bool failAfterSummaryBeforeMarker = false)
+{
+    bool outputCreated = false;
+    std::uint32_t attempted = 0;
+    std::uint32_t completed = 0;
+    std::uint32_t persisted = 0;
+    bool persistenceFailed = false;
+    bool interrupted = false;
+    bool validationFailed = false;
+    std::vector<QString> terminalStatuses;
+    try {
+        require(!QFileInfo::exists(outputDirectory), "pilot output directory already exists");
+        require(QDir().mkpath(outputDirectory), "could not create pilot output directory");
+        outputCreated = true;
+        persistPilotJson(QDir(outputDirectory).filePath(QStringLiteral("manifest.json")), manifest);
+        QFile manifestFile(QDir(outputDirectory).filePath(QStringLiteral("manifest.json")));
+        require(manifestFile.open(QIODevice::ReadOnly), "pilot manifest could not be read back");
+        QJsonParseError manifestError{};
+        const auto manifestRoundTrip = QJsonDocument::fromJson(manifestFile.readAll(), &manifestError);
+        require(manifestError.error == QJsonParseError::NoError &&
+            manifestRoundTrip.object() == manifest.object(),
+            "pilot manifest read-back validation failed");
+        QElapsedTimer totalTimer;
+        totalTimer.start();
+        for (const auto& trial : trials) {
+            if (stopBeforeTrial && trial.executionOrder >= *stopBeforeTrial) {
+                interrupted = true;
+                throw std::runtime_error("pilot execution interrupted before next trial");
+            }
+            const auto remainingMilliseconds = 240'000 - totalTimer.elapsed();
+            if (remainingMilliseconds <= 5'000) {
+                interrupted = true;
+                throw std::runtime_error("pilot total watchdog deadline expired");
+            }
+            const QJsonDocument marker(QJsonObject{
+                {"format", "cryptobenchmark-memory-v2-sampling-overhead-pilot-attempt"},
+                {"schemaVersion", 1}, {"status", "started"},
+                {"trialIndex", static_cast<qint64>(trial.trialIndex)},
+                {"executionOrder", static_cast<qint64>(trial.executionOrder)},
+                {"repetition", static_cast<qint64>(trial.repetition)},
+                {"workload", trial.workloadId},
+                {"iterationsPerRun", QString::number(trial.iterationsPerRun)}});
+            persistPilotJson(QDir(outputDirectory).filePath(
+                QStringLiteral("attempt-%1.json").arg(trial.executionOrder, 3, 10, QLatin1Char('0'))), marker);
+            ++attempted;
+            SamplingOverheadRun run;
+            try {
+                run = workerCallback(trial);
+            } catch (const std::exception& error) {
+                run.status = QStringLiteral("incomplete");
+                run.error = QString::fromStdString(error.what());
+                run.mode = trial.mode;
+                run.intervalMilliseconds = trial.intervalMilliseconds;
+                run.logicalRunIndex = 0;
+                run.workload = trial.workload;
+                run.executionOrder = trial.executionOrder;
+                run.iterationsPerRun = trial.iterationsPerRun;
+                run.algorithmProfile = trial.workload == SamplingOverheadWorkload::Sha256
+                    ? QStringLiteral("sha256") : QStringLiteral("aes256-gcm");
+                run.operation = trial.workload == SamplingOverheadWorkload::Sha256
+                    ? QStringLiteral("hash") : QStringLiteral("encrypt");
+                run.inputBytes = trial.workload == SamplingOverheadWorkload::Sha256 ? 8 : 16;
+                run.runs = 1;
+                interrupted = true;
+            }
+            terminalStatuses.push_back(run.status);
+            if (run.status == QStringLiteral("completed")) ++completed;
+            if (run.status == QStringLiteral("incomplete")) interrupted = true;
+            auto resultObject = samplingOverheadRunArtifact(run).object();
+            resultObject.insert(QStringLiteral("periodicSamplingEnabled"),
+                                trial.mode == SamplingOverheadMode::Periodic);
+            if (trial.mode == SamplingOverheadMode::BoundaryOnlyControl) {
+                resultObject.insert(QStringLiteral("intervalMilliseconds"), 0);
+                resultObject.insert(QStringLiteral("internalMeasurementSettingsIntervalMilliseconds"), 5);
+            }
+            const QJsonObject record{
+                {"format", "cryptobenchmark-memory-v2-sampling-overhead-pilot-trial"},
+                {"schemaVersion", 1}, {"trialIndex", static_cast<qint64>(trial.trialIndex)},
+                {"executionOrder", static_cast<qint64>(trial.executionOrder)},
+                {"status", run.status}, {"error", run.error},
+                {"workload", trial.workloadId}, {"repetition", static_cast<qint64>(trial.repetition)},
+                {"samplingMode", modeName(trial.mode)},
+                {"intervalMilliseconds", static_cast<qint64>(trial.intervalMilliseconds)},
+                {"periodicSamplingEnabled", trial.mode == SamplingOverheadMode::Periodic},
+                {"iterationsPerRun", QString::number(trial.iterationsPerRun)},
+                {"result", resultObject}};
+            if (failPersistenceAfter && persisted >= *failPersistenceAfter) {
+                QFile collision(QDir(outputDirectory).filePath(
+                    QStringLiteral("trial-%1.json").arg(trial.executionOrder, 3, 10, QLatin1Char('0'))));
+                require(collision.open(QIODevice::WriteOnly), "could not inject persistence collision");
+                require(collision.write("collision") == 9, "could not write persistence collision");
+                collision.close();
+            }
+            try {
+                persistPilotJson(QDir(outputDirectory).filePath(
+                    QStringLiteral("trial-%1.json").arg(trial.executionOrder, 3, 10, QLatin1Char('0'))),
+                    QJsonDocument(record));
+                ++persisted;
+            } catch (...) {
+                persistenceFailed = true;
+                throw;
+            }
+            if (run.status != QStringLiteral("completed")) {
+                throw std::runtime_error("pilot trial failed: " + run.error.toStdString());
+            }
+        }
+        validatePersistedPilotRecords(outputDirectory, trials, manifest.object());
+        if (failFinalValidation) {
+            throw std::runtime_error("simulated final validation failure");
+        }
+        require(attempted == 24 && completed == 24 && persisted == 24,
+                "pilot did not complete all planned trials");
+        const auto summary = QJsonDocument(simulationSummary(
+            terminalStatuses, attempted, completed, persisted, false, false));
+        persistPilotJson(QDir(outputDirectory).filePath(QStringLiteral("summary.json")), summary);
+        QFile summaryFile(QDir(outputDirectory).filePath(QStringLiteral("summary.json")));
+        require(summaryFile.open(QIODevice::ReadOnly), "pilot summary could not be read back");
+        QJsonParseError summaryError{};
+        const auto summaryRoundTrip = QJsonDocument::fromJson(summaryFile.readAll(), &summaryError);
+        require(summaryError.error == QJsonParseError::NoError &&
+                    summaryRoundTrip.object().value("complete").toBool() &&
+                    summaryRoundTrip.object().value("plannedCount").toInt() == 24 &&
+                    summaryRoundTrip.object().value("attemptedCount").toInt() == 24 &&
+                    summaryRoundTrip.object().value("completedCount").toInt() == 24 &&
+                    summaryRoundTrip.object().value("persistedCount").toInt() == 24,
+                "pilot summary read-back validation failed");
+            if (failAfterSummaryBeforeMarker) {
+                throw std::runtime_error("simulated post-summary validation failure");
+            }
+        const QJsonDocument successMarker(QJsonObject{
+            {"format", "cryptobenchmark-memory-v2-sampling-overhead-pilot-success"},
+            {"schemaVersion", 1}, {"complete", true}, {"plannedCount", 24},
+            {"manifestSha256", fileSha256(QDir(outputDirectory).filePath(QStringLiteral("manifest.json")))},
+            {"summarySha256", fileSha256(QDir(outputDirectory).filePath(QStringLiteral("summary.json")))}});
+        persistPilotJson(QDir(outputDirectory).filePath(QStringLiteral("success.marker")), successMarker);
+        QFile markerFile(QDir(outputDirectory).filePath(QStringLiteral("success.marker")));
+        require(markerFile.open(QIODevice::ReadOnly), "pilot success marker could not be read back");
+        QJsonParseError markerError{};
+        const auto markerRoundTrip = QJsonDocument::fromJson(markerFile.readAll(), &markerError);
+        require(markerError.error == QJsonParseError::NoError &&
+                    markerRoundTrip.object() == successMarker.object(),
+                "pilot success marker read-back validation failed");
+        return 0;
+    } catch (const std::exception& error) {
+        validationFailed = true;
+        std::cerr << "pilot orchestration simulation/runner failure: " << error.what() << '\n';
+        if (outputCreated && !QFileInfo::exists(QDir(outputDirectory).filePath(QStringLiteral("summary.json")))) {
+            auto summary = simulationSummary(
+                terminalStatuses, attempted, completed, persisted, interrupted, persistenceFailed,
+                validationFailed);
+            summary.insert(QStringLiteral("error"), QString::fromStdString(error.what()));
+            try { persistPilotJson(QDir(outputDirectory).filePath(QStringLiteral("summary.json")), QJsonDocument(summary)); }
+            catch (...) { }
+        }
+        return 1;
+    }
+}
+
+} // namespace
+
+QJsonDocument simulateSamplingOverheadPilot(
+    const QJsonDocument& plan,
+    const std::vector<QString>& terminalStatuses,
+    std::optional<std::uint32_t> failPersistenceAfter,
+    bool interrupted,
+    const QString& outputDirectory,
+    bool failFinalValidation,
+    bool failAfterSummaryBeforeMarker)
+{
+    const auto trials = validatedPilotTrials(plan);
+    if (!outputDirectory.isEmpty()) {
+        require(!QFileInfo::exists(outputDirectory), "simulation output directory already exists");
+    }
+    require(terminalStatuses.size() <= trials.size(), "simulation status count exceeds plan");
+    QTemporaryDir temporaryDirectory;
+    require(!temporaryDirectory.path().isEmpty(), "simulation temporary directory was not created");
+    const auto destination = outputDirectory.isEmpty()
+        ? temporaryDirectory.filePath(QStringLiteral("pilot")) : outputDirectory;
+    const auto manifest = QJsonDocument(QJsonObject{
+        {"format", "cryptobenchmark-memory-v2-sampling-overhead-pilot-manifest"},
+        {"schemaVersion", 1}, {"simulated", true}, {"plannedCount", 24},
+        {"complete", false}, {"currentGitHead", "simulated-git-head"},
+        {"workerExecutableSha256", "simulated-worker-sha256"}, {"buildType", "Simulation"}});
+    std::size_t callbackIndex = 0;
+    const auto callback = [&](const PilotTrialDetails& trial) {
+        const auto status = callbackIndex < terminalStatuses.size()
+            ? terminalStatuses[callbackIndex++] : QStringLiteral("completed");
+        if (status == QStringLiteral("throw")) throw std::runtime_error("simulated worker callback throw");
+        return simulatedRun(trial, status);
+    };
+    const auto result = runPilotOrchestration(
+        trials, destination, manifest, callback, failPersistenceAfter,
+        interrupted ? std::optional<std::uint32_t>{0} : std::nullopt,
+        failFinalValidation, failAfterSummaryBeforeMarker);
+        require(result == 0 || QFileInfo::exists(QDir(destination).filePath(QStringLiteral("summary.json"))),
+            "simulated pilot orchestration failed");
+    QFile summaryFile(QDir(destination).filePath(QStringLiteral("summary.json")));
+    require(summaryFile.open(QIODevice::ReadOnly), "simulation summary was not persisted");
+    QJsonParseError parseError{};
+    const auto summary = QJsonDocument::fromJson(summaryFile.readAll(), &parseError);
+    require(parseError.error == QJsonParseError::NoError, "simulation summary is malformed");
+    return summary;
+}
+
+void validateSamplingOverheadPilotOutput(
+    const QString& outputDirectory,
+    const QJsonDocument& plan,
+    const QJsonDocument& trustedManifest)
+{
+    const auto trials = validatedPilotTrials(plan);
+    QFile manifestFile(QDir(outputDirectory).filePath(QStringLiteral("manifest.json")));
+    require(manifestFile.open(QIODevice::ReadOnly), "pilot manifest cannot be opened for validation");
+    QJsonParseError parseError{};
+    const auto manifest = QJsonDocument::fromJson(manifestFile.readAll(), &parseError);
+    require(parseError.error == QJsonParseError::NoError && manifest.isObject() &&
+                trustedManifest.isObject() && manifest.object() == trustedManifest.object(),
+            "pilot manifest is malformed");
+    validatePersistedPilotRecords(outputDirectory, trials, trustedManifest.object());
+    QFile summaryFile(QDir(outputDirectory).filePath(QStringLiteral("summary.json")));
+    require(summaryFile.open(QIODevice::ReadOnly), "pilot summary is missing");
+    QJsonParseError summaryError{};
+    const auto summary = QJsonDocument::fromJson(summaryFile.readAll(), &summaryError);
+    require(summaryError.error == QJsonParseError::NoError &&
+                summary.object().value("complete").toBool() &&
+                summary.object().value("plannedCount").toInt() == 24 &&
+                summary.object().value("attemptedCount").toInt() == 24 &&
+                summary.object().value("completedCount").toInt() == 24 &&
+                summary.object().value("persistedCount").toInt() == 24,
+            "pilot summary is incomplete or malformed");
+    QFile markerFile(QDir(outputDirectory).filePath(QStringLiteral("success.marker")));
+    require(markerFile.open(QIODevice::ReadOnly), "pilot success marker is missing");
+    QJsonParseError markerError{};
+    const auto marker = QJsonDocument::fromJson(markerFile.readAll(), &markerError);
+    require(markerError.error == QJsonParseError::NoError &&
+                marker.object().value("format") == QStringLiteral("cryptobenchmark-memory-v2-sampling-overhead-pilot-success") &&
+                marker.object().value("complete").toBool() &&
+                marker.object().value("summarySha256") == fileSha256(summaryFile.fileName()) &&
+                marker.object().value("manifestSha256") == fileSha256(manifestFile.fileName()),
+            "pilot success marker is missing, malformed or inconsistent");
+}
+
+int executeSamplingOverheadPilot(
+    const QString& planPath,
+    const QString& sha256CalibrationPath,
+    const QString& aes256GcmCalibrationPath,
+    const QString& outputDirectory)
+{
+    try {
+        require(!QFileInfo::exists(outputDirectory), "pilot output directory already exists");
+        const auto plan = readSamplingOverheadArtifact(planPath);
+        const auto trials = validatedPilotTrials(plan);
+        const auto workerExecutable = workerPath();
+        const auto workerHash = executableSha256(workerExecutable);
+        const auto shaSelection = validateSuccessfulCalibration(
+            sha256CalibrationPath, QStringLiteral("sha256"), workerHash);
+        const auto aesSelection = validateSuccessfulCalibration(
+            aes256GcmCalibrationPath, QStringLiteral("aes256-gcm-encrypt"), workerHash);
+        for (const auto& trial : trials) {
+            const auto expectedIterations = trial.workload == SamplingOverheadWorkload::Sha256
+                ? shaSelection.iterationsPerRun : aesSelection.iterationsPerRun;
+            require(trial.iterationsPerRun == expectedIterations,
+                    "pilot plan N does not match accepted calibration N");
+        }
+        const auto currentGitHead = strictGitValue({QStringLiteral("rev-parse"), QStringLiteral("HEAD")});
+        const auto currentGitStatus = strictGitValue({QStringLiteral("status"), QStringLiteral("--porcelain")});
+        require(!currentGitHead.isEmpty() && currentGitStatus.isEmpty(),
+                "pilot execution requires a clean Git worktree");
+        require(QString::fromStdString(std::string(application::build_info::buildType)) ==
+                QStringLiteral("Release"),
+            "execute-pilot requires a Release qualification build");
+        const auto planHash = fileSha256(planPath);
+        const auto manifest = QJsonDocument(QJsonObject{
+            {"format", "cryptobenchmark-memory-v2-sampling-overhead-pilot-manifest"},
+            {"schemaVersion", 1}, {"status", "inProgress"}, {"complete", false},
+            {"plannedCount", 24}, {"seed", plan.object().value("seed")},
+            {"planSha256", planHash}, {"sha256CalibrationSha256", shaSelection.calibrationHash},
+            {"sha256CalibrationHistoricGitHead", shaSelection.historicGitHead},
+            {"aes256GcmCalibrationSha256", aesSelection.calibrationHash},
+            {"aes256GcmCalibrationHistoricGitHead", aesSelection.historicGitHead},
+            {"currentGitHead", currentGitHead}, {"workerExecutablePath", workerExecutable},
+            {"workerExecutableSha256", workerHash},
+            {"buildType", QString::fromStdString(std::string(application::build_info::buildType))},
+            {"operatingSystem", QSysInfo::prettyProductName()},
+            {"architecture", QSysInfo::currentCpuArchitecture()}});
+        const auto callback = [](const PilotTrialDetails& trial) {
+            return runRealSamplingOverheadSmoke(
+                trial.mode, trial.mode == SamplingOverheadMode::BoundaryOnlyControl ? 5 : trial.intervalMilliseconds,
+                trial.iterationsPerRun, trial.executionOrder, trial.workload, 30'000);
+        };
+        return runPilotOrchestration(trials, outputDirectory, manifest, callback);
+    } catch (const std::exception& error) {
+        std::cerr << "FAIL execute-pilot: " << error.what() << '\n';
+        return 1;
+    }
 }
 
 } // namespace cryptobench::tests

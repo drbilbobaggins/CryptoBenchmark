@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace cryptobench::tests {
@@ -100,5 +101,24 @@ QJsonDocument samplingOverheadRunArtifact(const SamplingOverheadRun& run);
 void validateSamplingOverheadRunArtifact(const QJsonDocument& document);
 void writeSamplingOverheadArtifact(const QString& destination, const QJsonDocument& document);
 QJsonDocument readSamplingOverheadArtifact(const QString& source);
+
+int executeSamplingOverheadPilot(
+    const QString& planPath,
+    const QString& sha256CalibrationPath,
+    const QString& aes256GcmCalibrationPath,
+    const QString& outputDirectory);
+
+QJsonDocument simulateSamplingOverheadPilot(
+    const QJsonDocument& plan,
+    const std::vector<QString>& terminalStatuses,
+    std::optional<std::uint32_t> failPersistenceAfter,
+    bool interrupted,
+    const QString& outputDirectory = {},
+    bool failFinalValidation = false,
+    bool failAfterSummaryBeforeMarker = false);
+void validateSamplingOverheadPilotOutput(
+    const QString& outputDirectory,
+    const QJsonDocument& plan,
+    const QJsonDocument& trustedManifest);
 
 } // namespace cryptobench::tests

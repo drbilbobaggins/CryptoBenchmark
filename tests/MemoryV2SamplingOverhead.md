@@ -8,7 +8,8 @@ CLI:
 build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe
 build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe --self-test --output C:\path\stage-a.json
 build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe --calibrate sha256 --output C:\path\sha256-calibration.json
-build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe --prepare-pilot --seed 42 --repetitions 4 --sha256-n 10000000 --aes256-gcm-n 100000 --output C:\path\pilot-plan.json
+build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe --prepare-pilot --seed 42 --repetitions 3 --sha256-n 10000000 --aes256-gcm-n 3000000 --output C:\path\pilot-plan.json
+build-m19-release\test-runtime\CryptoBenchmarkMemoryV2SamplingOverheadTests.exe --execute-pilot --plan C:\path\pilot-plan.json --sha256-calibration C:\path\sha256-calibration.json --aes256-gcm-calibration C:\path\aes256-calibration.json --output-dir C:\path\new-pilot-output
 ```
 
 The normal CTest invocation is bounded and self-contained. It runs five fresh
@@ -22,6 +23,22 @@ for atomic commit. The output is a versioned batch document retaining all four
 observations, with `logicalRunIndex=0` and distinct `executionOrder` values
 `0..3`. The self-test also reads the committed JSON back and checks exact
 round-trip equality.
+
+`--execute-pilot` is a separately authorized, Release-only mode. It requires a
+persisted three-repetition/24-trial plan, successful matching SHA-256 and
+AES-256-GCM calibration artifacts, a clean Git worktree, the current worker
+hash, and a new nonexistent output directory. Normal CTest and `--self-test`
+never execute it.
+
+The executor writes an immutable `manifest.json`, a durable `attempt-XXX.json`
+marker before each worker launch, and one atomic `trial-XXX.json` terminal
+record before the next launch. A `summary.json` is written only after all 24
+records are read back and verified. Worker failure, timeout, interruption or
+persistence failure stops execution, preserves prior records, and writes an
+explicit incomplete summary when possible. No retries or fabricated worker
+measurements are allowed. OFF remains boundary-only with zero periodic samples;
+its plan interval `0` is distinct from the internal session placeholder used
+to satisfy production MeasurementSettings validation.
 
 The supported workload allowlist is repository-backed and validated by the
 normal self-test:
