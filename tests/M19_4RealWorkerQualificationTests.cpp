@@ -119,6 +119,14 @@ int main(int argc, char* argv[])
             return cryptobench::tests::executeM19_4Qualification(
                 QString::fromLocal8Bit(argv[3]));
         }
+        const auto productionWorker = cryptobench::tests::m19_4ProductionWorkerPath();
+        const auto expectedWorker = QFileInfo(QDir(QCoreApplication::applicationDirPath())
+            .filePath(QStringLiteral("../bin/CryptoBenchmarkWorker.exe"))).absoluteFilePath();
+        if (productionWorker != expectedWorker || !QFileInfo::exists(productionWorker) ||
+            productionWorker == QFileInfo(QDir(QCoreApplication::applicationDirPath())
+                .filePath(QStringLiteral("CryptoBenchmarkWorker.exe"))).absoluteFilePath()) {
+            throw std::runtime_error("M19.4 resolved the wrong production worker executable");
+        }
         const auto matrix = cryptobench::tests::m19_4QualificationMatrix();
         cryptobench::tests::validateM19_4QualificationMatrix(matrix);
         auto malformed = matrix;

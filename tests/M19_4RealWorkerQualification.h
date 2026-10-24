@@ -13,6 +13,7 @@ struct M19_4CategorySpec {
 };
 
 QJsonDocument m19_4QualificationMatrix();
+QString m19_4ProductionWorkerPath();
 void validateM19_4QualificationMatrix(const QJsonDocument& document);
 void validateM19_4CampaignEvidence(const QString& outputDirectory);
 int executeM19_4Qualification(const QString& outputDirectory);

@@ -29,6 +29,7 @@
 
 #include <stdexcept>
 #include <chrono>
+#include <cstdio>
 #include <vector>
 
 namespace cryptobench::tests {
@@ -273,6 +274,11 @@ QJsonDocument runArtifact(const M19_4CategorySpec& spec,
 
 } // namespace
 
+QString m19_4ProductionWorkerPath()
+{
+    return workerPath();
+}
+
 QJsonDocument m19_4QualificationMatrix()
 {
     QJsonArray entries;
@@ -344,13 +350,51 @@ void validateM19_4CampaignEvidence(const QString& outputDirectory)
             "M19.4 success marker is missing or inconsistent");
 }
 
+const char* benchmarkStatusName(core::BenchmarkStatus status)
+{
+    switch (status) {
+    case core::BenchmarkStatus::Completed: return "Completed";
+    case core::BenchmarkStatus::Cancelled: return "Cancelled";
+    case core::BenchmarkStatus::Failed: return "Failed";
+    }
+    return "Unknown";
+}
+
+void logIncompleteResult(const QString& category, const core::BenchmarkResult& result)
+{
+    if (result.status == core::BenchmarkStatus::Completed) return;
+    std::fprintf(stderr, "M19.4 category=%s status=%s observedRuns=%zu\n",
+                 category.toUtf8().constData(), benchmarkStatusName(result.status),
+                 result.runs.size());
+    for (const auto& run : result.runs) {
+        std::fprintf(stderr, "M19.4 category=%s observedRunIndex=%u\n",
+                     category.toUtf8().constData(), run.runIndex);
+    }
+    if (!result.error.has_value()) {
+        std::fprintf(stderr, "M19.4 category=%s error=<none>\n",
+                     category.toUtf8().constData());
+        return;
+    }
+    const auto& error = *result.error;
+    std::fprintf(stderr, "M19.4 category=%s errorTechnicalMessage=%s\n",
+                 category.toUtf8().constData(), error.technicalMessage.c_str());
+    if (error.runIndex.has_value()) {
+        std::fprintf(stderr, "M19.4 category=%s errorRunIndex=%u\n",
+                     category.toUtf8().constData(), *error.runIndex);
+    }
+    if (error.libraryDetails.has_value()) {
+        std::fprintf(stderr, "M19.4 category=%s errorLibraryDetails=%s\n",
+                     category.toUtf8().constData(), error.libraryDetails->c_str());
+    }
+}
+
 int executeM19_4Qualification(const QString& outputDirectory)
 {
     try {
         require(!QFileInfo::exists(outputDirectory), "M19.4 output directory already exists");
         require(core::isValidMeasurementSettings({2}), "M19.4 sampling interval is invalid");
         require(QDir().mkpath(outputDirectory), "M19.4 output directory could not be created");
-        const auto executable = workerPath();
+        const auto executable = m19_4ProductionWorkerPath();
         const auto workerHash = workerSha256(executable);
         bool headSucceeded = false;
         const auto gitHead = gitValue({QStringLiteral("rev-parse"), QStringLiteral("HEAD")}, headSucceeded);
@@ -380,7 +424,8 @@ int executeM19_4Qualification(const QString& outputDirectory)
                 pids.push_back(value);
                 creations.push_back(processCreationTime100ns(value));
             };
-            application::BenchmarkController controller(nullptr, {}, std::move(hooks), {2});
+            application::BenchmarkController controller(
+                nullptr, executable, std::move(hooks), {2});
             std::optional<core::BenchmarkResult> result;
             QEventLoop loop;
             QObject::connect(&controller, &application::BenchmarkSessionExecutor::benchmarkFinished,
@@ -393,7 +438,12 @@ int executeM19_4Qualification(const QString& outputDirectory)
             QTimer::singleShot(120'000, &loop, &QEventLoop::quit);
             loop.exec();
             const auto completed = std::chrono::system_clock::now();
-            require(result.has_value(), "M19.4 benchmark timed out before completion event");
+            if (!result.has_value()) {
+                std::fprintf(stderr, "M19.4 category=%s status=<timeout> observedRuns=0\n",
+                             spec.id.toUtf8().constData());
+                throw std::runtime_error("M19.4 benchmark timed out before completion event");
+            }
+            logIncompleteResult(spec.id, *result);
             validateResult(spec, *result, pids, creations, started, completed);
             for (std::size_t index = 0; index < pids.size(); ++index) {
                 identities.append(QString::number(pids[index]) + QStringLiteral("/") +
