@@ -803,6 +803,149 @@ add_dependencies(CryptoBenchmarkWorkerMemorySamplerTests CryptoBenchmarkWorker)
 
 add_test(NAME CryptoBenchmarkWorkerMemorySamplerTests COMMAND CryptoBenchmarkWorkerMemorySamplerTests)
 
+add_executable(CryptoBenchmarkMemoryV2SyntheticWorker
+	MemoryV2SyntheticWorker.cpp
+	MemoryV2SyntheticScenario.cpp
+	MemoryV2SyntheticScenario.h
+)
+
+set_target_properties(CryptoBenchmarkMemoryV2SyntheticWorker
+	PROPERTIES
+		OUTPUT_NAME SyntheticMemoryV2Worker
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkMemoryV2SyntheticWorker
+	PRIVATE
+		cryptobench_ipc
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_executable(CryptoBenchmarkMemoryV2QualificationTests
+	MemoryV2Qualification.cpp
+	MemoryV2Qualification.h
+	MemoryV2QualificationTests.cpp
+	MemoryV2SyntheticCampaign.cpp
+	MemoryV2SyntheticScenario.cpp
+	MemoryV2SyntheticScenario.h
+)
+
+set_target_properties(CryptoBenchmarkMemoryV2QualificationTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkMemoryV2QualificationTests
+	PRIVATE
+		cryptobench_application
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+target_compile_definitions(CryptoBenchmarkMemoryV2QualificationTests
+	PRIVATE
+		CRYPTOBENCH_QUALIFICATION_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+)
+
+add_dependencies(CryptoBenchmarkMemoryV2QualificationTests CryptoBenchmarkMemoryV2SyntheticWorker)
+
+add_test(NAME CryptoBenchmarkMemoryV2QualificationTests COMMAND CryptoBenchmarkMemoryV2QualificationTests)
+
+add_executable(CryptoBenchmarkMemoryV2SamplingOverheadTests
+	MemoryV2SamplingOverhead.cpp
+	MemoryV2SamplingOverhead.h
+	MemoryV2SamplingOverheadTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkMemoryV2SamplingOverheadTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkMemoryV2SamplingOverheadTests
+	PRIVATE
+		cryptobench_application
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkMemoryV2SamplingOverheadTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkMemoryV2SamplingOverheadTests
+	COMMAND CryptoBenchmarkMemoryV2SamplingOverheadTests
+)
+
+set_tests_properties(CryptoBenchmarkMemoryV2SamplingOverheadTests
+	PROPERTIES
+		TIMEOUT 120
+)
+
+add_executable(CryptoBenchmarkM19_3ConfirmatorySamplingOverheadTests
+	MemoryV2SamplingOverhead.cpp
+	MemoryV2SamplingOverhead.h
+	M19_3ConfirmatorySamplingOverhead.cpp
+	M19_3ConfirmatorySamplingOverhead.h
+	M19_3ConfirmatorySamplingOverheadTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkM19_3ConfirmatorySamplingOverheadTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkM19_3ConfirmatorySamplingOverheadTests
+	PRIVATE
+		cryptobench_application
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkM19_3ConfirmatorySamplingOverheadTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkM19_3ConfirmatorySamplingOverheadTests
+	COMMAND CryptoBenchmarkM19_3ConfirmatorySamplingOverheadTests
+)
+
+set_tests_properties(CryptoBenchmarkM19_3ConfirmatorySamplingOverheadTests
+	PROPERTIES
+		TIMEOUT 30
+)
+
+add_executable(CryptoBenchmarkM19_4RealWorkerQualificationTests
+	M19_4RealWorkerQualification.cpp
+	M19_4RealWorkerQualification.h
+	M19_4RealWorkerQualificationTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkM19_4RealWorkerQualificationTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkM19_4RealWorkerQualificationTests
+	PRIVATE
+		cryptobench_application
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkM19_4RealWorkerQualificationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkM19_4RealWorkerQualificationTests
+	COMMAND CryptoBenchmarkM19_4RealWorkerQualificationTests
+)
+
+set_tests_properties(CryptoBenchmarkM19_4RealWorkerQualificationTests
+	PROPERTIES
+		TIMEOUT 30
+)
+
 add_executable(CryptoBenchmarkWindowsWorkerProcessTests
 	WindowsWorkerProcessTests.cpp
 )

@@ -611,8 +611,9 @@ void testGenuineProductionWorkerV2Run(std::uint32_t logicalRunIndex)
     require(QFileInfo::exists(workerPath), "genuine production worker was not found");
     application::WorkerRunSession session(nullptr, workerPath);
     auto config = testConfig();
+    constexpr std::uint64_t timingSmokeIterations = 2'000'000;
     config.runs = 3;
-    config.iterationsPerRun = 100'000;
+    config.iterationsPerRun = timingSmokeIterations;
     bool completed = false;
     bool failed = false;
     application::WorkerRunSessionResult result{};
@@ -628,11 +629,28 @@ void testGenuineProductionWorkerV2Run(std::uint32_t logicalRunIndex)
     waitUntil([&] { return completed || failed; }, "genuine production worker did not terminate");
     require(completed && !failed,
             "genuine production worker v2 run failed: " + error.technicalMessage);
-    require(result.logicalRunIndex == logicalRunIndex &&
-                result.workerMeasurement.runIndex == logicalRunIndex &&
-                result.workerMeasurement.elapsedNanoseconds > 0 &&
-                result.workerMeasurement.processCpuNanoseconds > 0,
-            "genuine production worker did not report timing and CPU data");
+    const bool logicalRunIndexMatches = result.logicalRunIndex == logicalRunIndex;
+    const bool measurementRunIndexMatches = result.workerMeasurement.runIndex == logicalRunIndex;
+    const bool elapsedPositive = result.workerMeasurement.elapsedNanoseconds > 0;
+    const bool processCpuPositive = result.workerMeasurement.processCpuNanoseconds > 0;
+    std::cout << "genuine production worker v2 timing: logicalRunIndex="
+              << result.logicalRunIndex
+              << " elapsedNanoseconds=" << result.workerMeasurement.elapsedNanoseconds
+              << " processCpuNanoseconds=" << result.workerMeasurement.processCpuNanoseconds
+              << '\n';
+    if (!logicalRunIndexMatches || !measurementRunIndexMatches ||
+        !elapsedPositive || !processCpuPositive) {
+        throw std::runtime_error(
+            "genuine production worker timing assertion failed: "
+            "logicalRunIndex=" + std::to_string(result.logicalRunIndex) +
+            " expectedLogicalRunIndex=" + std::to_string(logicalRunIndex) +
+            " logicalRunIndexMatches=" + (logicalRunIndexMatches ? "true" : "false") +
+            " measurementRunIndexMatches=" + (measurementRunIndexMatches ? "true" : "false") +
+            " elapsedNanoseconds=" + std::to_string(result.workerMeasurement.elapsedNanoseconds) +
+            " elapsedPositive=" + (elapsedPositive ? "true" : "false") +
+            " processCpuNanoseconds=" + std::to_string(result.workerMeasurement.processCpuNanoseconds) +
+            " processCpuPositive=" + (processCpuPositive ? "true" : "false"));
+    }
     require(result.memory.baselinePrivateUsageBytes > 0 &&
                 result.memory.readyPrivateUsageBytes > 0 &&
                 result.memory.finalPrivateUsageBytes > 0,
