@@ -884,6 +884,36 @@ set_tests_properties(CryptoBenchmarkMemoryV2SamplingOverheadTests
 		TIMEOUT 120
 )
 
+add_executable(CryptoBenchmarkM19_4RealWorkerQualificationTests
+	M19_4RealWorkerQualification.cpp
+	M19_4RealWorkerQualification.h
+	M19_4RealWorkerQualificationTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkM19_4RealWorkerQualificationTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkM19_4RealWorkerQualificationTests
+	PRIVATE
+		cryptobench_application
+		cryptobench_platform_windows
+		Qt6::Core
+		Qt6::Network
+)
+
+add_dependencies(CryptoBenchmarkM19_4RealWorkerQualificationTests CryptoBenchmarkWorker)
+
+add_test(NAME CryptoBenchmarkM19_4RealWorkerQualificationTests
+	COMMAND CryptoBenchmarkM19_4RealWorkerQualificationTests
+)
+
+set_tests_properties(CryptoBenchmarkM19_4RealWorkerQualificationTests
+	PROPERTIES
+		TIMEOUT 30
+)
+
 add_executable(CryptoBenchmarkWindowsWorkerProcessTests
 	WindowsWorkerProcessTests.cpp
 )
