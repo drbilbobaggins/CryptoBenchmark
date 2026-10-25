@@ -23,6 +23,10 @@ class MainWindow;
 }
 QT_END_NAMESPACE
 
+namespace cryptobench::gui {
+class BatchCreatorWidget;
+}
+
 class MainWindow final : public QMainWindow
 {
     Q_OBJECT
@@ -49,6 +53,12 @@ private:
         BatchCancelling
     };
 
+    enum class BatchInputSource {
+        None,
+        File,
+        Creator
+    };
+
     void populateCategories();
     void populateMeasurementSettings();
     void populateProfiles(cryptobench::core::PrimitiveCategory category, bool preserveOperation);
@@ -59,12 +69,15 @@ private:
     void applyPresentationState();
     void startBenchmark();
     void startBatch();
+    void useCreatorInBatch();
+    void exportCreatorBatchJson();
     void requestCancel();
     void requestBatchCancel();
     void exportSingleResult();
     bool saveBatchAs();
     void browseBatchInput();
     void browseBatchOutput();
+    void updateBatchInputSourcePresentation();
     void updateBatchPresentation();
     void displayBatchIssues(const std::vector<cryptobench::application::BatchInputIssue>& issues);
     void onProgressChanged(const cryptobench::core::ProgressInfo& progress);
@@ -75,13 +88,14 @@ private:
     std::optional<cryptobench::core::BenchmarkConfig> buildBenchmarkConfig(
         cryptobench::core::ValidationResult& validation) const;
     void closeEvent(QCloseEvent* event) override;
-
     Ui::MainWindow* ui;
+    cryptobench::gui::BatchCreatorWidget* batchCreatorWidget_ = nullptr;
     std::unique_ptr<cryptobench::application::BenchmarkController> singleController_;
     std::unique_ptr<cryptobench::application::BatchController> batchController_;
     PresentationState presentationState_ = PresentationState::Idle;
     std::optional<cryptobench::core::BenchmarkResult> exportableSingleResult_;
     std::optional<cryptobench::application::BatchDefinition> batchDefinition_;
+    BatchInputSource batchInputSource_ = BatchInputSource::None;
     QString batchOutputTarget_;
     DialogCallbacks dialogCallbacks_;
     bool cancelRequested_ = false;

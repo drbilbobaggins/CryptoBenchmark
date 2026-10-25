@@ -13,5 +13,6 @@ namespace cryptobench::application {
 inline constexpr qint64 kMaxBatchInputFileBytes = 4'194'304;
 
 std::variant<QByteArray, BatchInputIssue> readBatchInputFile(const QString& filePath);
+std::variant<QByteArray, BatchInputIssue> prepareBatchInputData(const QByteArray& bytes);
 
 } // namespace cryptobench::application

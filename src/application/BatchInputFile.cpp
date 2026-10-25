@@ -96,6 +96,24 @@ bool isStrictUtf8(const QByteArray& bytes)
 
 } // namespace
 
+std::variant<QByteArray, BatchInputIssue> prepareBatchInputData(const QByteArray& bytes)
+{
+    if (bytes.size() > kMaxBatchInputFileBytes) {
+        return fileIssue(BatchInputIssueCode::InputTooLarge, "batch input file exceeds the 4 MiB limit");
+    }
+
+    QByteArray prepared = bytes;
+    if (prepared.startsWith(QByteArray::fromHex("efbbbf"))) {
+        prepared.remove(0, 3);
+    }
+
+    if (!isStrictUtf8(prepared)) {
+        return fileIssue(BatchInputIssueCode::InvalidUtf8, "batch input file is not valid UTF-8");
+    }
+
+    return prepared;
+}
+
 std::variant<QByteArray, BatchInputIssue> readBatchInputFile(const QString& filePath)
 {
     QFile file(filePath);
@@ -124,15 +142,7 @@ std::variant<QByteArray, BatchInputIssue> readBatchInputFile(const QString& file
         }
     }
 
-    if (bytes.startsWith(QByteArray::fromHex("efbbbf"))) {
-        bytes.remove(0, 3);
-    }
-
-    if (!isStrictUtf8(bytes)) {
-        return fileIssue(BatchInputIssueCode::InvalidUtf8, "batch input file is not valid UTF-8");
-    }
-
-    return bytes;
+    return prepareBatchInputData(bytes);
 }
 
 } // namespace cryptobench::application

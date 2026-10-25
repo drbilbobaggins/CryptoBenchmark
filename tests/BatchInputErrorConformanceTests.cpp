@@ -1,6 +1,8 @@
 #include <cryptobench/application/BatchInputParser.h>
 #include <cryptobench/application/BatchTypes.h>
+#include <cryptobench/application/BenchmarkConfigJson.h>
 #include <cryptobench/core/ConfigValidation.h>
+#include <cryptobench/core/StructuralCharacteristics.h>
 
 #include <QFile>
 #include <QTemporaryDir>
@@ -13,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -44,7 +47,78 @@ QString writeInput(const QByteArray& input)
 
 BatchParseResult parseBytes(const QByteArray& input)
 {
-    return BatchInputParser{}.parseFile(writeInput(input));
+    return BatchInputParser{}.parseData(input);
+}
+
+void requireCharacteristicsEqual(
+    const StructuralCharacteristics& left,
+    const StructuralCharacteristics& right)
+{
+    require(left.index() == right.index(), "file and byte parser characteristic types differ");
+    std::visit([](const auto& leftValue, const auto& rightValue) {
+        using Left = std::decay_t<decltype(leftValue)>;
+        using Right = std::decay_t<decltype(rightValue)>;
+        if constexpr (std::is_same_v<Left, Right>) {
+            if constexpr (std::is_same_v<Left, SignatureCharacteristics>) {
+                const bool sameSignatureSize =
+                    leftValue.signatureSize.has_value() == rightValue.signatureSize.has_value()
+                    && (!leftValue.signatureSize.has_value()
+                        || (leftValue.signatureSize->bytes == rightValue.signatureSize->bytes
+                            && leftValue.signatureSize->kind == rightValue.signatureSize->kind));
+                require(leftValue.publicKeyBytes == rightValue.publicKeyBytes
+                            && leftValue.privateKeyBytes == rightValue.privateKeyBytes
+                            && sameSignatureSize,
+                        "file and byte parser signature characteristics differ");
+            } else if constexpr (std::is_same_v<Left, KeyEstablishmentCharacteristics>) {
+                require(leftValue.sharedSecretBytes == rightValue.sharedSecretBytes
+                            && leftValue.publicKeyBytes == rightValue.publicKeyBytes
+                            && leftValue.privateKeyBytes == rightValue.privateKeyBytes
+                            && leftValue.ciphertextBytes == rightValue.ciphertextBytes,
+                        "file and byte parser key-establishment characteristics differ");
+            } else if constexpr (std::is_same_v<Left, AeadCharacteristics>) {
+                require(leftValue.keyBytes == rightValue.keyBytes
+                            && leftValue.nonceBytes == rightValue.nonceBytes
+                            && leftValue.aadBytes == rightValue.aadBytes
+                            && leftValue.tagBytes == rightValue.tagBytes,
+                        "file and byte parser AEAD characteristics differ");
+            } else {
+                require(leftValue.outputBytes == rightValue.outputBytes,
+                        "file and byte parser hash characteristics differ");
+            }
+        }
+    }, left, right);
+}
+
+void requireFileDataParity(const QByteArray& input)
+{
+    const auto fileResult = BatchInputParser{}.parseFile(writeInput(input));
+    const auto dataResult = BatchInputParser{}.parseData(input);
+    require(fileResult.definition.has_value() == dataResult.definition.has_value(),
+            "file and byte parser definition presence differs");
+    require(fileResult.issues.size() == dataResult.issues.size(),
+            "file and byte parser issue count differs");
+    for (std::size_t index = 0; index < fileResult.issues.size(); ++index) {
+        const auto& fileIssue = fileResult.issues[index];
+        const auto& dataIssue = dataResult.issues[index];
+        require(fileIssue.code == dataIssue.code && fileIssue.path == dataIssue.path
+                    && fileIssue.technicalMessage == dataIssue.technicalMessage
+                    && fileIssue.domainCode == dataIssue.domainCode,
+                "file and byte parser issue details differ");
+    }
+    if (fileResult.definition.has_value()) {
+        const auto& fileEntries = fileResult.definition->entries();
+        const auto& dataEntries = dataResult.definition->entries();
+        require(fileEntries.size() == dataEntries.size(), "file and byte parser entry counts differ");
+        for (std::size_t index = 0; index < fileEntries.size(); ++index) {
+            require(fileEntries[index].entryIndex == dataEntries[index].entryIndex
+                        && fileEntries[index].id == dataEntries[index].id
+                        && benchmarkConfigToJson(fileEntries[index].config)
+                            == benchmarkConfigToJson(dataEntries[index].config),
+                    "file and byte parser entry semantics differ");
+            requireCharacteristicsEqual(fileEntries[index].characteristics,
+                                        dataEntries[index].characteristics);
+        }
+    }
 }
 
 const BatchInputIssue& requireIssue(const BatchParseResult& result,
@@ -128,6 +202,9 @@ void testReachablePublicParserIssueCategories()
     const auto missing = BatchInputParser{}.parseFile(missingPath);
     requireNonDomainIssue(missing, BatchInputIssueCode::FileOpenFailed, "");
 
+    requireNonDomainIssue(parseBytes({}), BatchInputIssueCode::InvalidJson, "");
+    requireNonDomainIssue(parseBytes(QByteArray::fromHex("efbbbf")),
+                          BatchInputIssueCode::InvalidJson, "");
     requireNonDomainIssue(parseBytes(QByteArray(4 * 1024 * 1024 + 1, 'x')),
                           BatchInputIssueCode::InputTooLarge, "");
     requireNonDomainIssue(parseBytes(QByteArray("{\xC3\x28", 3)),
@@ -175,6 +252,55 @@ void testReachablePublicParserIssueCategories()
     // decoding emits the finer UnknownField/MissingField/InvalidType/InvalidValue codes.
     require(toStableString(BatchInputIssueCode::InvalidParameters) == "invalidParameters",
             "reserved invalid-parameters stable string changed");
+
+    const std::vector<QByteArray> parityInputs{
+        validDocument(
+            R"({"id":"kept-id","profileId":"sha256","operation":"hash","iterationsPerRun":1e2,"runs":2,"parameters":{"inputSizeBytes":1.00e2}})"),
+        QByteArray::fromHex("efbbbf")
+            + validDocument(),
+        "{\"format\":\"cryptobenchmark-batch-input\",\"entries\":[}",
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[{\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":1,\"runs\":1,\"parameters\":{\"inputSizeBytes\":1,\"\\u0069nputSizeBytes\":2}}]}",
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[{\"profileId\":\"missing\",\"operation\":\"missing\",\"iterationsPerRun\":1,\"runs\":1,\"parameters\":{}}]}",
+        "{\"schemaVersion\":1,\"entries\":[]}",
+        "[]",
+        "{\"format\":\"other-format\",\"schemaVersion\":1,\"entries\":[]}",
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":2,\"entries\":[]}",
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[],\"extra\":true}",
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[]}",
+        validDocument(
+            R"({"id":"-invalid","profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":1}})"),
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[{\"id\":\"same\",\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":1,\"runs\":1,\"parameters\":{\"inputSizeBytes\":1}},{\"id\":\"same\",\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":1,\"runs\":1,\"parameters\":{\"inputSizeBytes\":1}}]}",
+        validDocument(
+            R"({"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"unexpected":1}})"),
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[{\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":1.5,\"runs\":1,\"parameters\":{\"inputSizeBytes\":1}}]}",
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[{\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":18446744073709551616,\"runs\":1,\"parameters\":{\"inputSizeBytes\":1}}]}",
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[{\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":1,\"runs\":4294967296,\"parameters\":{\"inputSizeBytes\":1}}]}",
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[{\"profileId\":\"sha256\",\"operation\":\"encrypt\",\"iterationsPerRun\":1,\"runs\":1,\"parameters\":{\"inputSizeBytes\":1}}]}",
+        "{\"format\":\"cryptobenchmark-batch-input\",\"schemaVersion\":1,\"entries\":[{\"profileId\":\"sha256\",\"operation\":\"hash\",\"iterationsPerRun\":1,\"runs\":1,\"parameters\":{\"inputSizeBytes\":268435457}}]}",
+        QByteArray("{\xC3\x28", 3),
+        QByteArray(4 * 1024 * 1024 + 1, 'x'),
+        QByteArray::fromHex("efbbbf")
+            + QByteArray(4 * 1024 * 1024 - 3, ' '),
+        QByteArray::fromHex("efbbbf")
+            + QByteArray(4 * 1024 * 1024 - 2, ' ')
+    };
+    for (const auto& input : parityInputs) {
+        requireFileDataParity(input);
+    }
+
+    const std::array malformedUtf8{
+        QByteArray::fromHex("80"),
+        QByteArray::fromHex("e282"),
+        QByteArray::fromHex("c0af"),
+        QByteArray::fromHex("eda080"),
+        QByteArray::fromHex("f4908080")
+    };
+    for (const auto& input : malformedUtf8) {
+        requireNonDomainIssue(parseBytes(input), BatchInputIssueCode::InvalidUtf8, "");
+        requireFileDataParity(input);
+    }
+    requireFileDataParity({});
+    requireFileDataParity(QByteArray::fromHex("efbbbf"));
 }
 
 void requireConfigurationIssue(const QByteArray& document,

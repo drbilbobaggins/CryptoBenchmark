@@ -1,5 +1,12 @@
 add_executable(CryptoBenchmark
     main.cpp
+    CanonicalBenchmarkSelection.cpp
+    CanonicalBenchmarkSelection.h
+    CreatorRowWidget.cpp
+    CreatorRowWidget.h
+    CreatorRowState.h
+    BatchCreatorWidget.cpp
+    BatchCreatorWidget.h
     MainWindow.cpp
     MainWindow.h
     MainWindow.ui

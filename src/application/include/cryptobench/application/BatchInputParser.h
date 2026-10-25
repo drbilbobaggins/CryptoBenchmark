@@ -3,6 +3,7 @@
 #include <optional>
 #include <vector>
 
+#include <QByteArray>
 #include <QString>
 
 #include <cryptobench/application/BatchTypes.h>
@@ -17,6 +18,10 @@ struct BatchParseResult {
 class BatchInputParser {
 public:
     BatchParseResult parseFile(const QString& filePath) const;
+    BatchParseResult parseData(const QByteArray& bytes) const;
+
+private:
+    BatchParseResult parsePreparedData(const QByteArray& bytes) const;
 };
 
 } // namespace cryptobench::application

@@ -84,14 +84,9 @@ std::string validationPath(std::size_t index, core::ValidationField field)
 
 } // namespace
 
-BatchParseResult BatchInputParser::parseFile(const QString& filePath) const
+BatchParseResult BatchInputParser::parsePreparedData(const QByteArray& bytes) const
 {
-    const auto fileResult = readBatchInputFile(filePath);
-    if (std::holds_alternative<BatchInputIssue>(fileResult)) {
-        return {std::nullopt, {std::get<BatchInputIssue>(fileResult)}};
-    }
-
-    const auto schemaResult = decodeBatchInputSchema(std::get<QByteArray>(fileResult));
+    const auto schemaResult = decodeBatchInputSchema(bytes);
     if (std::holds_alternative<std::vector<BatchInputIssue>>(schemaResult)) {
         return {std::nullopt, std::get<std::vector<BatchInputIssue>>(schemaResult)};
     }
@@ -180,6 +175,24 @@ BatchParseResult BatchInputParser::parseFile(const QString& filePath) const
         return {std::nullopt, std::move(issues)};
     }
     return {BatchDefinition{std::move(entries)}, {}};
+}
+
+BatchParseResult BatchInputParser::parseFile(const QString& filePath) const
+{
+    const auto fileResult = readBatchInputFile(filePath);
+    if (std::holds_alternative<BatchInputIssue>(fileResult)) {
+        return {std::nullopt, {std::get<BatchInputIssue>(fileResult)}};
+    }
+    return parsePreparedData(std::get<QByteArray>(fileResult));
+}
+
+BatchParseResult BatchInputParser::parseData(const QByteArray& bytes) const
+{
+    const auto prepared = prepareBatchInputData(bytes);
+    if (std::holds_alternative<BatchInputIssue>(prepared)) {
+        return {std::nullopt, {std::get<BatchInputIssue>(prepared)}};
+    }
+    return parsePreparedData(std::get<QByteArray>(prepared));
 }
 
 } // namespace cryptobench::application
