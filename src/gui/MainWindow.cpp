@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+#include "CanonicalBenchmarkSelection.h"
+#include "BatchCreatorWidget.h"
 #include "MemoryPresentation.h"
 
 #include "ui_MainWindow.h"
@@ -19,7 +21,6 @@
 
 #include <cryptobench/core/AlgorithmRegistry.h>
 #include <cryptobench/core/ConfigValidator.h>
-#include <cryptobench/core/InputCapability.h>
 #include <cryptobench/core/ConfigValidation.h>
 #include <cryptobench/application/AtomicFileWriter.h>
 #include <cryptobench/application/JsonResultExportService.h>
@@ -31,12 +32,7 @@ namespace {
 using cryptobench::core::AlgorithmProfileId;
 using cryptobench::core::BenchmarkOperation;
 using cryptobench::core::PrimitiveCategory;
-using cryptobench::core::SignatureInputSupport;
-
-enum class SignatureInputMode {
-    Prehashed,
-    Message
-};
+using cryptobench::gui::SignatureInputMode;
 
 constexpr int toItemData(PrimitiveCategory category) noexcept
 {
@@ -56,24 +52,6 @@ constexpr int toItemData(BenchmarkOperation operation) noexcept
 constexpr int toItemData(SignatureInputMode mode) noexcept
 {
     return static_cast<int>(mode);
-}
-
-QString operationLabel(BenchmarkOperation operation)
-{
-    switch (operation) {
-        case BenchmarkOperation::KeyGen: return QStringLiteral("Key generation");
-        case BenchmarkOperation::Sign: return QStringLiteral("Sign");
-        case BenchmarkOperation::Verify: return QStringLiteral("Verify");
-        case BenchmarkOperation::Derive: return QStringLiteral("Derive");
-        case BenchmarkOperation::Encapsulate: return QStringLiteral("Encapsulate");
-        case BenchmarkOperation::Decapsulate: return QStringLiteral("Decapsulate");
-        case BenchmarkOperation::Encrypt: return QStringLiteral("Encrypt");
-        case BenchmarkOperation::Decrypt: return QStringLiteral("Decrypt");
-        case BenchmarkOperation::Hash: return QStringLiteral("Hash");
-        case BenchmarkOperation::Xof: return QStringLiteral("XOF");
-    }
-
-    return {};
 }
 
 QString phaseLabel(const cryptobench::core::ProgressInfo& progress)
@@ -227,19 +205,6 @@ void displayCompletedResults(Ui::MainWindow* ui, const cryptobench::core::Benchm
     ui->resultsPlaceholderLabel->setVisible(false);
 }
 
-constexpr std::array<BenchmarkOperation, 10> kOperations = {
-    BenchmarkOperation::KeyGen,
-    BenchmarkOperation::Sign,
-    BenchmarkOperation::Verify,
-    BenchmarkOperation::Derive,
-    BenchmarkOperation::Encapsulate,
-    BenchmarkOperation::Decapsulate,
-    BenchmarkOperation::Encrypt,
-    BenchmarkOperation::Decrypt,
-    BenchmarkOperation::Hash,
-    BenchmarkOperation::Xof
-};
-
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -253,6 +218,8 @@ MainWindow::MainWindow(QWidget* parent)
           }))
 {
     ui->setupUi(this);
+    ui->creatorTabLayout->addWidget(
+        new cryptobench::gui::BatchCreatorWidget(ui->creatorTab));
 
     connect(singleController_.get(), &cryptobench::application::BenchmarkController::progressChanged,
             this, &MainWindow::onProgressChanged);
@@ -346,10 +313,11 @@ void MainWindow::populateCategories()
 {
     const QSignalBlocker blocker(ui->categoryComboBox);
     ui->categoryComboBox->clear();
-    ui->categoryComboBox->addItem(QStringLiteral("Digital signatures"), toItemData(PrimitiveCategory::Signature));
-    ui->categoryComboBox->addItem(QStringLiteral("Key establishment / KEM"), toItemData(PrimitiveCategory::KeyEstablishment));
-    ui->categoryComboBox->addItem(QStringLiteral("AEAD"), toItemData(PrimitiveCategory::Aead));
-    ui->categoryComboBox->addItem(QStringLiteral("Hash / XOF"), toItemData(PrimitiveCategory::HashXof));
+    for (const auto& choice : cryptobench::gui::canonicalCategories()) {
+        ui->categoryComboBox->addItem(
+            QString::fromUtf8(choice.label.data(), static_cast<qsizetype>(choice.label.size())),
+            toItemData(choice.category));
+    }
     ui->categoryComboBox->setCurrentIndex(0);
     ui->categoryComboBox->setEnabled(ui->categoryComboBox->count() > 0);
 
@@ -362,11 +330,9 @@ void MainWindow::populateProfiles(PrimitiveCategory category, bool preserveOpera
     const QSignalBlocker blocker(ui->profileComboBox);
     ui->profileComboBox->clear();
 
-    for (const auto& profile : cryptobench::core::AlgorithmRegistry::all()) {
-        if (profile.category == category) {
-            ui->profileComboBox->addItem(QString::fromUtf8(profile.displayName.data(),
-                static_cast<int>(profile.displayName.size())), toItemData(profile.id));
-        }
+    for (const auto* profile : cryptobench::gui::profilesForCategory(category)) {
+        ui->profileComboBox->addItem(QString::fromUtf8(profile->displayName.data(),
+            static_cast<qsizetype>(profile->displayName.size())), toItemData(profile->id));
     }
 
     ui->profileComboBox->setCurrentIndex(ui->profileComboBox->count() > 0 ? 0 : -1);
@@ -390,10 +356,11 @@ void MainWindow::populateOperations(const AlgorithmProfileId* profileId, bool pr
 
     const auto* profile = profileId == nullptr ? nullptr : cryptobench::core::AlgorithmRegistry::find(*profileId);
     if (profile != nullptr) {
-        for (const BenchmarkOperation operation : kOperations) {
-            if (profile->operations.contains(operation)) {
-                ui->operationComboBox->addItem(operationLabel(operation), toItemData(operation));
-            }
+        for (const BenchmarkOperation operation : cryptobench::gui::operationsForProfile(*profileId)) {
+            const auto label = cryptobench::gui::operationDisplayName(operation);
+            ui->operationComboBox->addItem(
+                QString::fromUtf8(label.data(), static_cast<qsizetype>(label.size())),
+                toItemData(operation));
         }
     }
 
@@ -422,68 +389,55 @@ void MainWindow::updateInputControls()
         ? static_cast<BenchmarkOperation>(operationData.toInt())
         : BenchmarkOperation::KeyGen;
 
-    bool showSignatureMode = false;
-    bool showSize = false;
-    bool enableSize = false;
-    QString sizeLabel;
-
-    if (profile != nullptr && profile->category == PrimitiveCategory::Signature) {
-        const bool messageOperation = operation == BenchmarkOperation::Sign ||
-                                      operation == BenchmarkOperation::Verify;
-        if (messageOperation) {
-            const QVariant previousMode = ui->signatureInputModeComboBox->currentData();
-            const QSignalBlocker blocker(ui->signatureInputModeComboBox);
-            ui->signatureInputModeComboBox->clear();
-            if (const auto* capability = std::get_if<cryptobench::core::SignatureInputCapability>(
-                    &profile->inputCapability)) {
-                if (capability->support == SignatureInputSupport::PrehashedAndMessage) {
-                    ui->signatureInputModeComboBox->addItem(
-                        QStringLiteral("Prehashed"), toItemData(SignatureInputMode::Prehashed));
-                }
-                ui->signatureInputModeComboBox->addItem(
-                    QStringLiteral("Message"), toItemData(SignatureInputMode::Message));
-                const int preservedIndex = previousMode.isValid()
-                    ? ui->signatureInputModeComboBox->findData(previousMode)
-                    : -1;
-                ui->signatureInputModeComboBox->setCurrentIndex(
-                    preservedIndex >= 0 ? preservedIndex : 0);
-            }
-            showSignatureMode = ui->signatureInputModeComboBox->count() > 0;
-
-            const auto mode = static_cast<SignatureInputMode>(
-                ui->signatureInputModeComboBox->currentData().toInt());
-            showSize = mode == SignatureInputMode::Message;
-            enableSize = showSize;
-            sizeLabel = QStringLiteral("Message size:");
-        } else {
-            const QSignalBlocker blocker(ui->signatureInputModeComboBox);
-            ui->signatureInputModeComboBox->clear();
-        }
-    } else if (profile != nullptr && profile->category == PrimitiveCategory::Aead) {
-        showSize = true;
-        enableSize = true;
-        sizeLabel = QStringLiteral("Plaintext size:");
-    } else if (profile != nullptr && profile->category == PrimitiveCategory::HashXof) {
-        showSize = true;
-        enableSize = true;
-        sizeLabel = QStringLiteral("Input size:");
-    } else {
-        const QSignalBlocker blocker(ui->signatureInputModeComboBox);
-        ui->signatureInputModeComboBox->clear();
+    const QVariant previousMode = ui->signatureInputModeComboBox->currentData();
+    const QSignalBlocker modeBlocker(ui->signatureInputModeComboBox);
+    ui->signatureInputModeComboBox->clear();
+    cryptobench::gui::SelectionControls controls;
+    if (profile != nullptr && operationData.isValid()) {
+        controls = cryptobench::gui::selectionControlsFor(profile->id, operation, std::nullopt);
     }
+    for (const auto mode : controls.signatureInputModes) {
+        const auto label = cryptobench::gui::signatureInputModeDisplayName(mode);
+        ui->signatureInputModeComboBox->addItem(
+            QString::fromUtf8(label.data(), static_cast<qsizetype>(label.size())),
+            toItemData(mode));
+    }
+    const int preservedMode = previousMode.isValid()
+        ? ui->signatureInputModeComboBox->findData(previousMode)
+        : -1;
+    if (ui->signatureInputModeComboBox->count() > 0) {
+        ui->signatureInputModeComboBox->setCurrentIndex(
+            preservedMode >= 0 ? preservedMode : 0);
+    }
+
+    const bool showSignatureMode = !controls.signatureInputModes.empty();
+    const QVariant selectedModeData = ui->signatureInputModeComboBox->currentData();
+    const auto selectedMode = selectedModeData.isValid()
+        ? std::optional<SignatureInputMode>{
+            static_cast<SignatureInputMode>(selectedModeData.toInt())}
+        : std::nullopt;
+    if (profile != nullptr && operationData.isValid()) {
+        controls = cryptobench::gui::selectionControlsFor(profile->id, operation, selectedMode);
+    }
+    const bool showSize = controls.workload.has_value();
 
     ui->signatureInputModeLabel->setVisible(showSignatureMode);
     ui->signatureInputModeComboBox->setVisible(showSignatureMode);
     ui->signatureInputModeComboBox->setEnabled(showSignatureMode && ui->signatureInputModeComboBox->count() > 0);
-    ui->workloadSizeLabel->setText(sizeLabel);
+    if (showSize) {
+        const auto label = controls.workload->label;
+        ui->workloadSizeLabel->setText(
+            QString::fromUtf8(label.data(), static_cast<qsizetype>(label.size())));
+    }
     ui->workloadSizeLabel->setVisible(showSize);
     ui->workloadSizeSpinBox->setVisible(showSize);
     ui->workloadUnitLabel->setVisible(showSize);
-    ui->workloadSizeSpinBox->setEnabled(enableSize);
+    ui->workloadSizeSpinBox->setEnabled(showSize);
 
     if (showSize) {
-        const int minimum = profile != nullptr && profile->category == PrimitiveCategory::HashXof ? 0 : 1;
-        ui->workloadSizeSpinBox->setRange(minimum, static_cast<int>(cryptobench::core::kMaxWorkloadBytes));
+        const int minimum = static_cast<int>(controls.workload->minimum);
+        ui->workloadSizeSpinBox->setRange(
+            minimum, static_cast<int>(cryptobench::core::kMaxWorkloadBytes));
         if (ui->workloadSizeSpinBox->value() < minimum) {
             ui->workloadSizeSpinBox->setValue(minimum);
         }
@@ -799,7 +753,10 @@ void MainWindow::onBatchProgressChanged(const cryptobench::application::BatchPro
             ? QStringLiteral("-")
             : QString::fromUtf8(profile->displayName.data(),
                                 static_cast<int>(profile->displayName.size())) +
-                  QStringLiteral(" - ") + operationLabel(*progress.currentOperation));
+                  QStringLiteral(" - ") + QString::fromUtf8(
+                      cryptobench::gui::operationDisplayName(*progress.currentOperation).data(),
+                      static_cast<qsizetype>(
+                          cryptobench::gui::operationDisplayName(*progress.currentOperation).size())));
     } else {
         ui->batchCurrentBenchmarkLabel->setText(QStringLiteral("-"));
     }
@@ -1069,77 +1026,35 @@ void MainWindow::closeEvent(QCloseEvent* event)
 std::optional<cryptobench::core::BenchmarkConfig> MainWindow::buildBenchmarkConfig(
     cryptobench::core::ValidationResult& validation) const
 {
+    cryptobench::gui::BenchmarkSelection selection;
+    const QVariant categoryData = ui->categoryComboBox->currentData();
     const QVariant profileData = ui->profileComboBox->currentData();
     const QVariant operationData = ui->operationComboBox->currentData();
-    if (!profileData.isValid() || !operationData.isValid()) {
+    if (categoryData.isValid()) {
+        selection.category = static_cast<PrimitiveCategory>(categoryData.toInt());
+    }
+    if (profileData.isValid()) {
+        selection.profile = static_cast<AlgorithmProfileId>(profileData.toInt());
+    }
+    if (operationData.isValid()) {
+        selection.operation = static_cast<BenchmarkOperation>(operationData.toInt());
+    }
+    const QVariant modeData = ui->signatureInputModeComboBox->currentData();
+    if (modeData.isValid()) {
+        selection.signatureInputMode = static_cast<SignatureInputMode>(modeData.toInt());
+    }
+    selection.workloadSizeBytes =
+        static_cast<cryptobench::core::WorkloadBytes>(ui->workloadSizeSpinBox->value());
+    selection.iterationsPerRun = static_cast<std::uint64_t>(ui->iterationsSpinBox->value());
+    selection.runs = static_cast<std::uint32_t>(ui->runsSpinBox->value());
+
+    auto config = cryptobench::gui::benchmarkConfigFromSelection(selection);
+    if (!config.has_value()) {
         return std::nullopt;
     }
-
-    const auto profileId = static_cast<AlgorithmProfileId>(profileData.toInt());
-    const auto operation = static_cast<BenchmarkOperation>(operationData.toInt());
-    const auto* profile = cryptobench::core::AlgorithmRegistry::find(profileId);
-    if (profile == nullptr || !profile->operations.contains(operation)) {
-        return std::nullopt;
-    }
-
-    cryptobench::core::PrimitiveConfig parameters;
-    switch (profile->category) {
-        case PrimitiveCategory::Signature: {
-            if (operation == BenchmarkOperation::KeyGen) {
-                parameters = cryptobench::core::SignatureConfig{
-                    cryptobench::core::NoSignatureInput{}};
-                break;
-            }
-
-            const auto* capability = std::get_if<cryptobench::core::SignatureInputCapability>(
-                &profile->inputCapability);
-            if (capability == nullptr ||
-                (capability->support == SignatureInputSupport::MessageOnly &&
-                 ui->signatureInputModeComboBox->currentData().toInt() !=
-                     toItemData(SignatureInputMode::Message))) {
-                return std::nullopt;
-            }
-
-            const auto mode = static_cast<SignatureInputMode>(
-                ui->signatureInputModeComboBox->currentData().toInt());
-            if (mode == SignatureInputMode::Prehashed) {
-                if (capability->support != SignatureInputSupport::PrehashedAndMessage) {
-                    return std::nullopt;
-                }
-                parameters = cryptobench::core::SignatureConfig{
-                    cryptobench::core::PrehashedInput{}};
-            } else if (mode == SignatureInputMode::Message) {
-                parameters = cryptobench::core::SignatureConfig{
-                    cryptobench::core::MessageInput{
-                        static_cast<cryptobench::core::WorkloadBytes>(ui->workloadSizeSpinBox->value())}};
-            } else {
-                return std::nullopt;
-            }
-            break;
-        }
-        case PrimitiveCategory::KeyEstablishment:
-            parameters = cryptobench::core::KeyEstablishmentConfig{};
-            break;
-        case PrimitiveCategory::Aead:
-            parameters = cryptobench::core::AeadConfig{
-                static_cast<cryptobench::core::WorkloadBytes>(ui->workloadSizeSpinBox->value())};
-            break;
-        case PrimitiveCategory::HashXof:
-            parameters = cryptobench::core::HashConfig{
-                static_cast<cryptobench::core::WorkloadBytes>(ui->workloadSizeSpinBox->value())};
-            break;
-    }
-
-    cryptobench::core::BenchmarkConfig config{
-        profileId,
-        operation,
-        static_cast<std::uint64_t>(ui->iterationsSpinBox->value()),
-        static_cast<std::uint32_t>(ui->runsSpinBox->value()),
-        std::move(parameters)};
-    validation = cryptobench::core::ConfigValidator{}.validate(config);
+    validation = cryptobench::core::ConfigValidator{}.validate(*config);
     if (!validation.isValid()) {
         return std::nullopt;
     }
-
     return config;
 }

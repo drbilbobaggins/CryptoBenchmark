@@ -1,4 +1,6 @@
 #include "../src/gui/MainWindow.h"
+#include "../src/gui/BatchCreatorWidget.h"
+#include "../src/gui/CreatorRowWidget.h"
 #include "../src/gui/MemoryPresentation.h"
 
 #include <QApplication>
@@ -429,17 +431,39 @@ void testCancelAndReuse()
     setScenario("wait-before-measurement");
     MainWindow window;
     window.show();
+    auto* tabs = widget<QTabWidget>(window, "workflowTabWidget");
+    auto* creatorWidget = window.findChild<QWidget*>(
+        QStringLiteral("batchCreatorWidget"));
+    require(creatorWidget != nullptr, "Creator widget was not found");
+    auto* creator = static_cast<gui::BatchCreatorWidget*>(creatorWidget);
+    require(creator->addRow(),
+            "Creator draft row could not be initialized");
+    auto* creatorRow = creator->rowAt(0);
+    creatorRow->iterationsSpinBox()->setValue(17);
+    tabs->setCurrentIndex(2);
+    require(creatorRow->state().iterationsPerRun == 17,
+            "Creator draft changed during initial tab switch");
+    tabs->setCurrentIndex(0);
     configureHash(window);
     auto* run = widget<QPushButton>(window, "runButton");
     auto* cancel = widget<QPushButton>(window, "cancelButton");
     auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
     run->click();
     waitUntil([&] { return cancel->isEnabled(); }, 5'000);
+    tabs->setCurrentIndex(2);
+    creatorRow->iterationsSpinBox()->setValue(29);
+    require(creatorRow->state().iterationsPerRun == 29,
+            "Creator draft was not editable while Single was running");
+    tabs->setCurrentIndex(0);
     cancel->click();
     require(status(window) == QStringLiteral("Cancelling...") && !cancel->isEnabled() &&
                 !run->isEnabled() && !sampling->isEnabled(),
             "Cancel did not enter the Cancelling presentation state");
     waitUntil([&] { return status(window) == QStringLiteral("Benchmark cancelled"); }, 10'000);
+    tabs->setCurrentIndex(2);
+    require(creatorRow->state().iterationsPerRun == 29,
+            "Creator draft was not retained through Single cancellation");
+    tabs->setCurrentIndex(0);
     require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 0 &&
                 widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
                 widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
@@ -693,9 +717,10 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         MainWindow window;
         window.show();
         auto* tabs = widget<QTabWidget>(window, "workflowTabWidget");
-        require(tabs->count() == 2 && tabs->tabText(0) == QStringLiteral("Single Benchmark") &&
-            tabs->tabText(1) == QStringLiteral("Batch"),
-            "single and batch workflows were not separated into the expected tabs");
+        require(tabs->count() == 3 && tabs->tabText(0) == QStringLiteral("Single Benchmark") &&
+            tabs->tabText(1) == QStringLiteral("Batch") &&
+            tabs->tabText(2) == QStringLiteral("Batch Creator"),
+            "single, batch, and creator workflows were not separated into the expected tabs");
         require(!widget<QPushButton>(window, "batchRunButton")->isEnabled() &&
             !widget<QPushButton>(window, "batchCancelButton")->isEnabled(),
             "batch execution controls were enabled before M13-C");

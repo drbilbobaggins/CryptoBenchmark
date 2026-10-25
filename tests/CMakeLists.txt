@@ -997,6 +997,13 @@ add_test(NAME CryptoBenchmarkWindowsWorkerProcessTests COMMAND CryptoBenchmarkWi
 
 add_executable(CryptoBenchmarkGuiTests
 	MainWindowGuiTests.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/CanonicalBenchmarkSelection.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/CanonicalBenchmarkSelection.h
+	${CMAKE_SOURCE_DIR}/src/gui/CreatorRowWidget.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/CreatorRowWidget.h
+	${CMAKE_SOURCE_DIR}/src/gui/CreatorRowState.h
+	${CMAKE_SOURCE_DIR}/src/gui/BatchCreatorWidget.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/BatchCreatorWidget.h
 	${CMAKE_SOURCE_DIR}/src/gui/MainWindow.cpp
 	${CMAKE_SOURCE_DIR}/src/gui/MainWindow.h
 	${CMAKE_SOURCE_DIR}/src/gui/MainWindow.ui
@@ -1020,6 +1027,37 @@ add_dependencies(CryptoBenchmarkGuiTests CryptoBenchmarkTestScriptedWorker)
 add_test(NAME CryptoBenchmarkGuiTests COMMAND CryptoBenchmarkGuiTests)
 
 set_tests_properties(CryptoBenchmarkGuiTests
+	PROPERTIES
+	ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+	TIMEOUT 120
+)
+
+add_executable(CryptoBenchmarkCreatorGuiTests
+	CreatorGuiTests.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/CanonicalBenchmarkSelection.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/CanonicalBenchmarkSelection.h
+	${CMAKE_SOURCE_DIR}/src/gui/CreatorRowWidget.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/CreatorRowWidget.h
+	${CMAKE_SOURCE_DIR}/src/gui/CreatorRowState.h
+	${CMAKE_SOURCE_DIR}/src/gui/BatchCreatorWidget.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/BatchCreatorWidget.h
+)
+
+set_target_properties(CryptoBenchmarkCreatorGuiTests
+	PROPERTIES
+	AUTOMOC ON
+	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkCreatorGuiTests
+	PRIVATE
+	cryptobench_application
+	Qt6::Widgets
+)
+
+add_test(NAME CryptoBenchmarkCreatorGuiTests COMMAND CryptoBenchmarkCreatorGuiTests)
+
+set_tests_properties(CryptoBenchmarkCreatorGuiTests
 	PROPERTIES
 	ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 	TIMEOUT 120

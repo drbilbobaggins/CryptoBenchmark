@@ -23,6 +23,10 @@ class MainWindow;
 }
 QT_END_NAMESPACE
 
+namespace cryptobench::gui {
+class BatchCreatorWidget;
+}
+
 class MainWindow final : public QMainWindow
 {
     Q_OBJECT
@@ -75,7 +79,6 @@ private:
     std::optional<cryptobench::core::BenchmarkConfig> buildBenchmarkConfig(
         cryptobench::core::ValidationResult& validation) const;
     void closeEvent(QCloseEvent* event) override;
-
     Ui::MainWindow* ui;
     std::unique_ptr<cryptobench::application::BenchmarkController> singleController_;
     std::unique_ptr<cryptobench::application::BatchController> batchController_;
