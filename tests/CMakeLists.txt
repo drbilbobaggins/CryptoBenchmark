@@ -229,6 +229,17 @@ target_link_libraries(CryptoBenchmarkBatchInputCanonicalCoverageTests
 
 add_test(NAME CryptoBenchmarkBatchInputCanonicalCoverageTests COMMAND CryptoBenchmarkBatchInputCanonicalCoverageTests)
 
+add_executable(CryptoBenchmarkBatchInputDocumentBuilderTests
+	BatchInputDocumentBuilderTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkBatchInputDocumentBuilderTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkBatchInputDocumentBuilderTests COMMAND CryptoBenchmarkBatchInputDocumentBuilderTests)
+
 add_executable(CryptoBenchmarkBatchInputErrorConformanceTests
 	BatchInputErrorConformanceTests.cpp
 )

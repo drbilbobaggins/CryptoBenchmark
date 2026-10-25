@@ -1,15 +1,8 @@
 #include <cryptobench/application/BatchInputParser.h>
-#include <cryptobench/application/BenchmarkConfigJson.h>
+#include <cryptobench/application/BatchInputDocumentBuilder.h>
 #include <cryptobench/core/AlgorithmRegistry.h>
 #include <cryptobench/core/ConfigValidator.h>
 #include <cryptobench/core/StructuralCharacteristics.h>
-
-#include <QFile>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QTemporaryDir>
-#include <QString>
 
 #include <algorithm>
 #include <array>
@@ -35,29 +28,6 @@ void require(bool condition, std::string_view message)
     if (!condition) {
         throw std::runtime_error(std::string(message));
     }
-}
-
-QString writeInput(const QByteArray& input)
-{
-    static QTemporaryDir directory;
-    static std::uint32_t fileIndex = 0;
-    require(directory.isValid(), "temporary directory is invalid");
-
-    const auto path = directory.filePath(QStringLiteral("canonical-%1.json").arg(++fileIndex));
-    QFile file(path);
-    require(file.open(QIODevice::WriteOnly), "canonical fixture could not be opened");
-    require(file.write(input) == input.size(), "canonical fixture could not be written");
-    return path;
-}
-
-QByteArray batchDocument(const BenchmarkConfig& config)
-{
-    QJsonObject root{
-        {"format", "cryptobenchmark-batch-input"},
-        {"schemaVersion", 1},
-        {"entries", QJsonArray{benchmarkConfigToJson(config)}}
-    };
-    return QJsonDocument(root).toJson(QJsonDocument::Compact);
 }
 
 void requireCharacteristicsEqual(const StructuralCharacteristics& actual,
@@ -198,7 +168,8 @@ void testRegistryDrivenCanonicalRoundtrips()
         const auto validation = validator.validate(sourceConfig);
         require(validation.isValid(), "registry-derived canonical config failed validation");
 
-        const auto result = BatchInputParser{}.parseFile(writeInput(batchDocument(sourceConfig)));
+        const auto bytes = BatchInputDocumentBuilder{}.build({sourceConfig});
+        const auto result = BatchInputParser{}.parseData(bytes);
         require(result.issues.empty(), "canonical batch roundtrip produced issues");
         require(result.definition.has_value(), "canonical batch roundtrip produced no definition");
         const auto& entries = result.definition->entries();

@@ -47,6 +47,8 @@ add_library(cryptobench_application STATIC
     include/cryptobench/application/WorkerRunSession.h
     BenchmarkConfigJson.cpp
     include/cryptobench/application/BenchmarkConfigJson.h
+    BatchInputDocumentBuilder.cpp
+    include/cryptobench/application/BatchInputDocumentBuilder.h
     BatchTypes.cpp
     include/cryptobench/application/BatchTypes.h
     BatchInputFile.cpp
