@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QEventLoop>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
@@ -27,6 +28,8 @@
 
 #include <cryptobench/core/AlgorithmProfileId.h>
 #include <cryptobench/core/DomainTypes.h>
+#include <cryptobench/application/BatchInputParser.h>
+#include <cryptobench/application/BenchmarkConfigJson.h>
 
 #include <cstdlib>
 #include <functional>
@@ -108,6 +111,23 @@ void configureHash(MainWindow& window)
     widget<QSpinBox>(window, "workloadSizeSpinBox")->setValue(8);
     widget<QSpinBox>(window, "iterationsSpinBox")->setValue(2);
     widget<QSpinBox>(window, "runsSpinBox")->setValue(2);
+}
+
+gui::BatchCreatorWidget* creatorWidget(MainWindow& window)
+{
+    auto* creatorObject = window.findChild<QWidget*>(QStringLiteral("batchCreatorWidget"));
+    require(creatorObject != nullptr, "Creator widget was not found");
+    return static_cast<gui::BatchCreatorWidget*>(creatorObject);
+}
+
+void configureCreatorHash(gui::CreatorRowWidget* row, int inputSize, int iterations, int runs)
+{
+    selectData(row->categoryComboBox(), core::PrimitiveCategory::HashXof);
+    selectData(row->profileComboBox(), core::AlgorithmProfileId::Sha256);
+    selectData(row->operationComboBox(), core::BenchmarkOperation::Hash);
+    row->workloadSizeSpinBox()->setValue(inputSize);
+    row->iterationsSpinBox()->setValue(iterations);
+    row->runsSpinBox()->setValue(runs);
 }
 
 void configureSignatureAndKeyEstablishmentTransitions(MainWindow& window)
@@ -740,6 +760,7 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         window.setDialogCallbacks(std::move(callbacks));
 
         auto* inputPath = widget<QLineEdit>(window, "batchInputPathLineEdit");
+        auto* inputSource = widget<QLabel>(window, "batchInputSourceLabel");
         auto* validationSummary = widget<QLabel>(window, "batchValidationSummaryLabel");
         auto* issues = widget<QListWidget>(window, "batchValidationIssuesList");
         auto* inputBrowse = widget<QPushButton>(window, "batchInputBrowseButton");
@@ -747,12 +768,15 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         auto* outputBrowse = widget<QPushButton>(window, "batchOutputBrowseButton");
 
         inputBrowse->click();
-        require(inputPath->text().isEmpty() && validationSummary->text() == QStringLiteral("No batch input selected."),
+        require(inputPath->text().isEmpty() &&
+                    inputSource->text() == QStringLiteral("Input source: None") &&
+                    validationSummary->text() == QStringLiteral("No batch input selected."),
             "cancelling input browse changed batch state");
 
         selectedInput = validPath;
         inputBrowse->click();
         require(inputPath->text() == validPath &&
+            inputSource->text() == QStringLiteral("Input source: Batch input file") &&
             validationSummary->text() == QStringLiteral("Valid batch - 1 entries") && issues->count() == 0,
             "valid batch input was not parsed and displayed correctly");
 
@@ -764,6 +788,7 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         selectedInput = invalidPath;
         inputBrowse->click();
         require(inputPath->text() == invalidPath && validationSummary->text() == QStringLiteral("Invalid batch") &&
+            inputSource->text() == QStringLiteral("Input source: Batch input file") &&
             issues->count() > 0 && issues->item(0)->text().contains(QStringLiteral("/entries/0/profileId")) &&
             issues->item(0)->text().contains(QStringLiteral("unknown")),
             "invalid batch parser issue was not displayed with path and message");
@@ -795,7 +820,335 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
             "approved output target selection wrote or changed the existing file");
     }
 
-void answerMessageBox(QMessageBox::StandardButton answer)
+    void testCreatorUseExportAndSourceTransitions()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "Creator integration directory was not created");
+        const auto outputPath = directory.filePath("batch-result.json");
+        const auto validFilePath = directory.filePath("creator-roundtrip.json");
+        const auto invalidFilePath = directory.filePath("invalid-batch.json");
+        const auto existingExportPath = directory.filePath("existing-creator-input.json");
+        const auto declinedOriginal = QByteArray("keep this target unchanged");
+        writeFile(invalidFilePath, invalidBatchFixture());
+        writeFile(existingExportPath, declinedOriginal);
+
+        MainWindow window;
+        window.show();
+        auto* creator = creatorWidget(window);
+        auto* tabs = widget<QTabWidget>(window, "workflowTabWidget");
+        require(creator->addRow() && creator->addRow(),
+                "Creator integration rows could not be added");
+        configureCreatorHash(creator->rowAt(0), 8, 2, 2);
+        configureCreatorHash(creator->rowAt(1), 16, 3, 2);
+
+        QString selectedInput;
+        QString selectedSaveTarget = outputPath;
+        QString lastMessageTitle;
+        QString lastMessageBody;
+        bool overwrite = false;
+        MainWindow::DialogCallbacks callbacks;
+        callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+        callbacks.chooseSaveTarget = [&](QWidget*) { return selectedSaveTarget; };
+        callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
+        callbacks.reportMessage = [&](QWidget*, const QString& title, const QString& body) {
+            lastMessageTitle = title;
+            lastMessageBody = body;
+        };
+        window.setDialogCallbacks(std::move(callbacks));
+
+        widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+        require(widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == outputPath,
+                "Creator integration did not retain an independent Batch output target");
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        require(widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: None"),
+                "cancelled initial browse changed the source");
+
+        creator->useInBatchButton()->click();
+        require(tabs->currentIndex() == 1
+                    && widget<QLabel>(window, "batchInputSourceLabel")->text()
+                        == QStringLiteral("Input source: Batch Creator")
+                    && widget<QLineEdit>(window, "batchInputPathLineEdit")->text().isEmpty()
+                    && widget<QLabel>(window, "batchValidationSummaryLabel")->text()
+                        == QStringLiteral("Valid batch - 2 entries")
+                    && widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == outputPath
+                    && widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+                "Use in Batch did not adopt the Creator snapshot without a fake path");
+
+        const auto acceptedSnapshot = creator->finalizeRows();
+        require(acceptedSnapshot.isValid()
+                    && acceptedSnapshot.definition->entries().size() == 2,
+                "Creator snapshot could not be independently finalized for comparison");
+
+        setScenario("completed");
+        tabs->setCurrentIndex(0);
+        configureHash(window);
+        widget<QPushButton>(window, "runButton")->click();
+        waitForCompleted(window);
+        require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 4
+                    && widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+                "Single result was not available before Creator JSON export");
+
+        tabs->setCurrentIndex(2);
+        selectedSaveTarget.clear();
+        creator->exportBatchJsonButton()->click();
+        require(readFile(existingExportPath) == declinedOriginal
+                    && widget<QLabel>(window, "batchInputSourceLabel")->text()
+                        == QStringLiteral("Input source: Batch Creator")
+                    && widget<QLineEdit>(window, "batchInputPathLineEdit")->text().isEmpty(),
+                "cancelled Creator export changed the adopted Batch source");
+
+        selectedSaveTarget = existingExportPath;
+        overwrite = false;
+        creator->exportBatchJsonButton()->click();
+        require(readFile(existingExportPath) == declinedOriginal,
+                "declined Creator export overwrite changed the target");
+
+        overwrite = true;
+        creator->exportBatchJsonButton()->click();
+        const auto exportedBytes = readFile(existingExportPath);
+        require(exportedBytes == acceptedSnapshot.inputBytes
+                    && lastMessageTitle == QStringLiteral("Batch input JSON export complete"),
+                "Creator export did not atomically write the finalized canonical bytes");
+        const auto fileRoundtrip =
+            application::BatchInputParser{}.parseFile(existingExportPath);
+        require(fileRoundtrip.definition.has_value() && fileRoundtrip.issues.empty()
+                    && fileRoundtrip.definition->entries().size() == 2
+                    && fileRoundtrip.definition->entries()[0].entryIndex == 1
+                    && fileRoundtrip.definition->entries()[1].entryIndex == 2
+                    && !fileRoundtrip.definition->entries()[0].id.has_value()
+                    && !fileRoundtrip.definition->entries()[1].id.has_value()
+                    && application::benchmarkConfigToJson(
+                        fileRoundtrip.definition->entries()[0].config)
+                        == application::benchmarkConfigToJson(
+                            acceptedSnapshot.definition->entries()[0].config)
+                    && application::benchmarkConfigToJson(
+                        fileRoundtrip.definition->entries()[1].config)
+                        == application::benchmarkConfigToJson(
+                            acceptedSnapshot.definition->entries()[1].config),
+                "Creator export did not round-trip semantically through parseFile");
+        require(widget<QTableWidget>(window, "resultsTable")->rowCount() == 4
+                    && widget<QPushButton>(window, "exportJsonButton")->isEnabled()
+                    && widget<QLabel>(window, "batchInputSourceLabel")->text()
+                        == QStringLiteral("Input source: Batch Creator")
+                    && widget<QLineEdit>(window, "batchInputPathLineEdit")->text().isEmpty()
+                    && widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == outputPath,
+                "Creator export changed the Batch snapshot, target, or retained Single result");
+
+        selectedSaveTarget = directory.filePath("missing-directory\\failed.json");
+        creator->exportBatchJsonButton()->click();
+        require(!lastMessageTitle.isEmpty()
+                    && lastMessageTitle == QStringLiteral("Batch input JSON export failed")
+                    && !QFileInfo::exists(selectedSaveTarget)
+                    && widget<QLabel>(window, "batchInputSourceLabel")->text()
+                        == QStringLiteral("Input source: Batch Creator"),
+                "atomic Creator export failure was not reported or changed Batch selection");
+
+        writeFile(validFilePath, acceptedSnapshot.inputBytes);
+        selectedInput.clear();
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        require(widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch Creator")
+                    && widget<QLineEdit>(window, "batchInputPathLineEdit")->text().isEmpty(),
+                "cancelled file browse discarded the accepted Creator source");
+
+        selectedInput = validFilePath;
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        require(widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch input file")
+                    && widget<QLineEdit>(window, "batchInputPathLineEdit")->text() == validFilePath
+                    && widget<QLabel>(window, "batchValidationSummaryLabel")->text()
+                        == QStringLiteral("Valid batch - 2 entries"),
+                "File Batch selection did not replace the Creator source");
+
+        creator->useInBatchButton()->click();
+        require(widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch Creator")
+                    && widget<QLineEdit>(window, "batchInputPathLineEdit")->text().isEmpty(),
+                "Creator did not replace the selected File Batch source");
+
+        selectedInput = invalidFilePath;
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        require(widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch input file")
+                    && widget<QLineEdit>(window, "batchInputPathLineEdit")->text() == invalidFilePath
+                    && widget<QLabel>(window, "batchValidationSummaryLabel")->text()
+                        == QStringLiteral("Invalid batch")
+                    && !widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+                "invalid File Batch selection retained stale Creator state");
+        selectedInput.clear();
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        require(widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch input file")
+                    && widget<QLineEdit>(window, "batchInputPathLineEdit")->text() == invalidFilePath,
+                "cancelled browse changed an invalid selected file source");
+
+        creator->useInBatchButton()->click();
+        require(widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch Creator")
+                    && widget<QLineEdit>(window, "batchInputPathLineEdit")->text().isEmpty()
+                    && widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+                "successful Creator adoption did not replace invalid file state");
+
+        creator->rowAt(1)->iterationsSpinBox()->setValue(1'000'000'000);
+        creator->rowAt(1)->runsSpinBox()->setValue(2);
+        creator->useInBatchButton()->click();
+        require(creator->validationLabel()->text().contains(QStringLiteral("Entry 2"))
+                    && creator->validationLabel()->text().contains(QStringLiteral("/entries/1"))
+                    && widget<QLabel>(window, "batchInputSourceLabel")->text()
+                        == QStringLiteral("Input source: Batch Creator")
+                    && widget<QLabel>(window, "batchValidationSummaryLabel")->text()
+                        == QStringLiteral("Valid batch - 2 entries")
+                    && widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+                "failed Creator reuse overwrote the last valid Batch snapshot");
+        selectedSaveTarget = directory.filePath("invalid-creator-export.json");
+        creator->exportBatchJsonButton()->click();
+        require(!QFileInfo::exists(selectedSaveTarget)
+                    && creator->validationLabel()->text().contains(QStringLiteral("seriesIterationBudgetExceeded")),
+                "invalid Creator rows produced an exported file or lacked a domain diagnostic");
+        creator->rowAt(1)->iterationsSpinBox()->setValue(3);
+        creator->rowAt(1)->runsSpinBox()->setValue(2);
+
+        QElapsedTimer creatorConstructionTimer;
+        creatorConstructionTimer.start();
+        while (creator->rowCount() < gui::BatchCreatorWidget::kMaximumRows) {
+            require(creator->addRow(), "Creator rejected an allowed row during UI export stress");
+        }
+        const auto creatorConstructionMilliseconds = creatorConstructionTimer.elapsed();
+        configureCreatorHash(creator->rowAt(0), 0, 10, 2);
+        configureCreatorHash(creator->rowAt(500), 8192, 20, 3);
+        configureCreatorHash(creator->rowAt(999), 16384, 30, 4);
+        QElapsedTimer creatorFinalizationTimer;
+        creatorFinalizationTimer.start();
+        const auto largeFinalization = creator->finalizeRows();
+        const auto creatorFinalizationMilliseconds = creatorFinalizationTimer.elapsed();
+        require(largeFinalization.isValid()
+                    && largeFinalization.definition->entries().size()
+                        == gui::BatchCreatorWidget::kMaximumRows,
+                "1000-row MainWindow Creator draft did not finalize");
+        const auto largeExportPath = directory.filePath("creator-1000-export.json");
+        selectedSaveTarget = largeExportPath;
+        creator->exportBatchJsonButton()->click();
+        const auto largeExportBytes = readFile(largeExportPath);
+        const auto largeFileRoundtrip =
+            application::BatchInputParser{}.parseFile(largeExportPath);
+        require(largeExportBytes == largeFinalization.inputBytes
+                    && largeFileRoundtrip.definition.has_value()
+                    && largeFileRoundtrip.issues.empty()
+                    && largeFileRoundtrip.definition->entries().size()
+                        == gui::BatchCreatorWidget::kMaximumRows
+                    && !largeFileRoundtrip.definition->entries().front().id.has_value()
+                    && !largeFileRoundtrip.definition->entries().back().id.has_value(),
+                "1000-row UI export was not byte-identical or parseFile-roundtrippable");
+        require(widget<QLabel>(window, "batchValidationSummaryLabel")->text()
+                    == QStringLiteral("Valid batch - 2 entries")
+                    && widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == outputPath
+                    && widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+                "1000-row Creator export replaced the accepted Batch snapshot or output target");
+        std::cout << "EVIDENCE mainwindow_creator_1000 construction_ms="
+                  << creatorConstructionMilliseconds << " finalize_ms="
+                  << creatorFinalizationMilliseconds << " export_parseFile=PASS\n";
+
+        setScenario("wait-before-measurement");
+        tabs->setCurrentIndex(0);
+        configureHash(window);
+        auto* singleRun = widget<QPushButton>(window, "runButton");
+        singleRun->click();
+        waitUntil([&] { return widget<QPushButton>(window, "cancelButton")->isEnabled(); }, 5'000);
+        require(!creator->useInBatchButton()->isEnabled()
+                    && !creator->exportBatchJsonButton()->isEnabled(),
+                "Creator finalization remained enabled during a Single run");
+        creator->useInBatchButton()->click();
+        require(widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch Creator"),
+                "busy Single workflow changed the accepted Batch source");
+        widget<QPushButton>(window, "cancelButton")->click();
+        waitUntil([&] { return status(window) == QStringLiteral("Benchmark cancelled"); }, 10'000);
+        clearScenario();
+    }
+
+    void testCreatorSnapshotBatchExecutionIsolation()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "Creator Batch execution directory was not created");
+        const auto outputPath = directory.filePath("creator-batch-result.json");
+        MainWindow window;
+        window.show();
+        auto* creator = creatorWidget(window);
+        require(creator->addRow() && creator->addRow(),
+                "Creator execution rows could not be added");
+        configureCreatorHash(creator->rowAt(0), 8, 2, 2);
+        configureCreatorHash(creator->rowAt(1), 16, 3, 2);
+
+        QString selectedOutput = outputPath;
+        MainWindow::DialogCallbacks callbacks;
+        callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+        window.setDialogCallbacks(std::move(callbacks));
+        widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+        creator->useInBatchButton()->click();
+        auto* tabs = widget<QTabWidget>(window, "workflowTabWidget");
+        require(tabs->currentIndex() == 1
+                    && widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+                "Creator snapshot was not ready for the existing BatchController");
+
+        setScenario("wait-before-measurement");
+        widget<QPushButton>(window, "batchRunButton")->click();
+        auto* cancel = widget<QPushButton>(window, "batchCancelButton");
+        waitUntil([&] { return cancel->isEnabled(); }, 5'000);
+        require(!creator->useInBatchButton()->isEnabled()
+                    && !creator->exportBatchJsonButton()->isEnabled(),
+                "Creator finalization was enabled while Batch was active");
+        creator->rowAt(0)->workloadSizeSpinBox()->setValue(128);
+        creator->rowAt(1)->workloadSizeSpinBox()->setValue(256);
+        require(creator->moveRowDown(0), "Creator draft could not be reordered during Batch");
+        cancel->click();
+        waitUntil([&] {
+            return widget<QLabel>(window, "batchStatusLabel")->text()
+                == QStringLiteral("Cancelled");
+        }, 15'000);
+        clearScenario();
+
+        const auto cancelledDocument = QJsonDocument::fromJson(readFile(outputPath));
+        const auto cancelledEntries = cancelledDocument.object()
+            .value(QStringLiteral("entries")).toArray();
+        require(cancelledEntries.size() == 2
+                    && cancelledEntries[0].toObject().value(QStringLiteral("entryIndex")).toInt() == 1
+                    && cancelledEntries[1].toObject().value(QStringLiteral("entryIndex")).toInt() == 2
+                    && cancelledEntries[0].toObject().value(QStringLiteral("config")).toObject()
+                        .value(QStringLiteral("parameters")).toObject()
+                        .value(QStringLiteral("inputSizeBytes")).toInt() == 8
+                    && cancelledEntries[1].toObject().value(QStringLiteral("config")).toObject()
+                        .value(QStringLiteral("parameters")).toObject()
+                        .value(QStringLiteral("inputSizeBytes")).toInt() == 16,
+                "Creator edits/reordering changed the in-flight Batch snapshot");
+
+        creator->useInBatchButton()->click();
+        require(widget<QLabel>(window, "batchValidationSummaryLabel")->text()
+                    == QStringLiteral("Valid batch - 2 entries"),
+                "successful re-Use did not replace the previous Batch snapshot");
+        setScenario("completed");
+        widget<QPushButton>(window, "batchRunButton")->click();
+        waitUntil([&] {
+            return widget<QLabel>(window, "batchStatusLabel")->text()
+                == QStringLiteral("Completed");
+        }, 30'000);
+        clearScenario();
+        const auto completedDocument = QJsonDocument::fromJson(readFile(outputPath));
+        const auto completedEntries = completedDocument.object()
+            .value(QStringLiteral("entries")).toArray();
+        require(completedEntries.size() == 2
+                    && completedEntries[0].toObject().value(QStringLiteral("config")).toObject()
+                        .value(QStringLiteral("parameters")).toObject()
+                        .value(QStringLiteral("inputSizeBytes")).toInt() == 256
+                    && completedEntries[1].toObject().value(QStringLiteral("config")).toObject()
+                        .value(QStringLiteral("parameters")).toObject()
+                        .value(QStringLiteral("inputSizeBytes")).toInt() == 128
+                    && widget<QLabel>(window, "batchCompletedCountLabel")->text()
+                        == QStringLiteral("2"),
+                "successful re-Use did not adopt and execute the updated ordered snapshot");
+    }
+
+    void answerMessageBox(QMessageBox::StandardButton answer)
 {
     for (QWidget* topLevel : QApplication::topLevelWidgets()) {
         if (auto* messageBox = qobject_cast<QMessageBox*>(topLevel)) {
@@ -1235,6 +1588,13 @@ void testBatchClosePersistenceFailureRecoveryRetry()
     setScenario("wait-before-measurement");
     MainWindow window;
     window.show();
+    auto* creator = creatorWidget(window);
+    require(creator->addRow(), "recovery Creator row could not be added");
+    configureCreatorHash(creator->rowAt(0), 64, 7, 2);
+    const auto draftIterations = creator->rowAt(0)->state().iterationsPerRun;
+    require(creator->useInBatchButton()->isEnabled()
+                && creator->exportBatchJsonButton()->isEnabled(),
+            "idle recovery test did not begin with enabled Creator actions");
     QString selectedInput;
     QString selectedOutput;
     QString messageTitle;
@@ -1245,11 +1605,71 @@ void testBatchClosePersistenceFailureRecoveryRetry()
     prepareBatchCloseFailure(window, inputPath, outputPath, outputDirectory,
                              selectedInput, selectedOutput, std::move(callbacks));
 
+    require(!creator->useInBatchButton()->isEnabled()
+                && !creator->exportBatchJsonButton()->isEnabled()
+                && widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch input file"),
+            "Creator actions remained available during Batch close terminalization");
     selectedOutput = invalidRecoveryTarget;
     clickMessageBoxButtonWhenShown(QStringLiteral("Save As..."));
     require(messageTitle == QStringLiteral("Batch Save As failed") && window.isVisible() &&
-                widget<QPushButton>(window, "batchSaveAsButton")->isEnabled(),
+                widget<QPushButton>(window, "batchSaveAsButton")->isEnabled()
+                && widget<QLabel>(window, "batchStatusLabel")->text().startsWith(
+                    QStringLiteral("Failed"))
+                && creator->useInBatchButton()->isEnabled()
+                && creator->exportBatchJsonButton()->isEnabled()
+                && creator->rowAt(0)->state().iterationsPerRun == draftIterations
+                && widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch input file")
+                && widget<QLineEdit>(window, "batchInputPathLineEdit")->text() == inputPath,
         "failed close-time recovery Save As did not preserve retryability");
+    clearScenario();
+}
+
+void testBatchClosePersistenceFailureRecoveryCancelSaveAs()
+{
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary recovery-cancel directory was not created");
+    const auto inputPath = directory.filePath("cancel-close-failure-batch.json");
+    const auto outputDirectory = directory.filePath("cancel-output");
+    require(QDir().mkpath(outputDirectory), "could not create recovery-cancel output directory");
+    const auto outputPath = QDir(outputDirectory).filePath("batch-result.json");
+    writeFile(inputPath, multiEntryBatchFixture());
+
+    setScenario("wait-before-measurement");
+    MainWindow window;
+    window.show();
+    auto* creator = creatorWidget(window);
+    require(creator->addRow(), "cancel-recovery Creator row could not be added");
+    configureCreatorHash(creator->rowAt(0), 128, 9, 2);
+    const auto draftIterations = creator->rowAt(0)->state().iterationsPerRun;
+
+    QString selectedInput;
+    QString selectedOutput;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+    callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    prepareBatchCloseFailure(window, inputPath, outputPath, outputDirectory,
+                             selectedInput, selectedOutput, std::move(callbacks));
+    require(!creator->useInBatchButton()->isEnabled()
+                && !creator->exportBatchJsonButton()->isEnabled(),
+            "Creator finalization was enabled during cancelled Batch close");
+
+    selectedOutput.clear();
+    clickMessageBoxButtonWhenShown(QStringLiteral("Save As..."));
+    require(window.isVisible()
+                && widget<QLabel>(window, "batchStatusLabel")->text().startsWith(
+                    QStringLiteral("Failed"))
+                && widget<QPushButton>(window, "batchSaveAsButton")->isEnabled()
+                && creator->useInBatchButton()->isEnabled()
+                && creator->exportBatchJsonButton()->isEnabled()
+                && creator->rowAt(0)->state().iterationsPerRun == draftIterations
+                && widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch input file")
+                && widget<QLineEdit>(window, "batchInputPathLineEdit")->text() == inputPath
+                && widget<QLabel>(window, "batchValidationSummaryLabel")->text()
+                    == QStringLiteral("Valid batch - 2 entries"),
+            "cancelled close-time Save As did not restore idle Creator actions and Batch state");
     clearScenario();
 }
 
@@ -1333,6 +1753,13 @@ void testBatchCancellingCloseDialogAfterFailedTerminalization()
     setScenario("wait-before-measurement");
     MainWindow window;
     window.show();
+    auto* creator = creatorWidget(window);
+    require(creator->addRow(), "Keep open recovery Creator row could not be added");
+    configureCreatorHash(creator->rowAt(0), 256, 11, 3);
+    const auto draftIterations = creator->rowAt(0)->state().iterationsPerRun;
+    require(creator->useInBatchButton()->isEnabled()
+                && creator->exportBatchJsonButton()->isEnabled(),
+            "Keep open recovery did not begin with enabled Creator actions");
     QString selectedInput = inputPath;
     QString selectedOutput = outputPath;
     MainWindow::DialogCallbacks callbacks;
@@ -1345,9 +1772,15 @@ void testBatchCancellingCloseDialogAfterFailedTerminalization()
     waitUntil([&] {
         return widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("1 / 2");
     }, 10'000);
+    require(!creator->useInBatchButton()->isEnabled()
+                && !creator->exportBatchJsonButton()->isEnabled(),
+            "Creator finalization was enabled while Batch was running");
     widget<QPushButton>(window, "batchCancelButton")->click();
     require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Cancelling..."),
         "Batch did not enter Cancelling before the modal failed-terminal race");
+    require(!creator->useInBatchButton()->isEnabled()
+                && !creator->exportBatchJsonButton()->isEnabled(),
+            "Creator finalization was enabled while Batch was cancelling");
 
     bool failedObserved = false;
     bool answered = false;
@@ -1404,6 +1837,15 @@ void testBatchCancellingCloseDialogAfterFailedTerminalization()
         "failed BatchCancelling terminalization silently closed the window");
     require(window.isVisible() && widget<QPushButton>(window, "batchSaveAsButton")->isEnabled(),
         "failed BatchCancelling terminalization did not present recoverable failed state");
+    require(creator->useInBatchButton()->isEnabled()
+                && creator->exportBatchJsonButton()->isEnabled()
+                && creator->rowAt(0)->state().iterationsPerRun == draftIterations
+                && widget<QLabel>(window, "batchInputSourceLabel")->text()
+                    == QStringLiteral("Input source: Batch input file")
+                && widget<QLineEdit>(window, "batchInputPathLineEdit")->text() == inputPath
+                && widget<QLabel>(window, "batchValidationSummaryLabel")->text()
+                    == QStringLiteral("Valid batch - 2 entries"),
+            "Keep open recovery did not restore Creator actions or preserve row/Batch state");
     clearScenario();
 }
 void testBusyCloseNo()
@@ -1512,6 +1954,10 @@ int main(int argc, char* argv[])
         testSingleBatchMemoryV2ParityAndSnapshotIsolation();
         std::cout << "CASE batch-gui\n";
         testBatchGui();
+        std::cout << "CASE creator-use-export-source-transitions\n";
+        testCreatorUseExportAndSourceTransitions();
+        std::cout << "CASE creator-snapshot-batch-execution\n";
+        testCreatorSnapshotBatchExecutionIsolation();
         std::cout << "CASE batch-run-cancel\n";
         testBatchRunAndCancel();
         std::cout << "CASE batch-save-as-recovery\n";
@@ -1524,6 +1970,8 @@ int main(int argc, char* argv[])
         testBatchClosePersistenceFailureRecovery();
         std::cout << "CASE batch-close-persistence-failure-retry\n";
         testBatchClosePersistenceFailureRecoveryRetry();
+        std::cout << "CASE batch-close-persistence-failure-cancel-save-as\n";
+        testBatchClosePersistenceFailureRecoveryCancelSaveAs();
         std::cout << "CASE batch-close-persistence-failure-exit\n";
         testBatchClosePersistenceFailureExitWithoutSaving();
         std::cout << "CASE batch-cancelling-close-yes\n";

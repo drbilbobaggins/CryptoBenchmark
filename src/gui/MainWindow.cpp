@@ -218,8 +218,8 @@ MainWindow::MainWindow(QWidget* parent)
           }))
 {
     ui->setupUi(this);
-    ui->creatorTabLayout->addWidget(
-        new cryptobench::gui::BatchCreatorWidget(ui->creatorTab));
+    batchCreatorWidget_ = new cryptobench::gui::BatchCreatorWidget(ui->creatorTab);
+    ui->creatorTabLayout->addWidget(batchCreatorWidget_);
 
     connect(singleController_.get(), &cryptobench::application::BenchmarkController::progressChanged,
             this, &MainWindow::onProgressChanged);
@@ -237,6 +237,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->exportJsonButton, &QPushButton::clicked, this, &MainWindow::exportSingleResult);
     connect(ui->batchInputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchInput);
     connect(ui->batchOutputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchOutput);
+    connect(batchCreatorWidget_->useInBatchButton(), &QPushButton::clicked,
+            this, &MainWindow::useCreatorInBatch);
+    connect(batchCreatorWidget_->exportBatchJsonButton(), &QPushButton::clicked,
+            this, &MainWindow::exportCreatorBatchJson);
 
     connect(ui->categoryComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
         const auto category = static_cast<PrimitiveCategory>(ui->categoryComboBox->currentData().toInt());
@@ -488,6 +492,9 @@ void MainWindow::applyPresentationState()
 
     setConfigurationEnabled(idle);
     ui->memorySamplingIntervalComboBox->setEnabled(idle);
+    batchCreatorWidget_->setFinalizationEnabled(
+        idle && !singleController_->isBusy() && !batchController_->isBusy()
+        && !closeAfterTerminal_ && !closeAfterBatchTerminal_);
     ui->cancelButton->setEnabled(singleRunning);
     ui->exportJsonButton->setEnabled(idle && exportableSingleResult_.has_value());
     updateRunAvailability();
@@ -508,6 +515,24 @@ void MainWindow::updateBatchPresentation()
     ui->batchSaveAsButton->setEnabled(
         idle && !batchController_->isBusy() &&
         batchController_->state().status == cryptobench::application::BatchStatus::Failed);
+    updateBatchInputSourcePresentation();
+}
+
+void MainWindow::updateBatchInputSourcePresentation()
+{
+    switch (batchInputSource_) {
+    case BatchInputSource::None:
+        ui->batchInputSourceLabel->setText(QStringLiteral("Input source: None"));
+        ui->batchInputPathLineEdit->clear();
+        break;
+    case BatchInputSource::File:
+        ui->batchInputSourceLabel->setText(QStringLiteral("Input source: Batch input file"));
+        break;
+    case BatchInputSource::Creator:
+        ui->batchInputSourceLabel->setText(QStringLiteral("Input source: Batch Creator"));
+        ui->batchInputPathLineEdit->clear();
+        break;
+    }
 }
 
 void MainWindow::displayBatchIssues(
@@ -534,18 +559,17 @@ void MainWindow::browseBatchInput()
     if (target.isEmpty()) return;
 
     const auto result = cryptobench::application::BatchInputParser{}.parseFile(target);
+    batchInputSource_ = BatchInputSource::File;
+    ui->batchInputPathLineEdit->setText(target);
     batchDefinition_ = result.definition;
     if (batchDefinition_.has_value() && result.issues.empty()) {
-        ui->batchInputPathLineEdit->setText(target);
         ui->batchValidationSummaryLabel->setText(
             QStringLiteral("Valid batch - %1 entries").arg(batchDefinition_->entries().size()));
         displayBatchIssues({});
         updateBatchPresentation();
         return;
     }
-
     batchDefinition_.reset();
-    ui->batchInputPathLineEdit->setText(target);
     ui->batchValidationSummaryLabel->setText(QStringLiteral("Invalid batch"));
     displayBatchIssues(result.issues);
     updateBatchPresentation();
@@ -649,6 +673,104 @@ void MainWindow::startBatch()
         ui->batchStatusLabel->setText(QStringLiteral("Batch failed to start: %1")
             .arg(QString::fromUtf8(error.what())));
         applyPresentationState();
+    }
+}
+
+void MainWindow::useCreatorInBatch()
+{
+    if (presentationState_ != PresentationState::Idle || singleController_->isBusy()
+        || batchController_->isBusy() || closeAfterTerminal_ || closeAfterBatchTerminal_) {
+        return;
+    }
+
+    const auto finalized = batchCreatorWidget_->finalizeRows();
+    if (!finalized.isValid()) {
+        batchCreatorWidget_->showFinalizationIssues(finalized.issues);
+        return;
+    }
+
+    const auto entryCount = finalized.definition->entries().size();
+    batchDefinition_ = finalized.definition;
+    batchInputSource_ = BatchInputSource::Creator;
+    ui->batchValidationSummaryLabel->setText(
+        QStringLiteral("Valid batch - %1 entries").arg(entryCount));
+    displayBatchIssues({});
+    updateBatchPresentation();
+    batchCreatorWidget_->showFinalizationSuccess(entryCount);
+    ui->workflowTabWidget->setCurrentWidget(ui->batchTab);
+}
+
+void MainWindow::exportCreatorBatchJson()
+{
+    if (presentationState_ != PresentationState::Idle || singleController_->isBusy()
+        || batchController_->isBusy() || closeAfterTerminal_ || closeAfterBatchTerminal_) {
+        return;
+    }
+
+    const auto finalized = batchCreatorWidget_->finalizeRows();
+    if (!finalized.isValid()) {
+        batchCreatorWidget_->showFinalizationIssues(finalized.issues);
+        return;
+    }
+
+    const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
+        ? dialogCallbacks_.chooseSaveTarget
+        : [this](QWidget*) {
+              return QFileDialog::getSaveFileName(
+                  this, QStringLiteral("Export Batch input JSON"), {},
+                  QStringLiteral("JSON files (*.json);;All files (*)"));
+          };
+    const QString target = chooseSaveTarget(this);
+    if (target.isEmpty()) {
+        return;
+    }
+
+    if (QFileInfo::exists(target)) {
+        const auto confirmOverwrite = dialogCallbacks_.confirmOverwrite
+            ? dialogCallbacks_.confirmOverwrite
+            : [this](QWidget*, const QString& path) {
+                  return QMessageBox::question(
+                             this, QStringLiteral("Replace existing file"),
+                             QStringLiteral("The target already exists. Replace it?\n%1").arg(path),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                      == QMessageBox::Yes;
+              };
+        if (!confirmOverwrite(this, target)) {
+            return;
+        }
+    }
+
+    cryptobench::application::WriteResult writeResult;
+    try {
+        writeResult = cryptobench::application::AtomicFileWriter{}.writeAtomically(
+            target, finalized.inputBytes);
+    } catch (const std::exception& error) {
+        writeResult = {false, QString::fromUtf8(error.what())};
+    }
+
+    if (!writeResult.success) {
+        const QString message = writeResult.technicalMessage.isEmpty()
+            ? QStringLiteral("Batch input JSON export failed.")
+            : writeResult.technicalMessage;
+        if (dialogCallbacks_.reportMessage) {
+            dialogCallbacks_.reportMessage(
+                this, QStringLiteral("Batch input JSON export failed"), message);
+        } else {
+            QMessageBox::warning(
+                this, QStringLiteral("Batch input JSON export failed"), message);
+        }
+        return;
+    }
+
+    batchCreatorWidget_->showFinalizationSuccess(finalized.definition->entries().size());
+    if (dialogCallbacks_.reportMessage) {
+        dialogCallbacks_.reportMessage(
+            this, QStringLiteral("Batch input JSON export complete"),
+            QStringLiteral("Canonical Batch input JSON v1 was exported successfully."));
+    } else {
+        QMessageBox::information(
+            this, QStringLiteral("Batch input JSON export complete"),
+            QStringLiteral("Canonical Batch input JSON v1 was exported successfully."));
     }
 }
 
@@ -841,6 +963,7 @@ void MainWindow::handleBatchCloseAfterTerminal()
 
     Q_UNUSED(keepButton);
     closeAfterBatchTerminal_ = false;
+    applyPresentationState();
 }
 
 bool MainWindow::saveBatchAs()

@@ -5,10 +5,17 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTemporaryDir>
 
+#include <cryptobench/application/AtomicFileWriter.h>
+#include <cryptobench/application/BatchInputDocumentBuilder.h>
+#include <cryptobench/application/BatchInputParser.h>
+#include <cryptobench/application/BenchmarkConfigJson.h>
 #include <cryptobench/core/AlgorithmRegistry.h>
 #include <cryptobench/core/ConfigValidator.h>
 
@@ -66,6 +73,16 @@ void requireConfigsEqual(const BenchmarkConfig& actual, const BenchmarkConfig& e
                     == std::get<HashConfig>(expected.parameters).inputSize,
                 "Creator row changed Hash/XOF workload size");
     }
+}
+
+void configureHashRow(CreatorRowWidget* row, int inputSize, int iterations, int runs)
+{
+    selectData(row->categoryComboBox(), static_cast<int>(PrimitiveCategory::HashXof));
+    selectData(row->profileComboBox(), static_cast<int>(AlgorithmProfileId::Sha256));
+    selectData(row->operationComboBox(), static_cast<int>(BenchmarkOperation::Hash));
+    row->workloadSizeSpinBox()->setValue(inputSize);
+    row->iterationsSpinBox()->setValue(iterations);
+    row->runsSpinBox()->setValue(runs);
 }
 
 void testRegistryDrivenSelectionCoverage()
@@ -379,12 +396,65 @@ void testCreatorRowActionsAndStateIndependence()
             "move boundary state was not refreshed after deletion");
 }
 
+void testCreatorFinalization()
+{
+    BatchCreatorWidget emptyCreator;
+    const auto empty = emptyCreator.finalizeRows();
+    require(!empty.isValid() && !empty.issues.isEmpty()
+                && empty.issues.front().contains(QStringLiteral("/entries")),
+            "empty Creator draft was not rejected by the shared parser");
+
+    BatchCreatorWidget creator;
+    require(creator.addRow() && creator.addRow() && creator.addRow(),
+            "Creator could not construct finalization entries");
+    configureHashRow(creator.rowAt(0), 64, 10, 2);
+    configureHashRow(creator.rowAt(1), 64, 10, 2);
+    configureHashRow(creator.rowAt(2), 128, 5, 4);
+
+    const auto finalized = creator.finalizeRows();
+    require(finalized.isValid() && finalized.definition->entries().size() == 3,
+            "valid Creator rows did not finalize");
+    require(finalized.inputBytes.contains("\n    \"entries\"")
+                && !finalized.inputBytes.contains("\"id\""),
+            "finalization did not retain canonical pretty Batch input without IDs");
+    const auto& entries = finalized.definition->entries();
+    require(entries[0].entryIndex == 1 && entries[1].entryIndex == 2
+                && entries[2].entryIndex == 3
+                && !entries[0].id.has_value() && !entries[1].id.has_value()
+                && !entries[2].id.has_value(),
+            "finalization changed visual order, indices, or optional IDs");
+    require(application::benchmarkConfigToJson(entries[0].config)
+                == application::benchmarkConfigToJson(entries[1].config)
+                && application::benchmarkConfigToJson(entries[2].config)
+                    != application::benchmarkConfigToJson(entries[1].config),
+            "finalization did not preserve duplicate/differing configurations");
+    require(finalized.inputBytes == application::BatchInputDocumentBuilder{}.build({
+                entries[0].config, entries[1].config, entries[2].config}),
+            "finalization returned bytes other than the canonical builder output");
+    const auto parsed = application::BatchInputParser{}.parseData(finalized.inputBytes);
+    require(parsed.definition.has_value() && parsed.issues.empty()
+                && parsed.definition->entries().size() == entries.size(),
+            "finalized bytes did not use the authoritative in-memory parser");
+
+    creator.rowAt(1)->iterationsSpinBox()->setValue(1'000'000'000);
+    creator.rowAt(1)->runsSpinBox()->setValue(2);
+    const auto invalidBudget = creator.finalizeRows();
+    require(!invalidBudget.isValid() && invalidBudget.issues.size() == 1
+                && invalidBudget.issues.front().contains(QStringLiteral("Entry 2"))
+                && invalidBudget.issues.front().contains(QStringLiteral("/entries/1"))
+                && invalidBudget.issues.front().contains(QStringLiteral("seriesIterationBudgetExceeded")),
+            "invalid N*M finalization lacked a precise parser diagnostic");
+}
+
 void testCreatorMaximumRowCount()
 {
     BatchCreatorWidget creator;
+    QElapsedTimer constructionTimer;
+    constructionTimer.start();
     for (int index = 0; index < BatchCreatorWidget::kMaximumRows; ++index) {
         require(creator.addRow(), "creator rejected an allowed row before the maximum");
     }
+    const auto constructionMilliseconds = constructionTimer.elapsed();
     require(creator.rowCount() == BatchCreatorWidget::kMaximumRows
                 && !creator.addRow() && !creator.cloneRow(0)
                 && !creator.addRowButton()->isEnabled()
@@ -396,6 +466,57 @@ void testCreatorMaximumRowCount()
                 && creator.rowCount() == BatchCreatorWidget::kMaximumRows
                 && creator.rowAt(500) == editedRow,
             "editing one row altered creator row structure");
+
+    configureHashRow(creator.rowAt(0), 0, 10, 2);
+    configureHashRow(creator.rowAt(500), 4096, 20, 3);
+    configureHashRow(creator.rowAt(999), 8192, 30, 4);
+    require(creator.moveRowUp(999) && creator.moveRowDown(998)
+                && creator.rowCount() == BatchCreatorWidget::kMaximumRows,
+            "1000-row ordering operation changed row count");
+
+    QElapsedTimer finalizationTimer;
+    finalizationTimer.start();
+    const auto finalized = creator.finalizeRows();
+    const auto finalizationMilliseconds = finalizationTimer.elapsed();
+    require(finalized.isValid()
+                && finalized.definition->entries().size()
+                    == BatchCreatorWidget::kMaximumRows,
+            "1000 real Creator rows did not finalize");
+
+    QTemporaryDir directory;
+    require(directory.isValid(), "Creator stress export directory could not be created");
+    const auto outputPath = directory.filePath(QStringLiteral("creator-1000.json"));
+    QElapsedTimer exportTimer;
+    exportTimer.start();
+    const auto writeResult =
+        application::AtomicFileWriter{}.writeAtomically(outputPath, finalized.inputBytes);
+    require(writeResult.success, "atomic 1000-row Creator export failed");
+    QFile exportedFile(outputPath);
+    require(exportedFile.open(QIODevice::ReadOnly),
+            "1000-row Creator export could not be read");
+    const auto exportedBytes = exportedFile.readAll();
+    require(exportedBytes == finalized.inputBytes,
+            "1000-row Creator export was not byte-identical to finalized input");
+    const auto parsedFile = application::BatchInputParser{}.parseFile(outputPath);
+    const auto exportAndParseMilliseconds = exportTimer.elapsed();
+    require(parsedFile.definition.has_value() && parsedFile.issues.empty()
+                && parsedFile.definition->entries().size()
+                    == BatchCreatorWidget::kMaximumRows,
+            "1000-row exported Creator input did not round-trip through parseFile");
+    for (std::size_t index = 0; index < parsedFile.definition->entries().size(); ++index) {
+        const auto& memoryEntry = finalized.definition->entries()[index];
+        const auto& fileEntry = parsedFile.definition->entries()[index];
+        require(fileEntry.entryIndex == index + 1
+                    && fileEntry.entryIndex == memoryEntry.entryIndex
+                    && !fileEntry.id.has_value()
+                    && application::benchmarkConfigToJson(fileEntry.config)
+                        == application::benchmarkConfigToJson(memoryEntry.config)
+                    && fileEntry.characteristics.index() == memoryEntry.characteristics.index(),
+                "1000-row Creator file roundtrip changed order or entry semantics");
+    }
+    std::cout << "EVIDENCE creator_1000 construction_ms=" << constructionMilliseconds
+              << " finalize_ms=" << finalizationMilliseconds
+              << " atomic_export_parseFile_ms=" << exportAndParseMilliseconds << '\n';
     QCoreApplication::processEvents();
 }
 
@@ -414,6 +535,8 @@ int main(int argc, char** argv)
         std::cout << "PASS Creator dynamic input controls\n";
         cryptobench::tests::testCreatorRowActionsAndStateIndependence();
         std::cout << "PASS Creator row actions, ordering, and independence\n";
+        cryptobench::tests::testCreatorFinalization();
+        std::cout << "PASS Creator finalization and parser diagnostics\n";
         cryptobench::tests::testCreatorMaximumRowCount();
         std::cout << "PASS Creator 1000-row limit\n";
         return 0;

@@ -407,12 +407,13 @@
          <widget class="QGroupBox" name="batchInputGroupBox">
           <property name="title"><string>Batch input</string></property>
           <layout class="QGridLayout" name="batchInputLayout">
-           <item row="0" column="0"><widget class="QLabel" name="batchInputLabel"><property name="text"><string>Input JSON:</string></property></widget></item>
-           <item row="0" column="1"><widget class="QLineEdit" name="batchInputPathLineEdit"><property name="readOnly"><bool>true</bool></property></widget></item>
-           <item row="0" column="2"><widget class="QPushButton" name="batchInputBrowseButton"><property name="text"><string>Browse...</string></property></widget></item>
-           <item row="1" column="0"><widget class="QLabel" name="batchValidationLabel"><property name="text"><string>Validation:</string></property></widget></item>
-           <item row="1" column="1" colspan="2"><widget class="QLabel" name="batchValidationSummaryLabel"><property name="text"><string>No batch input selected.</string></property></widget></item>
-           <item row="2" column="1" colspan="2"><widget class="QListWidget" name="batchValidationIssuesList"><property name="uniformItemSizes"><bool>true</bool></property></widget></item>
+           <item row="0" column="0" colspan="3"><widget class="QLabel" name="batchInputSourceLabel"><property name="text"><string>Input source: None</string></property></widget></item>
+           <item row="1" column="0"><widget class="QLabel" name="batchInputLabel"><property name="text"><string>Input JSON:</string></property></widget></item>
+           <item row="1" column="1"><widget class="QLineEdit" name="batchInputPathLineEdit"><property name="readOnly"><bool>true</bool></property></widget></item>
+           <item row="1" column="2"><widget class="QPushButton" name="batchInputBrowseButton"><property name="text"><string>Browse...</string></property></widget></item>
+           <item row="2" column="0"><widget class="QLabel" name="batchValidationLabel"><property name="text"><string>Validation:</string></property></widget></item>
+           <item row="2" column="1" colspan="2"><widget class="QLabel" name="batchValidationSummaryLabel"><property name="text"><string>No batch input selected.</string></property></widget></item>
+           <item row="3" column="1" colspan="2"><widget class="QListWidget" name="batchValidationIssuesList"><property name="uniformItemSizes"><bool>true</bool></property></widget></item>
           </layout>
          </widget>
         </item>
