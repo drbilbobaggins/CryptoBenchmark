@@ -216,7 +216,13 @@ std::string formatDouble(double value)
     if (result.ec != std::errc{}) {
         throw std::runtime_error("failed to format CSV floating-point value");
     }
-    return {buffer.data(), result.ptr};
+    std::string formatted{buffer.data(), result.ptr};
+    for (char& character : formatted) {
+        if (character == '.') {
+            character = ',';
+        }
+    }
+    return formatted;
 }
 
 template <typename Fields>
@@ -408,11 +414,11 @@ void appendEscapedRecord(QByteArray& output, const std::array<std::string, Size>
 {
     for (std::size_t index = 0; index < fields.size(); ++index) {
         if (index != 0) {
-            output.append(',');
+            output.append(';');
         }
 
         const auto& field = fields[index];
-        const bool quote = field.find_first_of(",\"\r\n") != std::string::npos;
+        const bool quote = field.find_first_of(";\"\r\n") != std::string::npos;
         if (quote) {
             output.append('"');
         }
@@ -434,7 +440,7 @@ void appendHeader(QByteArray& output)
 {
     for (std::size_t index = 0; index < kHeader.size(); ++index) {
         if (index != 0) {
-            output.append(',');
+            output.append(';');
         }
         const auto name = kHeader[index];
         output.append(name.data(), static_cast<qsizetype>(name.size()));
@@ -458,7 +464,7 @@ QByteArray CsvResultExportService::serialize(const ResultDocument& document) con
     static_cast<void>(toStableString(document.mode));
     static_cast<void>(toStableString(document.status));
 
-    QByteArray output;
+    QByteArray output("\xEF\xBB\xBF", 3);
     appendHeader(output);
     for (const auto& entry : document.entries) {
         std::array<std::string, kColumnCount> fields{};

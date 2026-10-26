@@ -565,7 +565,9 @@ void writeFile(const QString& path, const QByteArray& bytes)
 
 CsvRecords parseCsvRecords(const QByteArray& bytes)
 {
-    require(!bytes.startsWith("\xEF\xBB\xBF"), "CSV output unexpectedly contains a UTF-8 BOM");
+    require(bytes.startsWith("\xEF\xBB\xBF"), "CSV output is missing its UTF-8 BOM");
+    require(bytes.indexOf("\xEF\xBB\xBF", 3) == -1, "CSV output contains a second UTF-8 BOM");
+    require(!bytes.mid(3).startsWith("sep=;"), "CSV output starts with a sep preamble");
     require(bytes.endsWith("\r\n"), "CSV output is missing its final CRLF");
     const std::string input(bytes.constData(), static_cast<std::size_t>(bytes.size()));
     CsvRecords records;
@@ -576,7 +578,7 @@ CsvRecords parseCsvRecords(const QByteArray& bytes)
     bool fieldStarted = false;
     bool endedWithRecordSeparator = false;
 
-    for (std::size_t index = 0; index < input.size(); ++index) {
+    for (std::size_t index = 3; index < input.size(); ++index) {
         const char character = input[index];
         endedWithRecordSeparator = false;
         if (inQuotes) {
@@ -595,7 +597,7 @@ CsvRecords parseCsvRecords(const QByteArray& bytes)
         }
 
         if (afterQuote) {
-            if (character == ',') {
+            if (character == ';') {
                 record.push_back(std::move(field));
                 field.clear();
                 fieldStarted = false;
@@ -618,7 +620,7 @@ CsvRecords parseCsvRecords(const QByteArray& bytes)
         if (character == '"' && !fieldStarted && field.empty()) {
             inQuotes = true;
             fieldStarted = true;
-        } else if (character == ',') {
+        } else if (character == ';') {
             record.push_back(std::move(field));
             field.clear();
             fieldStarted = false;
@@ -654,11 +656,17 @@ void requireCsvShape(const CsvRecords& records, std::size_t dataRowCount)
     std::string header;
     for (std::size_t index = 0; index < records.front().size(); ++index) {
         if (index != 0) {
-            header.push_back(',');
+            header.push_back(';');
         }
         header.append(records.front()[index]);
     }
-    require(header == kExpectedCsvHeader, "CSV header did not match the frozen 77-column contract");
+    std::string expectedHeader{kExpectedCsvHeader};
+    for (char& character : expectedHeader) {
+        if (character == ',') {
+            character = ';';
+        }
+    }
+    require(header == expectedHeader, "CSV header did not match the frozen 77-column contract");
     for (const auto& record : records) {
         require(record.size() == 77, "CSV record did not contain 77 columns");
     }
@@ -677,11 +685,17 @@ const std::string& csvCell(const CsvRecords& records, std::size_t row, std::stri
 
 double csvDouble(const std::string& value)
 {
+    std::string normalized = value;
+    for (char& character : normalized) {
+        if (character == ',') {
+            character = '.';
+        }
+    }
     double parsed = 0.0;
     const auto result = std::from_chars(
-        value.data(), value.data() + value.size(), parsed, std::chars_format::general);
-    require(result.ec == std::errc{} && result.ptr == value.data() + value.size(),
-            "CSV numeric cell was not a locale-independent double");
+        normalized.data(), normalized.data() + normalized.size(), parsed, std::chars_format::general);
+    require(result.ec == std::errc{} && result.ptr == normalized.data() + normalized.size(),
+            "CSV numeric cell was not a valid decimal-comma double");
     return parsed;
 }
 
@@ -812,8 +826,9 @@ void testSingleCsvExport()
     const auto records = parseCsvRecords(csvBytes);
     requireCsvShape(records, 1);
     require(csvBytes.endsWith("\r\n"), "Single CSV was missing its final CRLF");
-    require(QString::fromUtf8(csvBytes.constData(), csvBytes.size()).toUtf8() == csvBytes,
-            "Single CSV output was not valid UTF-8");
+    require(QString::fromUtf8(csvBytes.constData() + 3, csvBytes.size() - 3).toUtf8()
+                == csvBytes.mid(3),
+            "Single CSV payload was not valid UTF-8");
     require(csvCell(records, 1, "document.format") == "cryptobenchmark-result"
                 && csvCell(records, 1, "document.schemaVersion") == "2"
                 && csvCell(records, 1, "document.mode") == "single"
@@ -838,9 +853,15 @@ void testSingleCsvExport()
     const auto exactMeanResult = std::to_chars(
         exactMean.data(), exactMean.data() + exactMean.size(), jsonMean, std::chars_format::general);
     require(exactMeanResult.ec == std::errc{}, "could not format expected canonical wall-clock statistic");
+    std::string expectedMean(exactMean.data(), exactMeanResult.ptr);
+    for (char& character : expectedMean) {
+        if (character == '.') {
+            character = ',';
+        }
+    }
     require(csvMean == jsonMean &&
                 csvCell(records, 1, "statistics.wallClockNanosecondsPerOperation.mean")
-                    == std::string(exactMean.data(), exactMeanResult.ptr),
+                    == expectedMean,
             "Single CSV rounded the canonical wall-clock statistic");
     const auto jsonReadyState = jsonStatistics.value(QStringLiteral("memory")).toObject()
         .value(QStringLiteral("readyStateDelta")).toObject().value(QStringLiteral("mean")).toDouble();

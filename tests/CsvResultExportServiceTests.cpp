@@ -135,6 +135,10 @@ std::string toUtf8(const QString& value)
 CsvRecords parseCsv(const QByteArray& bytes)
 {
     const std::string input(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+    constexpr std::string_view bom{"\xEF\xBB\xBF"};
+    require(input.starts_with(bom), "CSV is missing its UTF-8 BOM");
+    require(input.find(bom, bom.size()) == std::string::npos,
+            "CSV contains more than one UTF-8 BOM");
     CsvRecords records;
     CsvRecord record;
     std::string field;
@@ -143,7 +147,7 @@ CsvRecords parseCsv(const QByteArray& bytes)
     bool fieldStarted = false;
     bool endedWithRecordSeparator = false;
 
-    for (std::size_t index = 0; index < input.size(); ++index) {
+    for (std::size_t index = bom.size(); index < input.size(); ++index) {
         const char character = input[index];
         endedWithRecordSeparator = false;
 
@@ -163,7 +167,7 @@ CsvRecords parseCsv(const QByteArray& bytes)
         }
 
         if (afterQuote) {
-            if (character == ',') {
+            if (character == ';') {
                 record.push_back(std::move(field));
                 field.clear();
                 fieldStarted = false;
@@ -186,7 +190,7 @@ CsvRecords parseCsv(const QByteArray& bytes)
         if (character == '"' && !fieldStarted && field.empty()) {
             inQuotes = true;
             fieldStarted = true;
-        } else if (character == ',') {
+        } else if (character == ';') {
             record.push_back(std::move(field));
             field.clear();
             fieldStarted = false;
@@ -284,18 +288,20 @@ ExportEntry makeEntry(std::uint32_t index, ExportEntryStatus status, BenchmarkCo
 void testExactHeaderAndEmptyDocument()
 {
     const auto bytes = CsvResultExportService{}.serialize(emptyDocument());
-    require(!bytes.startsWith("\xEF\xBB\xBF"), "CSV unexpectedly contains a UTF-8 BOM");
+    require(bytes.startsWith("\xEF\xBB\xBF"), "CSV is missing its UTF-8 BOM");
+    require(bytes.indexOf("\xEF\xBB\xBF", 3) == -1, "CSV contains a second UTF-8 BOM");
+    require(!bytes.mid(3).startsWith("sep=;"), "CSV unexpectedly starts with a sep preamble");
     require(bytes.endsWith("\r\n"), "empty CSV does not end in CRLF");
 
     std::string expected;
     for (std::size_t index = 0; index < kExpectedHeader.size(); ++index) {
         if (index != 0) {
-            expected.push_back(',');
+            expected.push_back(';');
         }
         expected.append(kExpectedHeader[index]);
     }
     expected.append("\r\n");
-    require(std::string(bytes.constData(), static_cast<std::size_t>(bytes.size())) == expected,
+    require(std::string(bytes.constData() + 3, static_cast<std::size_t>(bytes.size() - 3)) == expected,
             "CSV header text or column order differs from the frozen contract");
 
     const auto records = parseCsv(bytes);
@@ -435,11 +441,17 @@ private:
 
 double parseDouble(const std::string& value)
 {
+    std::string normalized = value;
+    for (char& character : normalized) {
+        if (character == ',') {
+            character = '.';
+        }
+    }
     double parsed = 0.0;
-    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed,
+    const auto result = std::from_chars(normalized.data(), normalized.data() + normalized.size(), parsed,
                                         std::chars_format::general);
-    require(result.ec == std::errc{} && result.ptr == value.data() + value.size(),
-            "CSV statistic is not a locale-independent decimal");
+    require(result.ec == std::errc{} && result.ptr == normalized.data() + normalized.size(),
+            "CSV statistic is not a valid decimal-comma number");
     return parsed;
 }
 
@@ -499,11 +511,22 @@ void testStatisticsRoundTripAndLocaleIndependence()
         require(parsed == original, "CSV statistic did not round-trip to its canonical double");
         require(std::signbit(parsed) == std::signbit(original),
                 "CSV statistic did not preserve the sign of zero or a negative value");
+        std::array<char, 128> buffer{};
+        const auto formatted = std::to_chars(
+            buffer.data(), buffer.data() + buffer.size(), original, std::chars_format::general);
+        require(formatted.ec == std::errc{}, "could not format expected statistic");
+        std::string expectedText{buffer.data(), formatted.ptr};
+        for (char& character : expectedText) {
+            if (character == '.') {
+                character = ',';
+            }
+        }
+        require(text == expectedText, "CSV statistic lost shortest-round-trip precision");
     }
     require(cell(records, 1, "statistics.wallClockNanosecondsPerOperation.stddev") == "-0",
             "negative zero was not encoded canonically");
-    require(cell(records, 1, "statistics.wallClockNanosecondsPerOperation.mean").find('.') != std::string::npos,
-            "CSV double formatting was affected by a comma-decimal locale");
+    require(cell(records, 1, "statistics.wallClockNanosecondsPerOperation.mean").find(',') != std::string::npos,
+            "CSV double formatting did not use a decimal comma");
 }
 
 EnvironmentInfo specialEnvironment()
@@ -522,7 +545,8 @@ EnvironmentInfo specialEnvironment()
 
 void testEscapingStatusesAndErrors()
 {
-    const std::string specialText = "comma, quote \" CR\r LF\n CRLF\r\n Unicode: árvíztűrő tükörfúrógép";
+    const std::string specialText =
+        "semicolon; comma, quote \" sep=; CR\r LF\n CRLF\r\n Unicode: árvíztűrő tükörfúrógép";
     const ResultDocument document{
         ResultMode::Batch,
         ResultDocumentStatus::Failed,
@@ -549,10 +573,12 @@ void testEscapingStatusesAndErrors()
     };
 
     const auto bytes = CsvResultExportService{}.serialize(document);
-    require(!bytes.startsWith("\xEF\xBB\xBF"), "CSV unexpectedly contains a UTF-8 BOM");
+    require(bytes.startsWith("\xEF\xBB\xBF"), "CSV is missing its UTF-8 BOM");
+    require(bytes.indexOf("\xEF\xBB\xBF", 3) == -1, "CSV contains a second UTF-8 BOM");
     require(bytes.endsWith("\r\n"), "CSV output is missing its mandatory final CRLF");
     require(bytes.contains("\xC3\xA1"), "CSV output did not preserve non-ASCII UTF-8 bytes");
     require(bytes.contains("\"\""), "CSV output did not double embedded quotes");
+    require(!bytes.mid(3).startsWith("sep=;"), "CSV unexpectedly starts with a sep preamble");
 
     const auto records = parseCsv(bytes);
     requireCsvShape(records, document.entries.size());
@@ -589,6 +615,9 @@ void testEscapingStatusesAndErrors()
                 && cell(records, 1, "environment.architecture") == "x64"
                 && cell(records, 1, "environment.buildType") == "Debug",
             "environment fields were not preserved");
+    require(cell(records, 1, "environment.applicationVersion").find('.') != std::string::npos
+                && cell(records, 1, "environment.opensslVersion").find('.') != std::string::npos,
+            "text field periods were changed by numeric localization");
     require(cell(records, 1, "environment.measuredAt") == "2026-09-22T00:00:00.177Z",
             "measuredAt does not use the canonical UTC ISO millisecond format");
     require(cell(records, 2, "error.code") == "cryptoOperationFailed"
