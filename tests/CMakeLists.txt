@@ -273,6 +273,20 @@ target_link_libraries(CryptoBenchmarkJsonResultExportServiceTests
 
 add_test(NAME CryptoBenchmarkJsonResultExportServiceTests COMMAND CryptoBenchmarkJsonResultExportServiceTests)
 
+add_executable(CryptoBenchmarkCsvResultExportServiceTests
+	CsvResultExportServiceTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkCsvResultExportServiceTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkCsvResultExportServiceTests
+	COMMAND CryptoBenchmarkCsvResultExportServiceTests
+)
+
 add_executable(CryptoBenchmarkSingleResultDocumentServiceTests
 	SingleResultDocumentServiceTests.cpp
 )

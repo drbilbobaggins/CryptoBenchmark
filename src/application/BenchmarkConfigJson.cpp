@@ -27,6 +27,11 @@ QString stableOperation(core::BenchmarkOperation operation)
     return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
 }
 
+QString stableString(std::string_view value)
+{
+    return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
+}
+
 QJsonObject parametersToJson(const core::PrimitiveConfig& parameters)
 {
     QJsonObject result;
@@ -34,20 +39,12 @@ QJsonObject parametersToJson(const core::PrimitiveConfig& parameters)
         using Value = std::decay_t<decltype(value)>;
 
         if constexpr (std::is_same_v<Value, core::SignatureConfig>) {
-            std::visit([&result](const auto& input) {
-                using Input = std::decay_t<decltype(input)>;
-
-                if constexpr (std::is_same_v<Input, core::NoSignatureInput>) {
-                    static_cast<void>(input);
-                } else if constexpr (std::is_same_v<Input, core::PrehashedInput>) {
-                    result["inputMode"] = "prehashed";
-                } else if constexpr (std::is_same_v<Input, core::MessageInput>) {
-                    result["inputMode"] = "message";
-                    result["messageSizeBytes"] = static_cast<qint64>(input.messageSize);
-                } else {
-                    static_assert(dependentFalse<Input>, "unsupported signature input alternative");
-                }
-            }, value.input);
+            if (const auto inputMode = signatureInputModeToStableString(value)) {
+                result["inputMode"] = stableString(*inputMode);
+            }
+            if (const auto* messageInput = std::get_if<core::MessageInput>(&value.input)) {
+                result["messageSizeBytes"] = static_cast<qint64>(messageInput->messageSize);
+            }
         } else if constexpr (std::is_same_v<Value, core::KeyEstablishmentConfig>) {
             static_cast<void>(value);
         } else if constexpr (std::is_same_v<Value, core::AeadConfig>) {
@@ -62,6 +59,22 @@ QJsonObject parametersToJson(const core::PrimitiveConfig& parameters)
 }
 
 } // namespace
+
+std::optional<std::string_view> signatureInputModeToStableString(const core::SignatureConfig& config)
+{
+    return std::visit([](const auto& input) -> std::optional<std::string_view> {
+        using Input = std::decay_t<decltype(input)>;
+        if constexpr (std::is_same_v<Input, core::NoSignatureInput>) {
+            return std::nullopt;
+        } else if constexpr (std::is_same_v<Input, core::PrehashedInput>) {
+            return "prehashed";
+        } else if constexpr (std::is_same_v<Input, core::MessageInput>) {
+            return "message";
+        } else {
+            static_assert(dependentFalse<Input>, "unsupported signature input alternative");
+        }
+    }, config.input);
+}
 
 std::string_view toStableOperationString(core::BenchmarkOperation operation)
 {

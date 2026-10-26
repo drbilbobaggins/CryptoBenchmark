@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <string>
 #include <string_view>
 
 #include <QJsonObject>
@@ -15,6 +17,9 @@ namespace cryptobench::application {
 std::string_view toStableString(core::SignatureSizeReferenceKind kind);
 std::string_view toStableString(core::ErrorCode code);
 std::string_view toStableString(core::FailureStage stage);
+std::string_view structuralCharacteristicsTypeToStableString(
+    const core::StructuralCharacteristics& characteristics);
+std::string measuredAtToStableString(const std::chrono::system_clock::time_point& measuredAt);
 
 QJsonObject structuralCharacteristicsToJson(const core::StructuralCharacteristics& characteristics);
 QJsonObject environmentInfoToJson(const core::EnvironmentInfo& environment);

@@ -53,9 +53,7 @@ QJsonObject statisticToJson(const core::Statistics<double>& statistic)
 
 QString measuredAtToJson(const std::chrono::system_clock::time_point& measuredAt)
 {
-    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-        measuredAt.time_since_epoch()).count();
-    return QDateTime::fromMSecsSinceEpoch(milliseconds, QTimeZone::UTC).toString(Qt::ISODateWithMs);
+    return QString::fromStdString(measuredAtToStableString(measuredAt));
 }
 
 } // namespace
@@ -123,33 +121,57 @@ std::string_view toStableString(core::FailureStage stage)
     throw std::invalid_argument("unsupported failure stage");
 }
 
+std::string_view structuralCharacteristicsTypeToStableString(
+    const core::StructuralCharacteristics& characteristics)
+{
+    return std::visit([](const auto& value) -> std::string_view {
+        using Value = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<Value, core::SignatureCharacteristics>) {
+            return "signature";
+        } else if constexpr (std::is_same_v<Value, core::KeyEstablishmentCharacteristics>) {
+            return "keyEstablishment";
+        } else if constexpr (std::is_same_v<Value, core::AeadCharacteristics>) {
+            return "aead";
+        } else if constexpr (std::is_same_v<Value, core::HashCharacteristics>) {
+            return "hashXof";
+        } else {
+            static_assert(dependentFalse<Value>, "unsupported structural characteristics alternative");
+        }
+    }, characteristics);
+}
+
+std::string measuredAtToStableString(const std::chrono::system_clock::time_point& measuredAt)
+{
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+        measuredAt.time_since_epoch()).count();
+    return QDateTime::fromMSecsSinceEpoch(milliseconds, QTimeZone::UTC)
+        .toString(Qt::ISODateWithMs)
+        .toStdString();
+}
+
 QJsonObject structuralCharacteristicsToJson(const core::StructuralCharacteristics& characteristics)
 {
-    return std::visit([](const auto& value) {
+    return std::visit([&characteristics](const auto& value) {
         using Value = std::decay_t<decltype(value)>;
-        QJsonObject result;
+        QJsonObject result{{"type", stableString(structuralCharacteristicsTypeToStableString(characteristics))}};
 
         if constexpr (std::is_same_v<Value, core::SignatureCharacteristics>) {
-            result["type"] = "signature";
             addOptional(result, "publicKeyBytes", value.publicKeyBytes);
             addOptional(result, "privateKeyBytes", value.privateKeyBytes);
             if (value.signatureSize.has_value()) {
                 result["signatureSize"] = signatureSizeToJson(*value.signatureSize);
             }
         } else if constexpr (std::is_same_v<Value, core::KeyEstablishmentCharacteristics>) {
-            result["type"] = "keyEstablishment";
             result["sharedSecretBytes"] = static_cast<qint64>(value.sharedSecretBytes);
             addOptional(result, "publicKeyBytes", value.publicKeyBytes);
             addOptional(result, "privateKeyBytes", value.privateKeyBytes);
             addOptional(result, "ciphertextBytes", value.ciphertextBytes);
         } else if constexpr (std::is_same_v<Value, core::AeadCharacteristics>) {
-            result["type"] = "aead";
             result["keyBytes"] = static_cast<qint64>(value.keyBytes);
             result["nonceBytes"] = static_cast<qint64>(value.nonceBytes);
             result["aadBytes"] = static_cast<qint64>(value.aadBytes);
             result["tagBytes"] = static_cast<qint64>(value.tagBytes);
         } else if constexpr (std::is_same_v<Value, core::HashCharacteristics>) {
-            result["type"] = "hashXof";
             result["outputBytes"] = static_cast<qint64>(value.outputBytes);
         } else {
             static_assert(dependentFalse<Value>, "unsupported structural characteristics alternative");

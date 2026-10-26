@@ -68,6 +68,8 @@ add_library(cryptobench_application STATIC
     include/cryptobench/application/ResultJsonMapping.h
     ResultDocument.cpp
     include/cryptobench/application/ResultDocument.h
+    CsvResultExportService.cpp
+    include/cryptobench/application/CsvResultExportService.h
     JsonResultExportService.cpp
     include/cryptobench/application/JsonResultExportService.h
     SingleResultDocumentService.cpp

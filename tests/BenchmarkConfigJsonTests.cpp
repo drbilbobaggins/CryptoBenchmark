@@ -116,14 +116,19 @@ void testCommonFieldsAndCanonicalProfile()
 
 void testNoSignatureInput()
 {
+    const SignatureConfig signature{NoSignatureInput{}};
+    require(!signatureInputModeToStableString(signature).has_value(),
+            "no-signature input unexpectedly has a stable input mode");
     const auto value = benchmarkConfigToJson(config(
-        AlgorithmProfileId::Rsa2048KeyGen, BenchmarkOperation::KeyGen, SignatureConfig{NoSignatureInput{}}));
+        AlgorithmProfileId::Rsa2048KeyGen, BenchmarkOperation::KeyGen, signature));
     const auto parameters = value.value("parameters").toObject();
     requireParameterKeys(parameters, {});
 }
 
 void testPrehashedInput()
 {
+    require(signatureInputModeToStableString(SignatureConfig{PrehashedInput{}}) == "prehashed",
+            "prehashed input mode mapper mismatch");
     const auto value = benchmarkConfigToJson(config(
         AlgorithmProfileId::RsaPss2048Sha256, BenchmarkOperation::Sign, SignatureConfig{PrehashedInput{}}));
     const auto parameters = value.value("parameters").toObject();
@@ -134,6 +139,8 @@ void testPrehashedInput()
 
 void testMessageInput()
 {
+    require(signatureInputModeToStableString(SignatureConfig{MessageInput{777}}) == "message",
+            "message input mode mapper mismatch");
     const auto value = benchmarkConfigToJson(config(
         AlgorithmProfileId::Ed25519, BenchmarkOperation::Sign, SignatureConfig{MessageInput{777}}));
     const auto parameters = value.value("parameters").toObject();

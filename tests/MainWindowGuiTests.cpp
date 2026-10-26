@@ -32,15 +32,27 @@
 #include <cryptobench/application/BenchmarkConfigJson.h>
 
 #include <cstdlib>
+#include <array>
+#include <charconv>
+#include <cstddef>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 using namespace cryptobench;
 
 namespace {
+
+constexpr std::string_view kExpectedCsvHeader =
+    "document.format,document.schemaVersion,document.mode,document.status,measurement.memorySamplingIntervalMilliseconds,measurement.memoryModel,measurement.workerLifecycle,entry.entryIndex,entry.id,entry.status,config.profileId,config.operation,config.iterationsPerRun,config.runs,config.parameters.inputMode,config.parameters.messageSizeBytes,config.parameters.plaintextSizeBytes,config.parameters.inputSizeBytes,structuralCharacteristics.type,structuralCharacteristics.publicKeyBytes,structuralCharacteristics.privateKeyBytes,structuralCharacteristics.signatureSizeBytes,structuralCharacteristics.signatureSizeKind,structuralCharacteristics.sharedSecretBytes,structuralCharacteristics.ciphertextBytes,structuralCharacteristics.keyBytes,structuralCharacteristics.nonceBytes,structuralCharacteristics.aadBytes,structuralCharacteristics.tagBytes,structuralCharacteristics.outputBytes,environment.applicationVersion,environment.gitCommit,environment.opensslVersion,environment.operatingSystem,environment.architecture,environment.buildType,environment.measuredAt,statistics.wallClockNanosecondsPerOperation.mean,statistics.wallClockNanosecondsPerOperation.median,statistics.wallClockNanosecondsPerOperation.min,statistics.wallClockNanosecondsPerOperation.max,statistics.wallClockNanosecondsPerOperation.stddev,statistics.processCpuNanosecondsPerOperation.mean,statistics.processCpuNanosecondsPerOperation.median,statistics.processCpuNanosecondsPerOperation.min,statistics.processCpuNanosecondsPerOperation.max,statistics.processCpuNanosecondsPerOperation.stddev,statistics.memory.unit,statistics.memory.readyStateDeltaBytes.mean,statistics.memory.readyStateDeltaBytes.median,statistics.memory.readyStateDeltaBytes.min,statistics.memory.readyStateDeltaBytes.max,statistics.memory.readyStateDeltaBytes.stddev,statistics.memory.preparationPeakDeltaBytes.mean,statistics.memory.preparationPeakDeltaBytes.median,statistics.memory.preparationPeakDeltaBytes.min,statistics.memory.preparationPeakDeltaBytes.max,statistics.memory.preparationPeakDeltaBytes.stddev,statistics.memory.executionPeakDeltaBytes.mean,statistics.memory.executionPeakDeltaBytes.median,statistics.memory.executionPeakDeltaBytes.min,statistics.memory.executionPeakDeltaBytes.max,statistics.memory.executionPeakDeltaBytes.stddev,statistics.memory.operationalPeakDeltaBytes.mean,statistics.memory.operationalPeakDeltaBytes.median,statistics.memory.operationalPeakDeltaBytes.min,statistics.memory.operationalPeakDeltaBytes.max,statistics.memory.operationalPeakDeltaBytes.stddev,error.code,error.stage,error.runIndex,error.technicalMessage,error.libraryDetails,batchError.code,batchError.stage,batchError.entryIndex,batchError.technicalMessage";
+
+using CsvRecord = std::vector<std::string>;
+using CsvRecords = std::vector<CsvRecord>;
 
 void require(bool condition, std::string_view message)
 {
@@ -185,6 +197,10 @@ void testIdleAndConfiguration()
             "Cancel was enabled while idle");
     require(!widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Export JSON was enabled before a Completed result");
+    require(!widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
+            "Export CSV was enabled before a Completed result");
+    require(!widget<QPushButton>(window, "batchExportCsvButton")->isEnabled(),
+            "Batch Export CSV was enabled before a terminal Batch result");
     auto* recommendation = widget<QLabel>(window, "runDurationRecommendationLabel");
     require(recommendation->isVisible() && recommendation->text() == QStringLiteral(
                 "Recommendation: aim for at least ~1 second of measured cryptographic work per run. Shorter runs may be more sensitive to fixed overhead and system noise."),
@@ -419,12 +435,15 @@ void testCompletedAndReplacement()
     auto* cancel = widget<QPushButton>(window, "cancelButton");
     run->click();
     require(!run->isEnabled() && !widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
-                cancel->isEnabled() && !sampling->isEnabled(),
+                cancel->isEnabled() && !sampling->isEnabled() &&
+                !widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
             "Running state did not lock configuration and enable Cancel");
     waitForCompleted(window);
     require(!cancel->isEnabled(), "Cancel remained enabled after completion");
     require(widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
             "Completed result did not enable Export JSON");
+    require(widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
+            "Completed result did not enable Export CSV");
     require(widget<QComboBox>(window, "categoryComboBox")->isEnabled(),
             "configuration was not restored after completion");
     require(sampling->isEnabled(), "measurement selector was not restored after completion");
@@ -439,7 +458,8 @@ void testCompletedAndReplacement()
                 widget<QLabel>(window, "resultsPlaceholderLabel")->isVisible() &&
                 widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
                 !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible() &&
-                !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+                !widget<QPushButton>(window, "exportJsonButton")->isEnabled() &&
+                !widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
             "old result was not cleared at new Run start");
     waitForCompleted(window);
     requireMemoryV2Presentation(window);
@@ -470,6 +490,8 @@ void testCancelAndReuse()
     auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
     run->click();
     waitUntil([&] { return cancel->isEnabled(); }, 5'000);
+    require(!widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
+            "Single Export CSV was enabled while the benchmark was running");
     tabs->setCurrentIndex(2);
     creatorRow->iterationsSpinBox()->setValue(29);
     require(creatorRow->state().iterationsPerRun == 29,
@@ -477,7 +499,8 @@ void testCancelAndReuse()
     tabs->setCurrentIndex(0);
     cancel->click();
     require(status(window) == QStringLiteral("Cancelling...") && !cancel->isEnabled() &&
-                !run->isEnabled() && !sampling->isEnabled(),
+                !run->isEnabled() && !sampling->isEnabled() &&
+                !widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
             "Cancel did not enter the Cancelling presentation state");
     waitUntil([&] { return status(window) == QStringLiteral("Benchmark cancelled"); }, 10'000);
     tabs->setCurrentIndex(2);
@@ -488,7 +511,8 @@ void testCancelAndReuse()
                 widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
                 widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
                 !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible() &&
-                !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+                !widget<QPushButton>(window, "exportJsonButton")->isEnabled() &&
+                !widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
             "Cancelled result did not restore an empty idle GUI");
 
     setScenario("completed");
@@ -514,7 +538,8 @@ void testFailedAndReuse()
                 widget<QComboBox>(window, "categoryComboBox")->isEnabled() &&
                 widget<QTableWidget>(window, "memoryPhaseBreakdownTable")->rowCount() == 0 &&
                 !widget<QGroupBox>(window, "memoryPhaseBreakdownGroupBox")->isVisible() &&
-                !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+                !widget<QPushButton>(window, "exportJsonButton")->isEnabled() &&
+                !widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
             "Failed result did not restore the idle empty GUI");
 
     setScenario("completed");
@@ -536,6 +561,142 @@ void writeFile(const QString& path, const QByteArray& bytes)
     QFile file(path);
     require(file.open(QIODevice::WriteOnly), "could not create export target");
     require(file.write(bytes) == bytes.size(), "could not write export target");
+}
+
+CsvRecords parseCsvRecords(const QByteArray& bytes)
+{
+    require(bytes.startsWith("\xEF\xBB\xBF"), "CSV output is missing its UTF-8 BOM");
+    require(bytes.indexOf("\xEF\xBB\xBF", 3) == -1, "CSV output contains a second UTF-8 BOM");
+    require(!bytes.mid(3).startsWith("sep=;"), "CSV output starts with a sep preamble");
+    require(bytes.endsWith("\r\n"), "CSV output is missing its final CRLF");
+    const std::string input(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+    CsvRecords records;
+    CsvRecord record;
+    std::string field;
+    bool inQuotes = false;
+    bool afterQuote = false;
+    bool fieldStarted = false;
+    bool endedWithRecordSeparator = false;
+
+    for (std::size_t index = 3; index < input.size(); ++index) {
+        const char character = input[index];
+        endedWithRecordSeparator = false;
+        if (inQuotes) {
+            if (character == '"') {
+                if (index + 1 < input.size() && input[index + 1] == '"') {
+                    field.push_back('"');
+                    ++index;
+                } else {
+                    inQuotes = false;
+                    afterQuote = true;
+                }
+            } else {
+                field.push_back(character);
+            }
+            continue;
+        }
+
+        if (afterQuote) {
+            if (character == ';') {
+                record.push_back(std::move(field));
+                field.clear();
+                fieldStarted = false;
+                afterQuote = false;
+            } else if (character == '\r' && index + 1 < input.size() && input[index + 1] == '\n') {
+                record.push_back(std::move(field));
+                field.clear();
+                records.push_back(std::move(record));
+                record.clear();
+                fieldStarted = false;
+                afterQuote = false;
+                ++index;
+                endedWithRecordSeparator = true;
+            } else {
+                throw std::runtime_error("unexpected byte after a quoted CSV field");
+            }
+            continue;
+        }
+
+        if (character == '"' && !fieldStarted && field.empty()) {
+            inQuotes = true;
+            fieldStarted = true;
+        } else if (character == ';') {
+            record.push_back(std::move(field));
+            field.clear();
+            fieldStarted = false;
+        } else if (character == '\r') {
+            require(index + 1 < input.size() && input[index + 1] == '\n',
+                    "CSV contains a lone CR outside a quoted field");
+            record.push_back(std::move(field));
+            field.clear();
+            records.push_back(std::move(record));
+            record.clear();
+            fieldStarted = false;
+            ++index;
+            endedWithRecordSeparator = true;
+        } else if (character == '\n') {
+            throw std::runtime_error("CSV contains a lone LF outside a quoted field");
+        } else if (character == '"') {
+            throw std::runtime_error("CSV contains an unescaped quote");
+        } else {
+            field.push_back(character);
+            fieldStarted = true;
+        }
+    }
+
+    require(!inQuotes && endedWithRecordSeparator && field.empty() && record.empty(),
+            "CSV ended with an incomplete record");
+    return records;
+}
+
+void requireCsvShape(const CsvRecords& records, std::size_t dataRowCount)
+{
+    require(records.size() == dataRowCount + 1, "CSV record count did not match its data rows");
+    require(records.front().size() == 77, "CSV header did not contain 77 columns");
+    std::string header;
+    for (std::size_t index = 0; index < records.front().size(); ++index) {
+        if (index != 0) {
+            header.push_back(';');
+        }
+        header.append(records.front()[index]);
+    }
+    std::string expectedHeader{kExpectedCsvHeader};
+    for (char& character : expectedHeader) {
+        if (character == ',') {
+            character = ';';
+        }
+    }
+    require(header == expectedHeader, "CSV header did not match the frozen 77-column contract");
+    for (const auto& record : records) {
+        require(record.size() == 77, "CSV record did not contain 77 columns");
+    }
+}
+
+const std::string& csvCell(const CsvRecords& records, std::size_t row, std::string_view header)
+{
+    const auto& columns = records.front();
+    for (std::size_t column = 0; column < columns.size(); ++column) {
+        if (columns[column] == header) {
+            return records.at(row).at(column);
+        }
+    }
+    throw std::runtime_error("CSV output omitted an expected header column");
+}
+
+double csvDouble(const std::string& value)
+{
+    std::string normalized = value;
+    for (char& character : normalized) {
+        if (character == ',') {
+            character = '.';
+        }
+    }
+    double parsed = 0.0;
+    const auto result = std::from_chars(
+        normalized.data(), normalized.data() + normalized.size(), parsed, std::chars_format::general);
+    require(result.ec == std::errc{} && result.ptr == normalized.data() + normalized.size(),
+            "CSV numeric cell was not a valid decimal-comma double");
+    return parsed;
 }
 
 void testSingleJsonExport()
@@ -618,6 +779,131 @@ void testSingleJsonExport()
     clearScenario();
 }
 
+void testSingleCsvExport()
+{
+    setScenario("completed");
+    QTemporaryDir directory;
+    require(directory.isValid(), "temporary Single CSV export directory was not created");
+    MainWindow window;
+    window.show();
+    configureHash(window);
+    widget<QComboBox>(window, "memorySamplingIntervalComboBox")
+        ->setCurrentIndex(widget<QComboBox>(window, "memorySamplingIntervalComboBox")->findData(2));
+
+    QString target;
+    bool overwrite = false;
+    QString messageTitle;
+    MainWindow::DialogCallbacks callbacks;
+    callbacks.chooseSaveTarget = [&](QWidget*) { return target; };
+    callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
+    callbacks.reportMessage = [&](QWidget*, const QString& title, const QString&) { messageTitle = title; };
+    window.setDialogCallbacks(std::move(callbacks));
+
+    auto* run = widget<QPushButton>(window, "runButton");
+    auto* exportJson = widget<QPushButton>(window, "exportJsonButton");
+    auto* exportCsv = widget<QPushButton>(window, "exportCsvButton");
+    run->click();
+    require(!exportCsv->isEnabled(), "Single Export CSV was enabled during a running benchmark");
+    waitForCompleted(window);
+    require(exportJson->isEnabled() && exportCsv->isEnabled(),
+            "Completed Single did not enable JSON and CSV exports together");
+
+    const auto jsonPath = directory.filePath("single-result.json");
+    target = jsonPath;
+    exportJson->click();
+    const auto jsonBytes = readFile(jsonPath);
+    QJsonParseError parseError;
+    const auto jsonDocument = QJsonDocument::fromJson(jsonBytes, &parseError);
+    require(parseError.error == QJsonParseError::NoError && jsonDocument.isObject(),
+            "existing Single JSON export did not remain available");
+    const auto jsonRoot = jsonDocument.object();
+    const auto jsonEntry = jsonRoot.value(QStringLiteral("entries")).toArray().at(0).toObject();
+
+    const auto csvPath = directory.filePath("single-result.csv");
+    target = csvPath;
+    exportCsv->click();
+    const auto csvBytes = readFile(csvPath);
+    const auto records = parseCsvRecords(csvBytes);
+    requireCsvShape(records, 1);
+    require(csvBytes.endsWith("\r\n"), "Single CSV was missing its final CRLF");
+    require(QString::fromUtf8(csvBytes.constData() + 3, csvBytes.size() - 3).toUtf8()
+                == csvBytes.mid(3),
+            "Single CSV payload was not valid UTF-8");
+    require(csvCell(records, 1, "document.format") == "cryptobenchmark-result"
+                && csvCell(records, 1, "document.schemaVersion") == "2"
+                && csvCell(records, 1, "document.mode") == "single"
+                && csvCell(records, 1, "document.status") == "completed"
+                && csvCell(records, 1, "measurement.memorySamplingIntervalMilliseconds") == "2"
+                && csvCell(records, 1, "measurement.memoryModel") == "memoryV2"
+                && csvCell(records, 1, "measurement.workerLifecycle") == "freshWorkerPerLogicalRun"
+                && csvCell(records, 1, "entry.status") == "completed",
+            "Single CSV omitted canonical document or measurement metadata");
+    require(csvCell(records, 1, "config.profileId") ==
+                jsonEntry.value(QStringLiteral("config")).toObject()
+                    .value(QStringLiteral("profileId")).toString().toStdString()
+                && csvCell(records, 1, "config.operation") == "hash"
+                && csvCell(records, 1, "config.parameters.inputSizeBytes") == "8",
+            "Single CSV did not use the retained typed result configuration");
+
+    const auto jsonStatistics = jsonEntry.value(QStringLiteral("statistics")).toObject();
+    const auto jsonWallClock = jsonStatistics.value(QStringLiteral("wallClockNanosecondsPerOperation")).toObject();
+    const double jsonMean = jsonWallClock.value(QStringLiteral("mean")).toDouble();
+    const double csvMean = csvDouble(csvCell(records, 1, "statistics.wallClockNanosecondsPerOperation.mean"));
+    std::array<char, 128> exactMean{};
+    const auto exactMeanResult = std::to_chars(
+        exactMean.data(), exactMean.data() + exactMean.size(), jsonMean, std::chars_format::general);
+    require(exactMeanResult.ec == std::errc{}, "could not format expected canonical wall-clock statistic");
+    std::string expectedMean(exactMean.data(), exactMeanResult.ptr);
+    for (char& character : expectedMean) {
+        if (character == '.') {
+            character = ',';
+        }
+    }
+    require(csvMean == jsonMean &&
+                csvCell(records, 1, "statistics.wallClockNanosecondsPerOperation.mean")
+                    == expectedMean,
+            "Single CSV rounded the canonical wall-clock statistic");
+    const auto jsonReadyState = jsonStatistics.value(QStringLiteral("memory")).toObject()
+        .value(QStringLiteral("readyStateDelta")).toObject().value(QStringLiteral("mean")).toDouble();
+    require(csvDouble(csvCell(records, 1, "statistics.memory.readyStateDeltaBytes.mean")) == jsonReadyState
+                && csvCell(records, 1, "statistics.memory.unit") == "bytes",
+            "Single CSV changed the canonical Memory v2 statistic");
+    require(messageTitle == QStringLiteral("CSV export complete"),
+            "successful Single CSV export did not report completion");
+
+    target.clear();
+    messageTitle.clear();
+    exportCsv->click();
+    require(messageTitle.isEmpty() && readFile(csvPath) == csvBytes && exportCsv->isEnabled(),
+            "cancelling the Single CSV target changed the retained result or target");
+
+    const QByteArray existingBytes = "preserve CSV target";
+    writeFile(csvPath, existingBytes);
+    target = csvPath;
+    overwrite = false;
+    exportCsv->click();
+    require(readFile(csvPath) == existingBytes && exportCsv->isEnabled(),
+            "declined Single CSV overwrite changed the target or result");
+    overwrite = true;
+    exportCsv->click();
+    require(readFile(csvPath) == csvBytes,
+            "approved Single CSV overwrite did not replace the target");
+
+    const auto parentFile = directory.filePath("csv-parent-file");
+    writeFile(parentFile, "not a directory");
+    target = parentFile + "/result.csv";
+    exportCsv->click();
+    require(messageTitle == QStringLiteral("CSV export failed")
+                && exportCsv->isEnabled()
+                && status(window) == QStringLiteral("Completed"),
+            "Single CSV write failure was not reported or discarded the retained result");
+    target = directory.filePath("single-csv-retry.csv");
+    exportCsv->click();
+    require(readFile(target) == csvBytes && exportCsv->isEnabled(),
+            "Single CSV retry did not reuse the retained result");
+    clearScenario();
+}
+
 void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
 {
     setScenario("completed");
@@ -648,11 +934,12 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
     sampling->setCurrentIndex(sampling->findData(4));
     auto* run = widget<QPushButton>(window, "runButton");
     auto* exportButton = widget<QPushButton>(window, "exportJsonButton");
+    auto* exportCsvButton = widget<QPushButton>(window, "exportCsvButton");
 
     run->click();
     require(!sampling->isEnabled(), "Single did not lock the global selector");
     waitForCompleted(window);
-    require(sampling->isEnabled() && exportButton->isEnabled(),
+    require(sampling->isEnabled() && exportButton->isEnabled() && exportCsvButton->isEnabled(),
             "Single did not return to Idle with an exportable result");
 
     selectedOutput = firstSinglePath;
@@ -670,12 +957,14 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
     widget<QPushButton>(window, "batchOutputBrowseButton")->click();
     auto* batchRun = widget<QPushButton>(window, "batchRunButton");
     batchRun->click();
-    require(!run->isEnabled() && !exportButton->isEnabled() && !sampling->isEnabled(),
+    require(!run->isEnabled() && !exportButton->isEnabled() && !exportCsvButton->isEnabled()
+                && !sampling->isEnabled(),
             "Batch did not preserve Single/Batch mutual exclusion and selector lock");
     waitUntil([&] {
         return widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed");
     }, 30'000);
-    require(sampling->isEnabled() && batchRun->isEnabled() && exportButton->isEnabled(),
+    require(sampling->isEnabled() && batchRun->isEnabled()
+                && exportButton->isEnabled() && exportCsvButton->isEnabled(),
             "Batch did not return to Idle with the retained Single result exportable");
 
     const auto batchPayload = readFile(batchPath);
@@ -696,8 +985,22 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
     require(readFile(retainedSingleCopyPath) == firstSinglePayload,
             "Batch changed the retained Single result snapshot");
 
+    const auto retainedSingleCsvPath = directory.filePath("retained-single-copy.csv");
+    selectedOutput = retainedSingleCsvPath;
+    exportCsvButton->click();
+    const auto retainedSingleCsv = readFile(retainedSingleCsvPath);
+    const auto retainedSingleCsvRecords = parseCsvRecords(retainedSingleCsv);
+    requireCsvShape(retainedSingleCsvRecords, 1);
+    require(csvCell(retainedSingleCsvRecords, 1, "document.mode") == "single"
+                && csvCell(retainedSingleCsvRecords, 1, "entry.status") == "completed"
+                && readFile(firstSinglePath) == firstSinglePayload
+                && readFile(batchPath) == batchPayload,
+            "Batch changed or invalidated the retained Single result during CSV export");
+
     sampling->setCurrentIndex(sampling->findData(1));
     run->click();
+    require(!exportButton->isEnabled() && !exportCsvButton->isEnabled(),
+            "new Single Run did not invalidate both retained-result export actions");
     waitForCompleted(window);
     selectedOutput = secondSinglePath;
     exportButton->click();
@@ -1180,15 +1483,29 @@ void testBatchRunAndCancel()
     window.show();
     QString selectedInput = inputPath;
     QString selectedOutput = outputPath;
+    bool overwrite = false;
+    QString messageTitle;
+    QString messageText;
+    int overwritePromptCount = 0;
     MainWindow::DialogCallbacks callbacks;
     callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    callbacks.confirmOverwrite = [&](QWidget*, const QString&) {
+        ++overwritePromptCount;
+        return overwrite;
+    };
+    callbacks.reportMessage = [&](QWidget*, const QString& title, const QString& message) {
+        messageTitle = title;
+        messageText = message;
+    };
     window.setDialogCallbacks(std::move(callbacks));
 
     auto* inputBrowse = widget<QPushButton>(window, "batchInputBrowseButton");
     auto* outputBrowse = widget<QPushButton>(window, "batchOutputBrowseButton");
     auto* run = widget<QPushButton>(window, "batchRunButton");
     auto* cancel = widget<QPushButton>(window, "batchCancelButton");
+    auto* batchCsvButton = widget<QPushButton>(window, "batchExportCsvButton");
+    require(!batchCsvButton->isEnabled(), "Batch Export CSV was enabled before a terminal Batch state");
     auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
     require(sampling->count() == 5 && sampling->currentData().toUInt() == 5,
         "Batch did not expose the global measurement selector");
@@ -1212,7 +1529,8 @@ void testBatchRunAndCancel()
         !inputBrowse->isEnabled() && !outputBrowse->isEnabled() &&
         !sampling->isEnabled() &&
         !widget<QPushButton>(window, "runButton")->isEnabled() &&
-        !widget<QPushButton>(window, "exportJsonButton")->isEnabled(),
+        !widget<QPushButton>(window, "exportJsonButton")->isEnabled() &&
+        !batchCsvButton->isEnabled(),
         "BatchRunning did not enforce mutual exclusion and control locking");
     waitUntil([&] {
         const auto currentStatus = widget<QLabel>(window, "batchStatusLabel")->text();
@@ -1222,7 +1540,7 @@ void testBatchRunAndCancel()
     require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed"),
             "Batch completion did not reach the Completed terminal status");
     require(!cancel->isEnabled() && run->isEnabled() && inputBrowse->isEnabled() &&
-        outputBrowse->isEnabled() && sampling->isEnabled(),
+        outputBrowse->isEnabled() && sampling->isEnabled() && batchCsvButton->isEnabled(),
         "completed Batch did not return to Idle presentation");
     require(widget<QLabel>(window, "batchCurrentEntryLabel")->text() == QStringLiteral("2 / 2"),
             "terminal Batch did not retain the controller-supplied current entry");
@@ -1242,6 +1560,80 @@ void testBatchRunAndCancel()
     require(document.object().value("measurement").toObject()
                 .value("memorySamplingIntervalMilliseconds").toInt() == 3,
             "Batch export did not preserve the selected measurement settings snapshot");
+    const auto completedCsvPath = directory.filePath("completed-batch.csv");
+    selectedOutput = completedCsvPath;
+    batchCsvButton->click();
+    const auto completedCsv = readFile(completedCsvPath);
+    const auto completedRecords = parseCsvRecords(completedCsv);
+    requireCsvShape(completedRecords, 2);
+    require(csvCell(completedRecords, 1, "document.status") == "completed"
+                && csvCell(completedRecords, 2, "document.status") == "completed"
+                && csvCell(completedRecords, 1, "measurement.memorySamplingIntervalMilliseconds") == "3"
+                && csvCell(completedRecords, 2, "measurement.memorySamplingIntervalMilliseconds") == "3"
+                && csvCell(completedRecords, 1, "entry.entryIndex") == "1"
+                && csvCell(completedRecords, 2, "entry.entryIndex") == "2"
+                && csvCell(completedRecords, 1, "entry.status") == "completed"
+                && csvCell(completedRecords, 2, "entry.status") == "completed"
+                && readFile(outputPath) == payload
+                && widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == outputPath
+                && batchCsvButton->isEnabled()
+                && widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed"),
+            "Completed Batch CSV changed execution/persistence state or failed canonical mapping");
+
+    overwrite = true;
+    const auto requireJsonTargetCollisionRejected = [&](const QString& candidate) {
+        const int previousPromptCount = overwritePromptCount;
+        selectedOutput = candidate;
+        messageTitle.clear();
+        messageText.clear();
+        batchCsvButton->click();
+        require(messageTitle == QStringLiteral("Batch CSV export failed")
+                    && messageText.contains(QStringLiteral("canonical Batch JSON output file"))
+                    && overwritePromptCount == previousPromptCount
+                    && readFile(outputPath) == payload
+                    && widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == outputPath
+                    && widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed"),
+                "Batch CSV target collision reached overwrite confirmation or changed canonical JSON");
+    };
+    requireJsonTargetCollisionRejected(outputPath);
+    require(QDir().mkpath(directory.filePath("normalized-path-alias")),
+            "could not create normalized-path collision test directory");
+    requireJsonTargetCollisionRejected(
+        directory.filePath("normalized-path-alias/../batch-result.json"));
+    requireJsonTargetCollisionRejected(outputPath.toUpper());
+
+    selectedOutput.clear();
+    messageTitle.clear();
+    batchCsvButton->click();
+    require(messageTitle.isEmpty() && readFile(outputPath) == payload && batchCsvButton->isEnabled(),
+            "cancelling Batch CSV target changed the JSON target or terminal state");
+
+    const QByteArray protectedCsvBytes = "preserve existing secondary target";
+    writeFile(completedCsvPath, protectedCsvBytes);
+    overwrite = false;
+    selectedOutput = completedCsvPath;
+    batchCsvButton->click();
+    require(readFile(completedCsvPath) == protectedCsvBytes && readFile(outputPath) == payload,
+            "declined Batch CSV overwrite changed a file");
+    overwrite = true;
+    batchCsvButton->click();
+    require(readFile(completedCsvPath) == completedCsv && readFile(outputPath) == payload,
+            "approved Batch CSV overwrite failed or changed canonical JSON");
+
+    const auto csvParentFile = directory.filePath("batch-csv-parent-file");
+    writeFile(csvParentFile, "not a directory");
+    selectedOutput = csvParentFile + "/failed.csv";
+    batchCsvButton->click();
+    require(messageTitle == QStringLiteral("Batch CSV export failed")
+                && batchCsvButton->isEnabled()
+                && widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Completed")
+                && readFile(outputPath) == payload,
+            "Batch CSV write failure was not reported or changed execution/persistence state");
+    const auto retryCsvPath = directory.filePath("completed-batch-retry.csv");
+    selectedOutput = retryCsvPath;
+    batchCsvButton->click();
+    require(readFile(retryCsvPath) == completedCsv && readFile(outputPath) == payload,
+            "Batch CSV retry changed JSON persistence or failed to reuse the terminal result");
     clearScenario();
 
     setScenario("wait-before-measurement");
@@ -1255,13 +1647,16 @@ void testBatchRunAndCancel()
     MainWindow::DialogCallbacks cancelCallbacks;
     cancelCallbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     cancelCallbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    cancelCallbacks.reportMessage = [](QWidget*, const QString&, const QString&) {};
     cancelWindow.setDialogCallbacks(std::move(cancelCallbacks));
     widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->click();
     widget<QPushButton>(cancelWindow, "batchOutputBrowseButton")->click();
     auto* batchCancel = widget<QPushButton>(cancelWindow, "batchCancelButton");
+    auto* cancelledCsvButton = widget<QPushButton>(cancelWindow, "batchExportCsvButton");
     auto* cancelSampling = widget<QComboBox>(cancelWindow, "memorySamplingIntervalComboBox");
     widget<QPushButton>(cancelWindow, "batchRunButton")->click();
-    require(batchCancel->isEnabled(), "Batch Run did not enter BatchRunning presentation");
+    require(batchCancel->isEnabled() && !cancelledCsvButton->isEnabled(),
+            "Batch Run did not enter BatchRunning presentation or disabled CSV export");
     waitUntil([&] {
         return widget<QLabel>(cancelWindow, "batchCurrentEntryLabel")->text() == QStringLiteral("1 / 2") &&
                widget<QLabel>(cancelWindow, "batchCurrentBenchmarkLabel")->text() != QStringLiteral("-") &&
@@ -1272,7 +1667,8 @@ void testBatchRunAndCancel()
     require(cancelWindow.isVisible(), "active Batch close with No unexpectedly closed the window");
     batchCancel->click();
     require(widget<QLabel>(cancelWindow, "batchStatusLabel")->text() == QStringLiteral("Cancelling...") &&
-                !batchCancel->isEnabled() && !cancelSampling->isEnabled(),
+                !batchCancel->isEnabled() && !cancelSampling->isEnabled()
+                && !cancelledCsvButton->isEnabled(),
         "Batch Cancel did not enter BatchCancelling presentation");
     QTimer::singleShot(0, [&] { answerMessageBox(QMessageBox::No); });
     cancelWindow.close();
@@ -1286,8 +1682,22 @@ void testBatchRunAndCancel()
             "Batch cancellation did not reach the Cancelled terminal status");
     require(widget<QPushButton>(cancelWindow, "batchRunButton")->isEnabled() &&
         widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->isEnabled() &&
-        !widget<QPushButton>(cancelWindow, "batchSaveAsButton")->isEnabled(),
+        !widget<QPushButton>(cancelWindow, "batchSaveAsButton")->isEnabled()
+        && cancelledCsvButton->isEnabled(),
         "cancelled Batch did not return to Idle presentation");
+    const auto cancelledJson = readFile(cancelOutputPath);
+    const auto cancelledCsvPath = directory.filePath("cancelled-batch.csv");
+    selectedOutput = cancelledCsvPath;
+    cancelledCsvButton->click();
+    const auto cancelledRecords = parseCsvRecords(readFile(cancelledCsvPath));
+    requireCsvShape(cancelledRecords, 2);
+    require(csvCell(cancelledRecords, 1, "document.status") == "cancelled"
+                && csvCell(cancelledRecords, 1, "entry.entryIndex") == "1"
+                && csvCell(cancelledRecords, 1, "entry.status") == "cancelled"
+                && csvCell(cancelledRecords, 2, "entry.entryIndex") == "2"
+                && csvCell(cancelledRecords, 2, "entry.status") == "notStarted"
+                && readFile(cancelOutputPath) == cancelledJson,
+            "Cancelled Batch CSV did not preserve terminal order or JSON persistence");
     clearScenario();
 
     setScenario("failed-immediately");
@@ -1299,6 +1709,7 @@ void testBatchRunAndCancel()
     MainWindow::DialogCallbacks failureCallbacks;
     failureCallbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     failureCallbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    failureCallbacks.reportMessage = [](QWidget*, const QString&, const QString&) {};
     failureWindow.setDialogCallbacks(std::move(failureCallbacks));
     widget<QPushButton>(failureWindow, "batchInputBrowseButton")->click();
     widget<QPushButton>(failureWindow, "batchOutputBrowseButton")->click();
@@ -1309,8 +1720,22 @@ void testBatchRunAndCancel()
     }, 30'000);
     require(widget<QLabel>(failureWindow, "batchFailedCountLabel")->text() == QStringLiteral("2") &&
                 widget<QLabel>(failureWindow, "batchCompletedCountLabel")->text() == QStringLiteral("0") &&
-                !widget<QPushButton>(failureWindow, "batchSaveAsButton")->isEnabled(),
+                !widget<QPushButton>(failureWindow, "batchSaveAsButton")->isEnabled()
+                && widget<QPushButton>(failureWindow, "batchExportCsvButton")->isEnabled(),
             "CompletedWithFailures did not display controller-supplied failed/completed counters");
+    const auto failedEntriesJson = readFile(failureOutputPath);
+    const auto failedEntriesCsvPath = directory.filePath("completed-with-failures.csv");
+    selectedOutput = failedEntriesCsvPath;
+    widget<QPushButton>(failureWindow, "batchExportCsvButton")->click();
+    const auto failedEntriesRecords = parseCsvRecords(readFile(failedEntriesCsvPath));
+    requireCsvShape(failedEntriesRecords, 2);
+    require(csvCell(failedEntriesRecords, 1, "document.status") == "completedWithFailures"
+                && csvCell(failedEntriesRecords, 1, "entry.status") == "failed"
+                && csvCell(failedEntriesRecords, 2, "entry.status") == "failed"
+                && csvCell(failedEntriesRecords, 1, "statistics.memory.unit").empty()
+                && csvCell(failedEntriesRecords, 2, "statistics.memory.unit").empty()
+                && readFile(failureOutputPath) == failedEntriesJson,
+            "CompletedWithFailures CSV did not reflect the terminal snapshot");
     clearScenario();
 }
 
@@ -1396,7 +1821,7 @@ void testBatchSaveAsRecovery()
     QTemporaryDir directory;
     require(directory.isValid(), "temporary Batch recovery directory was not created");
     const auto inputPath = directory.filePath("recovery-batch.json");
-    writeFile(inputPath, validBatchFixture());
+    writeFile(inputPath, multiEntryBatchFixture());
     const auto invalidOutput = directory.filePath("missing-parent/result.json");
     const auto validOutput = directory.filePath("recovered-result.json");
     const auto existingOutput = directory.filePath("existing-recovery.json");
@@ -1425,9 +1850,52 @@ void testBatchSaveAsRecovery()
     }, 10'000);
 
     auto* saveAs = widget<QPushButton>(window, "batchSaveAsButton");
-    require(saveAs->isEnabled(), "failed Batch did not enable Save As");
+    auto* exportCsv = widget<QPushButton>(window, "batchExportCsvButton");
+    require(saveAs->isEnabled() && exportCsv->isEnabled(),
+            "failed Batch did not enable Save As and terminal CSV export");
     require(widget<QLabel>(window, "batchStatusLabel")->text().size() > QStringLiteral("Failed: ").size(),
         "failed Batch did not retain the persistence technical message");
+
+    overwrite = true;
+    selectedOutput = invalidOutput;
+    messageTitle.clear();
+    exportCsv->click();
+    require(messageTitle == QStringLiteral("Batch CSV export failed")
+                && saveAs->isEnabled() && exportCsv->isEnabled()
+                && !QFileInfo::exists(invalidOutput)
+                && widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == invalidOutput,
+            "Failed Batch path collision created CSV at or interfered with its JSON recovery target");
+
+    const auto invalidCsvTarget = directory.filePath("missing-csv-parent/recovery.csv");
+    selectedOutput = invalidCsvTarget;
+    exportCsv->click();
+    require(messageTitle == QStringLiteral("Batch CSV export failed")
+                && saveAs->isEnabled() && exportCsv->isEnabled()
+                && widget<QLabel>(window, "batchStatusLabel")->text().startsWith(QStringLiteral("Failed"))
+                && widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == invalidOutput,
+            "failed Batch CSV write changed Save As recovery or the canonical JSON target");
+
+    const auto csvRecoveryTarget = directory.filePath("failed-batch-analysis.csv");
+    selectedOutput = csvRecoveryTarget;
+    exportCsv->click();
+    const auto failedBatchRecords = parseCsvRecords(readFile(csvRecoveryTarget));
+    requireCsvShape(failedBatchRecords, 2);
+    require(csvCell(failedBatchRecords, 1, "document.mode") == "batch"
+                && csvCell(failedBatchRecords, 1, "document.status") == "failed"
+                && csvCell(failedBatchRecords, 1, "entry.status") == "notStarted"
+                && csvCell(failedBatchRecords, 2, "entry.status") == "notStarted"
+                && csvCell(failedBatchRecords, 1, "statistics.memory.unit").empty()
+                && csvCell(failedBatchRecords, 2, "statistics.memory.unit").empty()
+                && csvCell(failedBatchRecords, 1, "batchError.code") == "outputInitializationFailed"
+                && csvCell(failedBatchRecords, 2, "batchError.code") == "outputInitializationFailed"
+                && csvCell(failedBatchRecords, 1, "batchError.stage") == "outputInitialization"
+                && csvCell(failedBatchRecords, 2, "batchError.stage") == "outputInitialization"
+                && csvCell(failedBatchRecords, 1, "batchError.technicalMessage") ==
+                    csvCell(failedBatchRecords, 2, "batchError.technicalMessage")
+                && saveAs->isEnabled() && exportCsv->isEnabled()
+                && widget<QLabel>(window, "batchStatusLabel")->text().startsWith(QStringLiteral("Failed"))
+                && widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == invalidOutput,
+            "successful Batch CSV export altered Failed state or its JSON recovery capability");
 
     selectedOutput = existingOutput;
     overwrite = false;
@@ -1497,10 +1965,13 @@ bool messageBoxHasButton(const QString& text)
 
 bool tryAnswerMessageBox(QMessageBox::StandardButton answer);
 
-void clickMessageBoxButtonWhenShown(const QString& text)
+void clickMessageBoxButtonWhenShown(const QString& text, const std::function<void()>& beforeClick = {})
 {
     bool clicked = false;
     waitUntil([&] {
+        if (!clicked && beforeClick && messageBoxHasButton(text)) {
+            beforeClick();
+        }
         return clicked || (clicked = tryClickMessageBoxButton(text));
     }, 10'000);
 }
@@ -1560,7 +2031,13 @@ void testBatchClosePersistenceFailureRecovery()
                              selectedInput, selectedOutput, std::move(callbacks));
 
     selectedOutput = recoveryTarget;
-    clickMessageBoxButtonWhenShown(QStringLiteral("Save As..."));
+    bool csvDisabledDuringRecovery = false;
+    clickMessageBoxButtonWhenShown(QStringLiteral("Save As..."), [&] {
+        csvDisabledDuringRecovery =
+            !widget<QPushButton>(window, "batchExportCsvButton")->isEnabled();
+    });
+    require(csvDisabledDuringRecovery,
+            "Batch Export CSV remained enabled during close-after-terminal recovery");
     const auto payload = readFile(recoveryTarget);
     QJsonParseError parseError;
     const auto document = QJsonDocument::fromJson(payload, &parseError);
@@ -1950,6 +2427,8 @@ int main(int argc, char* argv[])
         testFailedAndReuse();
         std::cout << "CASE single-json-export\n";
         testSingleJsonExport();
+        std::cout << "CASE single-csv-export\n";
+        testSingleCsvExport();
         std::cout << "CASE single-batch-single-parity\n";
         testSingleBatchMemoryV2ParityAndSnapshotIsolation();
         std::cout << "CASE batch-gui\n";

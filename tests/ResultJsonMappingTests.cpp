@@ -102,6 +102,15 @@ void testStableEnumStrings()
 
 void testStructuralMappings()
 {
+    require(structuralCharacteristicsTypeToStableString(SignatureCharacteristics{}) == "signature",
+            "signature structural type mapper mismatch");
+    require(structuralCharacteristicsTypeToStableString(KeyEstablishmentCharacteristics{}) == "keyEstablishment",
+            "key-establishment structural type mapper mismatch");
+    require(structuralCharacteristicsTypeToStableString(AeadCharacteristics{}) == "aead",
+            "AEAD structural type mapper mismatch");
+    require(structuralCharacteristicsTypeToStableString(HashCharacteristics{}) == "hashXof",
+            "hash/XOF structural type mapper mismatch");
+
     const SignatureCharacteristics completeSignature{
         ByteCount{1952}, ByteCount{4032}, SignatureSizeReference{ByteCount{3309}, SignatureSizeReferenceKind::Fixed}
     };
@@ -185,6 +194,8 @@ void testEnvironmentMapping()
     requireString(value, "architecture", "x64");
     requireString(value, "buildType", "Debug");
     requireString(value, "measuredAt", "2026-09-22T00:00:00.177Z");
+    require(measuredAtToStableString(environment.measuredAt) == "2026-09-22T00:00:00.177Z",
+            "shared measuredAt scalar formatter mismatch");
 }
 
 void testStatisticsMapping()
