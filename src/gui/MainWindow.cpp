@@ -7,6 +7,7 @@
 
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDir>
 #include <QListWidget>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -23,6 +24,8 @@
 #include <cryptobench/core/ConfigValidator.h>
 #include <cryptobench/core/ConfigValidation.h>
 #include <cryptobench/application/AtomicFileWriter.h>
+#include <cryptobench/application/BatchResultDocumentService.h>
+#include <cryptobench/application/CsvResultExportService.h>
 #include <cryptobench/application/JsonResultExportService.h>
 #include <cryptobench/application/SingleResultDocumentService.h>
 #include <cryptobench/application/BatchInputParser.h>
@@ -161,6 +164,42 @@ void clearDisplayedResults(Ui::MainWindow* ui)
     ui->resultsPlaceholderLabel->setVisible(true);
 }
 
+bool isTerminalBatchStatus(cryptobench::application::BatchStatus status)
+{
+    switch (status) {
+    case cryptobench::application::BatchStatus::Completed:
+    case cryptobench::application::BatchStatus::CompletedWithFailures:
+    case cryptobench::application::BatchStatus::Cancelled:
+    case cryptobench::application::BatchStatus::Failed:
+        return true;
+    case cryptobench::application::BatchStatus::InProgress:
+        return false;
+    }
+    return false;
+}
+
+QString normalizedAbsolutePath(const QString& path)
+{
+    return QDir::cleanPath(QDir::fromNativeSeparators(QFileInfo(path).absoluteFilePath()));
+}
+
+bool sameFilePath(const QString& left, const QString& right)
+{
+    const QString normalizedLeft = normalizedAbsolutePath(left);
+    const QString normalizedRight = normalizedAbsolutePath(right);
+    if (QString::compare(normalizedLeft, normalizedRight, Qt::CaseInsensitive) == 0) {
+        return true;
+    }
+
+    const QString canonicalLeft = QFileInfo(left).canonicalFilePath();
+    const QString canonicalRight = QFileInfo(right).canonicalFilePath();
+    return !canonicalLeft.isEmpty() && !canonicalRight.isEmpty()
+        && QString::compare(
+            QDir::cleanPath(QDir::fromNativeSeparators(canonicalLeft)),
+            QDir::cleanPath(QDir::fromNativeSeparators(canonicalRight)),
+            Qt::CaseInsensitive) == 0;
+}
+
 void displayCompletedResults(Ui::MainWindow* ui, const cryptobench::core::BenchmarkResult& result)
 {
     if (!result.statistics) {
@@ -235,6 +274,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->batchCancelButton, &QPushButton::clicked, this, &MainWindow::requestBatchCancel);
     connect(ui->batchSaveAsButton, &QPushButton::clicked, this, &MainWindow::saveBatchAs);
     connect(ui->exportJsonButton, &QPushButton::clicked, this, &MainWindow::exportSingleResult);
+    connect(ui->exportCsvButton, &QPushButton::clicked, this, &MainWindow::exportSingleCsvResult);
+    connect(ui->batchExportCsvButton, &QPushButton::clicked, this, &MainWindow::exportBatchCsvResult);
     connect(ui->batchInputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchInput);
     connect(ui->batchOutputBrowseButton, &QPushButton::clicked, this, &MainWindow::browseBatchOutput);
     connect(batchCreatorWidget_->useInBatchButton(), &QPushButton::clicked,
@@ -497,6 +538,11 @@ void MainWindow::applyPresentationState()
         && !closeAfterTerminal_ && !closeAfterBatchTerminal_);
     ui->cancelButton->setEnabled(singleRunning);
     ui->exportJsonButton->setEnabled(idle && exportableSingleResult_.has_value());
+    ui->exportCsvButton->setEnabled(
+        idle && !singleController_->isBusy() && !batchController_->isBusy()
+        && !closeAfterTerminal_ && !closeAfterBatchTerminal_
+        && exportableSingleResult_.has_value()
+        && exportableSingleResult_->status == cryptobench::core::BenchmarkStatus::Completed);
     updateRunAvailability();
     updateBatchPresentation();
 }
@@ -515,6 +561,10 @@ void MainWindow::updateBatchPresentation()
     ui->batchSaveAsButton->setEnabled(
         idle && !batchController_->isBusy() &&
         batchController_->state().status == cryptobench::application::BatchStatus::Failed);
+    ui->batchExportCsvButton->setEnabled(
+        idle && !singleController_->isBusy() && !batchController_->isBusy()
+        && !closeAfterTerminal_ && !closeAfterBatchTerminal_
+        && isTerminalBatchStatus(batchController_->state().status));
     updateBatchInputSourcePresentation();
 }
 
@@ -838,6 +888,7 @@ void MainWindow::onBenchmarkFinished(const cryptobench::core::BenchmarkResult& r
         ui->runButton->setEnabled(false);
         ui->cancelButton->setEnabled(false);
         ui->exportJsonButton->setEnabled(false);
+        ui->exportCsvButton->setEnabled(false);
         QTimer::singleShot(0, this, [this]() {
             if (!singleController_->isBusy()) {
                 closeAfterTerminal_ = false;
@@ -1080,6 +1131,166 @@ void MainWindow::exportSingleResult()
     } else {
         QMessageBox::information(this, QStringLiteral("Export complete"),
                                  QStringLiteral("JSON was exported successfully."));
+    }
+}
+
+void MainWindow::exportSingleCsvResult()
+{
+    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
+        batchController_->isBusy() || closeAfterTerminal_ || closeAfterBatchTerminal_ ||
+        !exportableSingleResult_.has_value() ||
+        exportableSingleResult_->status != cryptobench::core::BenchmarkStatus::Completed) {
+        return;
+    }
+
+    const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
+        ? dialogCallbacks_.chooseSaveTarget
+        : [this](QWidget*) {
+              return QFileDialog::getSaveFileName(
+                  this, QStringLiteral("Export CSV"), {},
+                  QStringLiteral("CSV files (*.csv);;All files (*)"));
+          };
+    const QString target = chooseSaveTarget(this);
+    if (target.isEmpty()) {
+        return;
+    }
+
+    if (QFileInfo::exists(target)) {
+        const auto confirmOverwrite = dialogCallbacks_.confirmOverwrite
+            ? dialogCallbacks_.confirmOverwrite
+            : [this](QWidget*, const QString& path) {
+                  return QMessageBox::question(
+                             this, QStringLiteral("Replace existing file"),
+                             QStringLiteral("The target already exists. Replace it?\n%1").arg(path),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                      == QMessageBox::Yes;
+              };
+        if (!confirmOverwrite(this, target)) {
+            return;
+        }
+    }
+
+    try {
+        const auto document = cryptobench::application::SingleResultDocumentService{}.create(
+            *exportableSingleResult_);
+        const auto csv = cryptobench::application::CsvResultExportService{}.serialize(document);
+        const auto writeResult =
+            cryptobench::application::AtomicFileWriter{}.writeAtomically(target, csv);
+        if (!writeResult.success) {
+            const QString message = writeResult.technicalMessage.isEmpty()
+                ? QStringLiteral("CSV export failed.")
+                : writeResult.technicalMessage;
+            if (dialogCallbacks_.reportMessage) {
+                dialogCallbacks_.reportMessage(this, QStringLiteral("CSV export failed"), message);
+            } else {
+                QMessageBox::warning(this, QStringLiteral("CSV export failed"), message);
+            }
+            return;
+        }
+    } catch (const std::exception& error) {
+        const QString message = QString::fromUtf8(error.what());
+        if (dialogCallbacks_.reportMessage) {
+            dialogCallbacks_.reportMessage(this, QStringLiteral("CSV export failed"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("CSV export failed"), message);
+        }
+        return;
+    }
+
+    if (dialogCallbacks_.reportMessage) {
+        dialogCallbacks_.reportMessage(this, QStringLiteral("CSV export complete"),
+                                       QStringLiteral("CSV was exported successfully."));
+    } else {
+        QMessageBox::information(this, QStringLiteral("CSV export complete"),
+                                 QStringLiteral("CSV was exported successfully."));
+    }
+}
+
+void MainWindow::exportBatchCsvResult()
+{
+    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
+        batchController_->isBusy() || closeAfterTerminal_ || closeAfterBatchTerminal_ ||
+        !isTerminalBatchStatus(batchController_->state().status)) {
+        return;
+    }
+
+    const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
+        ? dialogCallbacks_.chooseSaveTarget
+        : [this](QWidget*) {
+              QString defaultTarget;
+              if (!batchOutputTarget_.isEmpty()) {
+                  const QFileInfo jsonTarget(batchOutputTarget_);
+                  defaultTarget = jsonTarget.dir().filePath(
+                      jsonTarget.completeBaseName() + QStringLiteral("-analysis.csv"));
+              }
+              return QFileDialog::getSaveFileName(
+                  this, QStringLiteral("Export Batch CSV"), defaultTarget,
+                  QStringLiteral("CSV files (*.csv);;All files (*)"));
+          };
+    const QString target = chooseSaveTarget(this);
+    if (target.isEmpty()) {
+        return;
+    }
+
+    if (!batchOutputTarget_.isEmpty() && sameFilePath(target, batchOutputTarget_)) {
+        const QString message = QStringLiteral(
+            "The CSV target resolves to the canonical Batch JSON output file. Choose a different target.");
+        if (dialogCallbacks_.reportMessage) {
+            dialogCallbacks_.reportMessage(this, QStringLiteral("Batch CSV export failed"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("Batch CSV export failed"), message);
+        }
+        return;
+    }
+
+    if (QFileInfo::exists(target)) {
+        const auto confirmOverwrite = dialogCallbacks_.confirmOverwrite
+            ? dialogCallbacks_.confirmOverwrite
+            : [this](QWidget*, const QString& path) {
+                  return QMessageBox::question(
+                             this, QStringLiteral("Replace existing file"),
+                             QStringLiteral("The target already exists. Replace it?\n%1").arg(path),
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                      == QMessageBox::Yes;
+              };
+        if (!confirmOverwrite(this, target)) {
+            return;
+        }
+    }
+
+    try {
+        const auto& state = batchController_->state();
+        const auto document = cryptobench::application::BatchResultDocumentService{}.create(state);
+        const auto csv = cryptobench::application::CsvResultExportService{}.serialize(document);
+        const auto writeResult =
+            cryptobench::application::AtomicFileWriter{}.writeAtomically(target, csv);
+        if (!writeResult.success) {
+            const QString message = writeResult.technicalMessage.isEmpty()
+                ? QStringLiteral("Batch CSV export failed.")
+                : writeResult.technicalMessage;
+            if (dialogCallbacks_.reportMessage) {
+                dialogCallbacks_.reportMessage(this, QStringLiteral("Batch CSV export failed"), message);
+            } else {
+                QMessageBox::warning(this, QStringLiteral("Batch CSV export failed"), message);
+            }
+            return;
+        }
+    } catch (const std::exception& error) {
+        const QString message = QString::fromUtf8(error.what());
+        if (dialogCallbacks_.reportMessage) {
+            dialogCallbacks_.reportMessage(this, QStringLiteral("Batch CSV export failed"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("Batch CSV export failed"), message);
+        }
+        return;
+    }
+
+    if (dialogCallbacks_.reportMessage) {
+        dialogCallbacks_.reportMessage(this, QStringLiteral("Batch CSV export complete"),
+                                       QStringLiteral("Batch CSV was exported successfully."));
+    } else {
+        QMessageBox::information(this, QStringLiteral("Batch CSV export complete"),
+                                 QStringLiteral("Batch CSV was exported successfully."));
     }
 }
 

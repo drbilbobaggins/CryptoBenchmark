@@ -74,6 +74,8 @@ private:
     void requestCancel();
     void requestBatchCancel();
     void exportSingleResult();
+    void exportSingleCsvResult();
+    void exportBatchCsvResult();
     bool saveBatchAs();
     void browseBatchInput();
     void browseBatchOutput();

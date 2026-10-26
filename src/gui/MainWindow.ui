@@ -238,6 +238,16 @@
           </property>
          </widget>
         </item>
+        <item>
+         <widget class="QPushButton" name="exportCsvButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="text">
+           <string>Export CSV...</string>
+          </property>
+         </widget>
+        </item>
        <item>
         <spacer name="actionsSpacer">
          <property name="orientation">
@@ -434,6 +444,7 @@
            <item><widget class="QPushButton" name="batchRunButton"><property name="enabled"><bool>false</bool></property><property name="text"><string>Run Batch</string></property></widget></item>
            <item><widget class="QPushButton" name="batchCancelButton"><property name="enabled"><bool>false</bool></property><property name="text"><string>Cancel</string></property></widget></item>
            <item><widget class="QPushButton" name="batchSaveAsButton"><property name="enabled"><bool>false</bool></property><property name="text"><string>Save As...</string></property></widget></item>
+           <item><widget class="QPushButton" name="batchExportCsvButton"><property name="enabled"><bool>false</bool></property><property name="text"><string>Export CSV...</string></property></widget></item>
           </layout>
          </widget>
         </item>
