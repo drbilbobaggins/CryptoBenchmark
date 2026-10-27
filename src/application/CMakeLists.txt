@@ -76,6 +76,10 @@ add_library(cryptobench_application STATIC
     include/cryptobench/application/SingleResultDocumentService.h
     AtomicFileWriter.cpp
     include/cryptobench/application/AtomicFileWriter.h
+    include/cryptobench/application/RuntimeCalibrationProvider.h
+    RuntimeEstimateService.cpp
+    include/cryptobench/application/RuntimeEstimate.h
+    include/cryptobench/application/RuntimeEstimateService.h
 )
 
 set_target_properties(cryptobench_application PROPERTIES AUTOMOC ON)
