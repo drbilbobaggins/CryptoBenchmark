@@ -1963,6 +1963,28 @@ bool messageBoxHasButton(const QString& text)
     return false;
 }
 
+std::string visibleMessageBoxes()
+{
+    std::string result;
+    bool firstMessageBox = true;
+    for (QWidget* topLevel : QApplication::topLevelWidgets()) {
+        auto* messageBox = qobject_cast<QMessageBox*>(topLevel);
+        if (messageBox == nullptr || !messageBox->isVisible()) continue;
+
+        if (!firstMessageBox) result += "; ";
+        firstMessageBox = false;
+        result += "title=\"" + messageBox->windowTitle().toStdString() + "\" buttons=[";
+        bool firstButton = true;
+        for (QAbstractButton* button : messageBox->buttons()) {
+            if (!firstButton) result += ", ";
+            firstButton = false;
+            result += "\"" + button->text().toStdString() + "\"";
+        }
+        result += ']';
+    }
+    return firstMessageBox ? "<none>" : result;
+}
+
 bool tryAnswerMessageBox(QMessageBox::StandardButton answer);
 
 void clickMessageBoxButtonWhenShown(const QString& text, const std::function<void()>& beforeClick = {})
@@ -2243,6 +2265,16 @@ void testBatchCancellingCloseDialogAfterFailedTerminalization()
     callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
     window.setDialogCallbacks(std::move(callbacks));
+    bool failedObserved = false;
+    bool answered = false;
+    bool recoveryObserved = false;
+    bool unexpectedTerminal = false;
+    bool outputRemoved = false;
+    bool recoveryDialogObserved = false;
+    std::vector<std::string> eventSequence;
+    const auto recordEvent = [&](std::string event) {
+        eventSequence.push_back(std::move(event));
+    };
     widget<QPushButton>(window, "batchInputBrowseButton")->click();
     widget<QPushButton>(window, "batchOutputBrowseButton")->click();
     widget<QPushButton>(window, "batchRunButton")->click();
@@ -2252,6 +2284,10 @@ void testBatchCancellingCloseDialogAfterFailedTerminalization()
     require(!creator->useInBatchButton()->isEnabled()
                 && !creator->exportBatchJsonButton()->isEnabled(),
             "Creator finalization was enabled while Batch was running");
+    recordEvent("output removal started");
+    removeBatchOutputDirectory(outputDirectory, outputPath);
+    outputRemoved = true;
+    recordEvent("output removal completed");
     widget<QPushButton>(window, "batchCancelButton")->click();
     require(widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Cancelling..."),
         "Batch did not enter Cancelling before the modal failed-terminal race");
@@ -2259,57 +2295,73 @@ void testBatchCancellingCloseDialogAfterFailedTerminalization()
                 && !creator->exportBatchJsonButton()->isEnabled(),
             "Creator finalization was enabled while Batch was cancelling");
 
-    bool failedObserved = false;
-    bool answered = false;
-    bool recoveryObserved = false;
-    bool unexpectedTerminal = false;
-    bool outputRemoved = false;
-    QTimer failureTimer;
-    failureTimer.setInterval(0);
-    QObject::connect(&failureTimer, &QTimer::timeout, &window, [&] {
-        if (!outputRemoved) {
-            removeBatchOutputDirectory(outputDirectory, outputPath);
-            outputRemoved = true;
-            failureTimer.stop();
-        }
-    });
     QTimer pollTimer;
     pollTimer.setInterval(10);
     QObject::connect(&pollTimer, &QTimer::timeout, &window, [&] {
+        const auto batchStatus = widget<QLabel>(window, "batchStatusLabel")->text();
         if (!failedObserved &&
-            widget<QLabel>(window, "batchStatusLabel")->text().startsWith(QStringLiteral("Failed"))) {
+            batchStatus.startsWith(QStringLiteral("Failed"))) {
             failedObserved = true;
+            recordEvent("Batch status transition: Failed");
         }
-        if (!failedObserved &&
-            widget<QLabel>(window, "batchStatusLabel")->text() == QStringLiteral("Cancelled")) {
+        if (!failedObserved && !unexpectedTerminal &&
+            batchStatus == QStringLiteral("Cancelled")) {
             unexpectedTerminal = true;
+            recordEvent("Batch status transition: Cancelled");
         }
         if ((failedObserved || unexpectedTerminal) && !answered) {
             answered = tryAnswerMessageBox(failedObserved ? QMessageBox::Yes : QMessageBox::No);
+            if (answered) {
+                recordEvent(failedObserved
+                    ? "Batch cancelling confirmation response: Yes"
+                    : "Batch cancelling confirmation response: No");
+            }
         }
-        if (answered && !recoveryObserved && messageBoxHasButton(QStringLiteral("Keep open"))) {
+        if (!recoveryDialogObserved && messageBoxHasButton(QStringLiteral("Keep open"))) {
+            recoveryDialogObserved = true;
+            recordEvent("Batch recovery dialog detected");
+        }
+        if (answered && recoveryDialogObserved && !recoveryObserved) {
             recoveryObserved = true;
-            tryClickMessageBoxButton(QStringLiteral("Keep open"));
+            if (tryClickMessageBoxButton(QStringLiteral("Keep open"))) {
+                recordEvent("Batch recovery dialog response: Keep open");
+            }
         }
     });
-    failureTimer.start();
     pollTimer.start();
     QTimer safetyTimer;
     safetyTimer.setSingleShot(true);
     QObject::connect(&safetyTimer, &QTimer::timeout, &window, [&] {
+        recordEvent("Safety timer activated");
         if (!answered) {
             answered = tryAnswerMessageBox(QMessageBox::No);
+            if (answered) recordEvent("Safety confirmation response: No");
             pollTimer.stop();
         }
     });
     safetyTimer.start(10'000);
     window.close();
-    failureTimer.stop();
     pollTimer.stop();
     safetyTimer.stop();
 
-    require(failedObserved && !unexpectedTerminal && answered && recoveryObserved,
-        "BatchCancelling close dialog was not held open until Failed terminalization");
+    std::string diagnostic = "BatchCancelling close dialog was not held open until Failed terminalization"
+        " [failedObserved=" + std::to_string(failedObserved)
+        + ", unexpectedTerminal=" + std::to_string(unexpectedTerminal)
+        + ", answered=" + std::to_string(answered)
+        + ", recoveryObserved=" + std::to_string(recoveryObserved)
+        + ", outputRemoved=" + std::to_string(outputRemoved)
+        + ", finalBatchStatusLabel=\""
+        + widget<QLabel>(window, "batchStatusLabel")->text().toStdString()
+        + "\", windowVisible=" + std::to_string(window.isVisible())
+        + ", recoveryDialogObserved=" + std::to_string(recoveryDialogObserved)
+        + ", visibleMessageBoxes=" + visibleMessageBoxes()
+        + ", eventSequence=[";
+    for (std::size_t index = 0; index < eventSequence.size(); ++index) {
+        if (index != 0) diagnostic += ", ";
+        diagnostic += eventSequence[index];
+    }
+    diagnostic += ']';
+    require(failedObserved && !unexpectedTerminal && answered && recoveryObserved, diagnostic);
     require(window.isVisible(),
         "failed BatchCancelling terminalization silently closed the window");
     require(window.isVisible() && widget<QPushButton>(window, "batchSaveAsButton")->isEnabled(),

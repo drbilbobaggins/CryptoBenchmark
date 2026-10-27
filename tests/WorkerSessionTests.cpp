@@ -25,9 +25,37 @@ using namespace cryptobench;
 
 namespace {
 
+const char* currentScenario = "<none>";
+
 void require(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+
+void requireBytesWritten(
+    QLocalSocket& socket,
+    int frameSize,
+    const std::string& frameDescription)
+{
+    QElapsedTimer timer;
+    timer.start();
+    const bool written = socket.waitForBytesWritten(10'000);
+    const qint64 elapsedMilliseconds = timer.elapsed();
+    if (written) return;
+
+    const auto timing = elapsedMilliseconds >= 10'000
+        ? "confirmed 10-second timeout"
+        : "false return before 10-second timeout";
+    throw std::runtime_error(
+        std::string{"waitForBytesWritten failed ("} + timing + ")"
+        " [scenario=" + currentScenario
+        + ", frame=" + frameDescription
+        + ", frameSize=" + std::to_string(frameSize)
+        + ", elapsedMilliseconds=" + std::to_string(elapsedMilliseconds)
+        + ", socketState=" + std::to_string(static_cast<int>(socket.state()))
+        + ", socketError=" + std::to_string(static_cast<int>(socket.error()))
+        + ", socketErrorString=\"" + socket.errorString().toStdString()
+        + "\", bytesToWrite=" + std::to_string(socket.bytesToWrite()) + ']');
 }
 
 QString endpoint()
@@ -40,7 +68,9 @@ void sendFrame(QLocalSocket& socket, ipc::MessageType type, const QByteArray& pa
 {
     const auto frame = ipc::encodeFrame(type, payload);
     require(socket.write(frame) == frame.size(), "parent write failed");
-    require(socket.waitForBytesWritten(10'000), "parent write timed out");
+    requireBytesWritten(
+        socket, frame.size(),
+        "MessageType=" + std::to_string(static_cast<int>(type)));
 }
 
 struct FrameReader {
@@ -301,7 +331,7 @@ void testFrameErrorRemainsWorkerCommunicationFailure()
     const auto invalidTypeFrame = QByteArray::fromHex("000a00000000");
     require(socket->write(invalidTypeFrame) == invalidTypeFrame.size(),
             "invalid frame write failed");
-    require(socket->waitForBytesWritten(10'000), "invalid frame write timed out");
+    requireBytesWritten(*socket, invalidTypeFrame.size(), "invalid raw frame");
 
     const auto outcomeFrame = receiveFrame(*socket, reader);
     require(outcomeFrame.messageType == ipc::MessageType::WorkerOutcome,
@@ -695,25 +725,34 @@ int main(int argc, char* argv[])
 {
     QCoreApplication app(argc, argv);
     try {
-        testSuccessfulSha256Session();
-        testInvalidConfigIsReportedByWorker();
-        testMalformedRequestIsReportedAsDeserializationFailure();
-        testFrameErrorRemainsWorkerCommunicationFailure();
-        testV2SingleLogicalRun();
-        testV2WrongPreparationIndexFailsBeforeAlgorithmReady();
-        testV2WrongStartMeasurementIndexFailsWithoutMeasurement();
-        testV2WrongMemoryWindowIndexFailsWithoutResult();
-        testV2MalformedRequestFailsBeforeBaseline();
-        testV2InvalidConfigFailsBeforeBaseline();
-        testV2WrongModeRequestFailsBeforeBaseline();
-        testV2InvalidControlPayloadLengthFails();
-        testV2PrematureStartMeasurementIsRejected();
-        testV2DisconnectAtB0FailsBoundedly();
-        testV2DisconnectAtB1FailsBoundedly();
+        const auto runScenario = [](const char* name, const auto& scenario) {
+            currentScenario = name;
+            scenario();
+        };
+        runScenario("successful-sha256-session", testSuccessfulSha256Session);
+        runScenario("invalid-config-is-reported", testInvalidConfigIsReportedByWorker);
+        runScenario("malformed-request-deserialization-failure",
+                    testMalformedRequestIsReportedAsDeserializationFailure);
+        runScenario("frame-error-worker-communication-failure",
+                    testFrameErrorRemainsWorkerCommunicationFailure);
+        runScenario("v2-single-logical-run", testV2SingleLogicalRun);
+        runScenario("v2-wrong-preparation-index", testV2WrongPreparationIndexFailsBeforeAlgorithmReady);
+        runScenario("v2-wrong-start-measurement-index",
+                    testV2WrongStartMeasurementIndexFailsWithoutMeasurement);
+        runScenario("v2-wrong-memory-window-index",
+                    testV2WrongMemoryWindowIndexFailsWithoutResult);
+        runScenario("v2-malformed-request-before-baseline", testV2MalformedRequestFailsBeforeBaseline);
+        runScenario("v2-invalid-config-before-baseline", testV2InvalidConfigFailsBeforeBaseline);
+        runScenario("v2-wrong-mode-request", testV2WrongModeRequestFailsBeforeBaseline);
+        runScenario("v2-invalid-control-payload-length", testV2InvalidControlPayloadLengthFails);
+        runScenario("v2-premature-start-measurement", testV2PrematureStartMeasurementIsRejected);
+        runScenario("v2-disconnect-at-b0", testV2DisconnectAtB0FailsBoundedly);
+        runScenario("v2-disconnect-at-b1", testV2DisconnectAtB1FailsBoundedly);
         std::cout << "WorkerSessionTests passed\n";
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "WorkerSessionTests failed: " << error.what() << '\n';
+        std::cerr << "WorkerSessionTests failed [scenario=" << currentScenario
+                  << "]: " << error.what() << '\n';
         return 1;
     }
 }
