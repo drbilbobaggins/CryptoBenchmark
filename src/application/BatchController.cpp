@@ -151,8 +151,26 @@ void BatchController::start(const BatchDefinition& definition, const QString& ou
     const auto measurementSettings = settingsProvider_
         ? settingsProvider_()
         : *fixedExecutorSettings_;
+    start(definition, outputTarget, measurementSettings);
+}
+
+void BatchController::start(
+    const BatchDefinition& definition,
+    const QString& outputTarget,
+    const core::MeasurementSettings& snapshot)
+{
+    const auto measurementSettings = snapshot;
+    if (isBusy() || (executor_ && executor_->isBusy())) {
+        throw std::logic_error("BatchController is already running");
+    }
+    if (definition.entries().empty()) throw std::invalid_argument("batch definition is empty");
     if (!core::isValidMeasurementSettings(measurementSettings)) {
         throw std::invalid_argument("BatchController measurement settings are invalid");
+    }
+    if (fixedExecutorSettings_
+        && fixedExecutorSettings_->memorySamplingIntervalMilliseconds
+            != measurementSettings.memorySamplingIntervalMilliseconds) {
+        throw std::invalid_argument("BatchController measurement settings do not match executor");
     }
 
     std::unique_ptr<BenchmarkSessionExecutor> nextExecutor;

@@ -44,6 +44,10 @@ public:
     ~BatchController() override = default;
 
     void start(const BatchDefinition& definition, const QString& outputTarget);
+    void start(
+        const BatchDefinition& definition,
+        const QString& outputTarget,
+        const core::MeasurementSettings& snapshot);
     void requestCancel();
     WriteResult saveAs(const QString& newTarget);
     bool isBusy() const noexcept;

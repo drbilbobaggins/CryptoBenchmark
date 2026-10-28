@@ -7,6 +7,8 @@ add_executable(CryptoBenchmark
     CreatorRowState.h
     BatchCreatorWidget.cpp
     BatchCreatorWidget.h
+    BatchRuntimeEstimatePresentation.cpp
+    BatchRuntimeEstimatePresentation.h
     MainWindow.cpp
     MainWindow.h
     MainWindow.ui

@@ -74,6 +74,17 @@ target_link_libraries(CryptoBenchmarkEnvironmentInfoTests
 
 add_test(NAME CryptoBenchmarkEnvironmentInfoTests COMMAND CryptoBenchmarkEnvironmentInfoTests)
 
+add_executable(CryptoBenchmarkRuntimeEstimateTests
+	RuntimeEstimateServiceTests.cpp
+)
+
+target_link_libraries(CryptoBenchmarkRuntimeEstimateTests
+	PRIVATE
+		cryptobench_application
+)
+
+add_test(NAME CryptoBenchmarkRuntimeEstimateTests COMMAND CryptoBenchmarkRuntimeEstimateTests)
+
 add_executable(CryptoBenchmarkResultDocumentTests
 	ResultDocumentTests.cpp
 )
@@ -1018,6 +1029,8 @@ add_executable(CryptoBenchmarkGuiTests
 	${CMAKE_SOURCE_DIR}/src/gui/CreatorRowState.h
 	${CMAKE_SOURCE_DIR}/src/gui/BatchCreatorWidget.cpp
 	${CMAKE_SOURCE_DIR}/src/gui/BatchCreatorWidget.h
+	${CMAKE_SOURCE_DIR}/src/gui/BatchRuntimeEstimatePresentation.cpp
+	${CMAKE_SOURCE_DIR}/src/gui/BatchRuntimeEstimatePresentation.h
 	${CMAKE_SOURCE_DIR}/src/gui/MainWindow.cpp
 	${CMAKE_SOURCE_DIR}/src/gui/MainWindow.h
 	${CMAKE_SOURCE_DIR}/src/gui/MainWindow.ui

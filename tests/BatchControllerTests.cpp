@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <functional>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -1020,6 +1021,407 @@ void testMeasurementSettingsProvenanceBoundaries()
             "null executor factory left the controller in an unsafe state");
 }
 
+void testExplicitMeasurementSettingsSnapshotStart()
+{
+    const auto batchDefinition = definition(1);
+    const auto originalConfig = batchDefinition.entries()[0].config;
+    for (const auto interval : {1U, 5U}) {
+        std::vector<std::string> events;
+        std::vector<QJsonObject> snapshots;
+        std::optional<MeasurementSettings> factorySettings;
+        std::size_t providerCalls = 0;
+        BatchController controller(
+            [&](const MeasurementSettings& settings) {
+                factorySettings = settings;
+                auto executor = std::make_unique<FakeExecutor>(
+                    std::vector<BenchmarkStatus>{BenchmarkStatus::Completed}, events);
+                executor->setDefinitions(&batchDefinition.entries());
+                executor->setMeasurementSettings(settings);
+                return executor;
+            },
+            [&](const QString&, const QByteArray& payload) {
+                snapshots.push_back(QJsonDocument::fromJson(payload).object());
+                return WriteResult{true, {}};
+            }, {}, [&]() -> MeasurementSettings {
+                ++providerCalls;
+                throw std::runtime_error("explicit start must not read settings provider");
+            });
+
+        MeasurementSettings callerSettings{interval};
+        controller.start(batchDefinition, QStringLiteral("explicit.json"), callerSettings);
+        for (int iteration = 0; iteration < 20 && controller.isBusy(); ++iteration) {
+            QCoreApplication::processEvents();
+        }
+
+        require(providerCalls == 0, "explicit start read the settings provider");
+        require(factorySettings.has_value() &&
+                    factorySettings->memorySamplingIntervalMilliseconds == interval,
+                "explicit snapshot did not reach executor factory");
+        require(controller.state().measurementSettings.has_value() &&
+                    controller.state().measurementSettings->memorySamplingIntervalMilliseconds == interval,
+                "explicit snapshot was not stored in Batch state");
+        require(snapshots.size() >= 2, "explicit start did not persist initial and final snapshots");
+        for (const auto& snapshot : snapshots) {
+            require(snapshot.value("measurement").toObject()
+                        .value("memorySamplingIntervalMilliseconds").toInt()
+                        == static_cast<int>(interval),
+                "explicit snapshot was not preserved in JSON");
+        }
+        require(controller.state().entries[0].result.has_value() &&
+                    controller.state().entries[0].result->measurementSettings.has_value() &&
+                    controller.state().entries[0].result->measurementSettings
+                        ->memorySamplingIntervalMilliseconds == interval,
+                "explicit snapshot was not preserved in result metadata");
+        require(callerSettings.memorySamplingIntervalMilliseconds == interval,
+                "explicit start mutated caller settings");
+        require(batchDefinition.entries()[0].config.profile == originalConfig.profile &&
+                    batchDefinition.entries()[0].config.operation == originalConfig.operation &&
+                    batchDefinition.entries()[0].config.iterationsPerRun
+                        == originalConfig.iterationsPerRun &&
+                    batchDefinition.entries()[0].config.runs == originalConfig.runs &&
+                    batchDefinition.entries()[0].config.parameters.index()
+                        == originalConfig.parameters.index() &&
+                    std::get<HashConfig>(batchDefinition.entries()[0].config.parameters).inputSize
+                        == std::get<HashConfig>(originalConfig.parameters).inputSize,
+                "explicit start mutated the input configuration");
+    }
+
+    std::size_t differentProviderFactoryCalls = 0;
+    std::size_t differentProviderReads = 0;
+    std::vector<std::string> differentProviderEvents;
+    BatchController differentProvider(
+        [&](const MeasurementSettings& settings) {
+            ++differentProviderFactoryCalls;
+            auto executor = std::make_unique<FakeExecutor>(
+                std::vector<BenchmarkStatus>{BenchmarkStatus::Completed},
+                differentProviderEvents);
+            executor->setDefinitions(&batchDefinition.entries());
+            executor->setMeasurementSettings(settings);
+            return executor;
+        },
+        [](const QString&, const QByteArray&) { return WriteResult{true, {}}; },
+        {},
+        [&]() {
+            ++differentProviderReads;
+            return MeasurementSettings{5};
+        });
+    differentProvider.start(batchDefinition, QStringLiteral("different-provider.json"),
+                            MeasurementSettings{1});
+    for (int iteration = 0; iteration < 20 && differentProvider.isBusy(); ++iteration) {
+        QCoreApplication::processEvents();
+    }
+    require(differentProviderFactoryCalls == 1 && differentProviderReads == 0,
+        "explicit start factory/provider call counts mismatch");
+    require(differentProvider.state().measurementSettings.has_value() &&
+                differentProvider.state().measurementSettings
+                    ->memorySamplingIntervalMilliseconds == 1,
+        "explicit start used provider settings instead of caller snapshot");
+
+    std::size_t factoryOnlyCalls = 0;
+    std::vector<std::string> factoryOnlyEvents;
+    BatchController factoryOnly(
+        [&](const MeasurementSettings& settings) {
+            ++factoryOnlyCalls;
+            auto executor = std::make_unique<FakeExecutor>(
+                std::vector<BenchmarkStatus>{BenchmarkStatus::Completed}, factoryOnlyEvents);
+            executor->setDefinitions(&batchDefinition.entries());
+            executor->setMeasurementSettings(settings);
+            return executor;
+        },
+        [](const QString&, const QByteArray&) { return WriteResult{true, {}}; },
+        {}, {});
+    factoryOnly.start(batchDefinition, QStringLiteral("factory-only.json"),
+                      MeasurementSettings{3});
+    for (int iteration = 0; iteration < 20 && factoryOnly.isBusy(); ++iteration) {
+        QCoreApplication::processEvents();
+    }
+    require(factoryOnlyCalls == 1 && factoryOnly.state().measurementSettings.has_value() &&
+                factoryOnly.state().measurementSettings->memorySamplingIntervalMilliseconds == 3,
+            "factory-only explicit start did not accept supplied settings");
+}
+
+void testExplicitInvalidAndFixedExecutorSettings()
+{
+    const auto batchDefinition = definition(1);
+    std::size_t factoryCalls = 0;
+    std::size_t persistCalls = 0;
+    std::size_t progressCalls = 0;
+    std::size_t finishCalls = 0;
+    BatchController invalid(
+        [&](const MeasurementSettings&) -> std::unique_ptr<BenchmarkSessionExecutor> {
+            ++factoryCalls;
+            throw std::runtime_error("invalid settings must not invoke factory");
+        },
+        [&](const QString&, const QByteArray&) {
+            ++persistCalls;
+            return WriteResult{true, {}};
+        }, {}, {});
+    QObject::connect(&invalid, &BatchController::progressChanged,
+                     [&] { ++progressCalls; });
+    QObject::connect(&invalid, &BatchController::batchFinished,
+                     [&](const BatchExecutionState&) { ++finishCalls; });
+    for (const auto interval : {0U, 6U}) {
+        bool rejected = false;
+        try {
+            invalid.start(batchDefinition, QStringLiteral("invalid-explicit.json"),
+                          MeasurementSettings{interval});
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected && factoryCalls == 0 && persistCalls == 0 &&
+                    progressCalls == 0 && finishCalls == 0 && !invalid.isBusy() &&
+                    !invalid.state().measurementSettings.has_value(),
+                "invalid explicit settings caused start side effects");
+    }
+
+    std::vector<std::string> events;
+    auto fixedExecutor = std::make_unique<FakeExecutor>(
+        std::vector<BenchmarkStatus>{BenchmarkStatus::Completed}, events);
+    auto* fixedPointer = fixedExecutor.get();
+    fixedPointer->setDefinitions(&batchDefinition.entries());
+    fixedPointer->setMeasurementSettings(MeasurementSettings{3});
+    std::size_t fixedPersistCalls = 0;
+    BatchController fixed(
+        std::move(fixedExecutor),
+        [&](const QString&, const QByteArray&) {
+            ++fixedPersistCalls;
+            return WriteResult{true, {}};
+        }, {}, MeasurementSettings{3});
+
+    fixed.start(batchDefinition, QStringLiteral("fixed-match.json"),
+                MeasurementSettings{3});
+    for (int iteration = 0; iteration < 20 && fixed.isBusy(); ++iteration) {
+        QCoreApplication::processEvents();
+    }
+    require(fixedPersistCalls >= 2 && fixed.state().status == BatchStatus::Completed &&
+                fixed.state().measurementSettings.has_value() &&
+                fixed.state().measurementSettings->memorySamplingIntervalMilliseconds == 3,
+            "matching fixed executor snapshot did not complete");
+    const auto previousTerminal = fixed.state();
+    const auto previousPersistCalls = fixedPersistCalls;
+    const auto previousStarts = fixedPointer->starts().size();
+
+    bool mismatchRejected = false;
+    try {
+        fixed.start(batchDefinition, QStringLiteral("fixed-mismatch.json"),
+                    MeasurementSettings{4});
+    } catch (const std::invalid_argument&) {
+        mismatchRejected = true;
+    }
+    require(mismatchRejected && fixedPersistCalls == previousPersistCalls &&
+                fixedPointer->starts().size() == previousStarts &&
+                !fixedPointer->isBusy() && !fixed.isBusy(),
+            "fixed executor mismatch produced output or executor activity");
+    require(fixed.state().status == previousTerminal.status &&
+                fixed.state().outputTarget == previousTerminal.outputTarget &&
+                fixed.state().measurementSettings.has_value() &&
+                previousTerminal.measurementSettings.has_value() &&
+                fixed.state().measurementSettings->memorySamplingIntervalMilliseconds
+                    == previousTerminal.measurementSettings->memorySamplingIntervalMilliseconds &&
+                fixed.state().entries.size() == previousTerminal.entries.size() &&
+                fixed.state().entries[0].status == previousTerminal.entries[0].status &&
+                fixed.state().entries[0].result.has_value() &&
+                previousTerminal.entries[0].result.has_value() &&
+                fixed.state().entries[0].result->config.profile
+                    == previousTerminal.entries[0].result->config.profile &&
+                fixed.state().entries[0].result->config.iterationsPerRun
+                    == previousTerminal.entries[0].result->config.iterationsPerRun &&
+                fixed.state().entries[0].result->config.runs
+                    == previousTerminal.entries[0].result->config.runs,
+            "fixed executor mismatch mutated the prior terminal state");
+}
+
+void testExplicitInitialCheckpointOrderingAndFailure()
+{
+    const auto batchDefinition = definition(1);
+    std::vector<std::string> events;
+    std::vector<QJsonObject> snapshots;
+    BatchController controller(
+        [&](const MeasurementSettings& settings) {
+            auto executor = std::make_unique<FakeExecutor>(
+                std::vector<BenchmarkStatus>{BenchmarkStatus::Completed}, events);
+            executor->setDefinitions(&batchDefinition.entries());
+            executor->setMeasurementSettings(settings);
+            return executor;
+        },
+        [&](const QString&, const QByteArray& payload) {
+            events.push_back("persist");
+            snapshots.push_back(QJsonDocument::fromJson(payload).object());
+            return WriteResult{true, {}};
+        },
+        {}, {});
+
+    controller.start(batchDefinition, QStringLiteral("explicit-order.json"),
+                     MeasurementSettings{2});
+    for (int iteration = 0; iteration < 20 && controller.isBusy(); ++iteration) {
+        QCoreApplication::processEvents();
+    }
+
+    const auto firstStart = std::find(events.begin(), events.end(), "start 1");
+    require(!events.empty() && events.front() == "persist" &&
+                firstStart != events.end() && events.begin() < firstStart,
+            "explicit-start initial checkpoint did not precede executor start");
+    require(!snapshots.empty() &&
+                snapshots.front().value("status").toString() == QStringLiteral("inProgress") &&
+                snapshots.front().value("measurement").toObject()
+                    .value("memorySamplingIntervalMilliseconds").toInt() == 2,
+            "explicit-start initial checkpoint JSON was incorrect");
+
+    std::vector<std::string> failureEvents;
+    FakeExecutor* failureExecutor = nullptr;
+    BatchController initialFailure(
+        [&](const MeasurementSettings& settings) {
+            auto executor = std::make_unique<FakeExecutor>(
+                std::vector<BenchmarkStatus>{BenchmarkStatus::Completed}, failureEvents);
+            failureExecutor = executor.get();
+            executor->setDefinitions(&batchDefinition.entries());
+            executor->setMeasurementSettings(settings);
+            return executor;
+        },
+        [&](const QString&, const QByteArray&) {
+            failureEvents.push_back("persist");
+            return WriteResult{false, QStringLiteral("explicit initial write failed")};
+        },
+        {}, {});
+    std::size_t failureFinishedCount = 0;
+    QObject::connect(&initialFailure, &BatchController::batchFinished,
+                     [&](const BatchExecutionState&) { ++failureFinishedCount; });
+
+    initialFailure.start(batchDefinition, QStringLiteral("explicit-failure.json"),
+                         MeasurementSettings{5});
+    require(failureEvents == std::vector<std::string>{"persist"} &&
+                failureExecutor != nullptr && failureExecutor->starts().empty() &&
+                !failureExecutor->isBusy(),
+            "failed initial explicit checkpoint launched an executor");
+    require(!initialFailure.isBusy() &&
+                initialFailure.state().status == BatchStatus::Failed &&
+                initialFailure.state().batchError.has_value() &&
+                initialFailure.state().batchError->code
+                    == BatchErrorCode::OutputInitializationFailed &&
+                initialFailure.state().entries[0].status == BatchEntryStatus::NotStarted &&
+                failureFinishedCount == 1,
+            "initial explicit persistence failure semantics changed");
+}
+
+void testExplicitReentrantSettingsSnapshots()
+{
+    const auto firstDefinition = definition(1, "first-explicit");
+    const auto secondDefinition = definition(1, "second-explicit");
+    std::vector<std::string> events;
+    std::vector<MeasurementSettings> factorySettings;
+    std::vector<QJsonObject> snapshots;
+    std::size_t factoryCall = 0;
+    FakeExecutor* firstExecutor = nullptr;
+    QPointer<FakeExecutor> firstExecutorGuard;
+    bool restartRequested = false;
+    bool laterReceiverSawFirstSnapshot = false;
+    std::vector<BatchExecutionState> finishedStates;
+
+    BatchController controller(
+        [&](const MeasurementSettings& settings) {
+            factorySettings.push_back(settings);
+            const auto first = factoryCall++ == 0;
+            auto executor = std::make_unique<FakeExecutor>(
+                std::vector<BenchmarkStatus>{BenchmarkStatus::Completed}, events);
+            executor->setDefinitions(first
+                ? &firstDefinition.entries()
+                : &secondDefinition.entries());
+            executor->setMeasurementSettings(settings);
+            executor->setDeferTerminal(first);
+            if (first) {
+                firstExecutor = executor.get();
+                firstExecutorGuard = firstExecutor;
+            }
+            return executor;
+        },
+        [&](const QString&, const QByteArray& payload) {
+            snapshots.push_back(QJsonDocument::fromJson(payload).object());
+            return WriteResult{true, {}};
+        },
+        {},
+        [] { return MeasurementSettings{4}; });
+
+    QObject::connect(&controller, &BatchController::batchFinished,
+        [&](const BatchExecutionState& state) {
+            finishedStates.push_back(state);
+            if (!restartRequested) {
+                restartRequested = true;
+                require(state.status == BatchStatus::Completed &&
+                            state.measurementSettings.has_value() &&
+                            state.measurementSettings->memorySamplingIntervalMilliseconds == 1,
+                    "first explicit terminal snapshot was incorrect");
+                controller.start(secondDefinition, QStringLiteral("second-explicit.json"),
+                                 MeasurementSettings{5});
+            }
+        });
+    QObject::connect(&controller, &BatchController::batchFinished,
+        [&](const BatchExecutionState& state) {
+            if (state.outputTarget == QStringLiteral("first-explicit.json")) {
+                laterReceiverSawFirstSnapshot =
+                    state.status == BatchStatus::Completed &&
+                    state.measurementSettings.has_value() &&
+                    state.measurementSettings->memorySamplingIntervalMilliseconds == 1 &&
+                    state.entries.front().definition.id
+                        == std::optional<std::string>{"first-explicit"};
+            }
+        });
+
+    controller.start(firstDefinition, QStringLiteral("first-explicit.json"),
+                     MeasurementSettings{1});
+    QCoreApplication::processEvents();
+    require(firstExecutor != nullptr && firstExecutor->isBusy(),
+        "first explicit executor did not defer terminal signal");
+    QObject::connect(firstExecutor, &BenchmarkSessionExecutor::benchmarkFinished,
+                     [&] { QCoreApplication::processEvents(); });
+    QMetaObject::invokeMethod(firstExecutor, [&] {
+        firstExecutor->emitPendingTerminal();
+        QCoreApplication::processEvents();
+    }, Qt::QueuedConnection);
+    for (int iteration = 0; iteration < 20 &&
+         (controller.isBusy() || finishedStates.size() < 2); ++iteration) {
+        QCoreApplication::processEvents();
+    }
+
+    require(!controller.isBusy() && finishedStates.size() == 2 &&
+                finishedStates[0].outputTarget == QStringLiteral("first-explicit.json") &&
+                finishedStates[1].outputTarget == QStringLiteral("second-explicit.json") &&
+                finishedStates[0].status == BatchStatus::Completed &&
+                finishedStates[1].status == BatchStatus::Completed,
+        "explicit reentrant starts did not complete as separate batches");
+    require(factorySettings.size() == 2 &&
+                factorySettings[0].memorySamplingIntervalMilliseconds == 1 &&
+                factorySettings[1].memorySamplingIntervalMilliseconds == 5,
+        "explicit reentrant snapshots were not passed independently to the factory");
+    require(laterReceiverSawFirstSnapshot &&
+                finishedStates[0].measurementSettings.has_value() &&
+                finishedStates[0].measurementSettings->memorySamplingIntervalMilliseconds == 1 &&
+                finishedStates[1].measurementSettings.has_value() &&
+                finishedStates[1].measurementSettings->memorySamplingIntervalMilliseconds == 5,
+        "reentrant start mutated a prior terminal Batch snapshot");
+
+    bool firstIntervalPersisted = false;
+    bool secondIntervalPersisted = false;
+    for (const auto& snapshot : snapshots) {
+        const auto entries = snapshot.value("entries").toArray();
+        if (entries.isEmpty()) continue;
+        const auto entryId = entries.at(0).toObject().value("id").toString();
+        const auto interval = snapshot.value("measurement").toObject()
+            .value("memorySamplingIntervalMilliseconds").toInt();
+        if (entryId == QStringLiteral("first-explicit")) {
+            firstIntervalPersisted = firstIntervalPersisted || interval == 1;
+            require(interval == 1, "first explicit JSON snapshot changed settings");
+        } else if (entryId == QStringLiteral("second-explicit")) {
+            secondIntervalPersisted = secondIntervalPersisted || interval == 5;
+            require(interval == 5, "second explicit JSON snapshot changed settings");
+        }
+    }
+    require(firstIntervalPersisted && secondIntervalPersisted,
+        "explicit reentrant JSON snapshots lost their settings intervals");
+    for (int iteration = 0; iteration < 20 && !firstExecutorGuard.isNull(); ++iteration) {
+        QCoreApplication::processEvents();
+    }
+}
+
 void testControllerDisposalDuringActiveEmission()
 {
     const auto batchDefinition = definition(1);
@@ -1082,6 +1484,10 @@ int main(int argc, char* argv[])
         testReentrantRestartRetiresPreviousExecutorSafely();
         testControllerDisposalDuringActiveEmission();
         testMeasurementSettingsProvenanceBoundaries();
+        testExplicitMeasurementSettingsSnapshotStart();
+        testExplicitInvalidAndFixedExecutorSettings();
+        testExplicitInitialCheckpointOrderingAndFailure();
+        testExplicitReentrantSettingsSnapshots();
         testCancellationBetweenEntriesAndDuringPersistence();
         testCancelAfterTerminal();
         testSaveAsRecovery();
