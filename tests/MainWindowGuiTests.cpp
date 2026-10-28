@@ -1,5 +1,6 @@
 #include "../src/gui/MainWindow.h"
 #include "../src/gui/BatchCreatorWidget.h"
+#include "../src/gui/BatchRuntimeEstimatePresentation.h"
 #include "../src/gui/CreatorRowWidget.h"
 #include "../src/gui/MemoryPresentation.h"
 
@@ -12,6 +13,7 @@
 #include <QDir>
 #include <QGroupBox>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -37,6 +39,8 @@
 #include <cstddef>
 #include <functional>
 #include <iostream>
+#include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -45,6 +49,7 @@
 #include <vector>
 
 using namespace cryptobench;
+using application::RuntimeDuration;
 
 namespace {
 
@@ -112,6 +117,15 @@ QString status(MainWindow& window)
     return widget<QLabel>(window, "statusLabel")->text();
 }
 
+void allowBatchExecution(MainWindow::DialogCallbacks& callbacks)
+{
+    callbacks.confirmBatchExecution = [](
+        QWidget*,
+        const application::RuntimeEstimate&) {
+        return true;
+    };
+}
+
 void configureHash(MainWindow& window)
 {
     auto* category = widget<QComboBox>(window, "categoryComboBox");
@@ -140,6 +154,96 @@ void configureCreatorHash(gui::CreatorRowWidget* row, int inputSize, int iterati
     row->workloadSizeSpinBox()->setValue(inputSize);
     row->iterationsSpinBox()->setValue(iterations);
     row->runsSpinBox()->setValue(runs);
+}
+
+struct RuntimeCalibrationFixture {
+    application::CalibrationLookupResult entryEstimate{
+        application::RuntimeEstimateUnavailableReason::CalibrationPointMissing,
+        application::RuntimeEstimateUnavailableReason::CalibrationPointMissing,
+        application::RuntimeEstimateUnavailableReason::CalibrationPointMissing};
+    application::RuntimeDurationComponent batchOverhead{
+        application::RuntimeEstimateUnavailableReason::BatchOverheadUnavailable};
+    std::vector<application::RuntimeCalibrationRequest> requests;
+};
+
+class FixtureRuntimeCalibrationProvider final
+    : public application::RuntimeCalibrationProvider {
+public:
+    explicit FixtureRuntimeCalibrationProvider(
+        std::shared_ptr<RuntimeCalibrationFixture> fixture)
+        : fixture_(std::move(fixture))
+    {
+    }
+
+    application::CalibrationLookupResult estimateEntry(
+        application::RuntimeCalibrationRequest request) const override
+    {
+        fixture_->requests.push_back(std::move(request));
+        return fixture_->entryEstimate;
+    }
+
+    application::RuntimeDurationComponent estimateBatchOverhead(
+        const application::BatchDefinition&,
+        core::MeasurementSettings) const override
+    {
+        return fixture_->batchOverhead;
+    }
+
+private:
+    std::shared_ptr<RuntimeCalibrationFixture> fixture_;
+};
+
+application::RuntimeEstimate makeRuntimeEstimate(
+    std::vector<application::EntryRuntimeEstimate> entries,
+    application::RuntimeDurationComponent batchDuration,
+    application::RuntimeEstimateAvailability availability,
+    std::size_t missingMeasured,
+    std::size_t missingTotal,
+    std::vector<std::uint32_t> shortIndices = {})
+{
+    return {
+        std::move(entries),
+        std::move(batchDuration),
+        availability,
+        missingMeasured,
+        missingTotal,
+        std::move(shortIndices)};
+}
+
+bool sameDurationComponent(
+    const application::RuntimeDurationComponent& left,
+    const application::RuntimeDurationComponent& right)
+{
+    if (left.index() != right.index()) return false;
+    if (const auto* duration = std::get_if<application::RuntimeDuration>(&left)) {
+        return duration->count() == std::get<application::RuntimeDuration>(right).count();
+    }
+    return std::get<application::RuntimeEstimateUnavailableReason>(left)
+        == std::get<application::RuntimeEstimateUnavailableReason>(right);
+}
+
+void requireEstimatesEquivalent(
+    const application::RuntimeEstimate& left,
+    const application::RuntimeEstimate& right)
+{
+    require(left.availability == right.availability
+                && left.missingMeasuredBlockEntryCount == right.missingMeasuredBlockEntryCount
+                && left.missingTotalEntryCount == right.missingTotalEntryCount
+                && left.shortRunEntryIndices == right.shortRunEntryIndices
+                && left.perEntry.size() == right.perEntry.size()
+                && sameDurationComponent(
+                    left.estimatedTotalBatchDuration, right.estimatedTotalBatchDuration),
+            "runtime estimates differed semantically");
+    for (std::size_t index = 0; index < left.perEntry.size(); ++index) {
+        require(left.perEntry[index].entryIndex == right.perEntry[index].entryIndex
+                    && sameDurationComponent(
+                        left.perEntry[index].estimatedMeasuredBlockDurationPerRun,
+                        right.perEntry[index].estimatedMeasuredBlockDurationPerRun)
+                    && sameDurationComponent(
+                        left.perEntry[index].estimatedTotalEntryDuration,
+                        right.perEntry[index].estimatedTotalEntryDuration),
+                "per-entry runtime estimates differed semantically");
+    }
 }
 
 void configureSignatureAndKeyEstablishmentTransitions(MainWindow& window)
@@ -925,6 +1029,7 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
     callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
     callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
     callbacks.reportMessage = [](QWidget*, const QString&, const QString&) {};
+    allowBatchExecution(callbacks);
 
     MainWindow window;
     window.show();
@@ -1017,6 +1122,722 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
             "previous 4 ms Single/Batch outputs were changed by the later Single run");
     clearScenario();
 }
+
+    void testRuntimeEstimatePresentationContract()
+    {
+        using application::RuntimeDuration;
+        using application::RuntimeEstimateAvailability;
+        using application::RuntimeEstimateUnavailableReason;
+
+        require(gui::formatRuntimeDuration(RuntimeDuration{0}) == QStringLiteral("0 seconds"),
+            "known zero duration formatting changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{1}) == QStringLiteral("less than 1 second"),
+            "positive subsecond duration formatting changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{1'490'000'000})
+                    == QStringLiteral("1 second"),
+            "whole-second rounding below midpoint changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{1'500'000'000})
+                    == QStringLiteral("2 seconds"),
+            "whole-second midpoint rounding changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{59'500'000'000})
+                    == QStringLiteral("60 seconds"),
+            "seconds unit-boundary rounding changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{60'000'000'000})
+                    == QStringLiteral("1 minute"),
+            "minute boundary formatting changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{3'570'000'000'000})
+                    == QStringLiteral("60 minutes"),
+            "whole-minute rounding changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{3'600'000'000'000})
+                    == QStringLiteral("1 hour"),
+            "hour boundary formatting changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{4'080'000'000'000})
+                    == QStringLiteral("1 hour 15 minutes"),
+            "15-minute hour granularity changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{85'980'000'000'000})
+                    == QStringLiteral("24 hours"),
+            "hours unit-boundary rounding changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{86'400'000'000'000})
+                    == QStringLiteral("1 day"),
+            "day boundary formatting changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{90'000'000'000'000})
+                    == QStringLiteral("1 day 1 hour"),
+            "day/hour formatting changed");
+        require(gui::formatRuntimeDuration(RuntimeDuration{
+                    std::numeric_limits<std::int64_t>::max()})
+                    == QStringLiteral("106752 days"),
+            "large representable duration overflowed or was misformatted");
+
+        const auto allMissing = makeRuntimeEstimate(
+            {{
+                1,
+                RuntimeEstimateUnavailableReason::CalibrationPointMissing,
+                RuntimeEstimateUnavailableReason::CalibrationPointMissing}},
+            RuntimeEstimateUnavailableReason::CalibrationPointMissing,
+            RuntimeEstimateAvailability::Unavailable,
+            1,
+            1);
+        const auto allMissingText =
+            gui::batchRuntimeEstimateConfirmationText(allMissing);
+        require(allMissingText.contains(
+                    QStringLiteral("Estimated duration unavailable: calibration data is missing for 1 of 1 entry."))
+                    && allMissingText.contains(QStringLiteral(
+                        "No measured-block duration estimates are available."))
+                    && allMissingText.endsWith(QStringLiteral("Start the batch anyway?")),
+            "single-entry missing-data wording changed");
+
+        const auto partial = makeRuntimeEstimate(
+            {{
+                 1,
+                 RuntimeDuration{700'000'000},
+                 RuntimeEstimateUnavailableReason::NonMeasuredOverheadUnavailable},
+                {
+                 2,
+                 RuntimeEstimateUnavailableReason::CalibrationPointMissing,
+                 RuntimeEstimateUnavailableReason::CalibrationPointMissing}},
+            RuntimeEstimateUnavailableReason::NonMeasuredOverheadUnavailable,
+            RuntimeEstimateAvailability::Partial,
+            1,
+            2,
+            {1});
+        const auto partialText = gui::batchRuntimeEstimateConfirmationText(partial);
+        require(partialText.contains(QStringLiteral(
+                    "Estimated total batch duration unavailable: calibration data is incomplete for 2 of 2 entries."))
+                    && partialText.contains(QStringLiteral(
+                        "The estimated measured cryptographic block duration per logical run is below 1 second for entry 1."))
+                    && partialText.contains(QStringLiteral(
+                        "Shorter runs may be more sensitive to fixed overhead and system noise."))
+                    && !partialText.contains(QStringLiteral("approximately")),
+            "partial coverage or short-run text changed");
+
+        const auto overheadMissing = makeRuntimeEstimate(
+            {{
+                1,
+                RuntimeDuration{1'200'000'000},
+                RuntimeDuration{5'000'000'000}}},
+            RuntimeEstimateUnavailableReason::BatchOverheadUnavailable,
+            RuntimeEstimateAvailability::Partial,
+            0,
+            0);
+        const auto overheadText =
+            gui::batchRuntimeEstimateConfirmationText(overheadMissing);
+        require(overheadText.contains(QStringLiteral(
+                    "Estimated total batch duration unavailable: batch-level calibration overhead is missing."))
+                    && !overheadText.contains(QStringLiteral("0 of 1 entries"))
+                    && !overheadText.contains(QStringLiteral("below 1 second")),
+            "Batch-overhead-only missing message was misleading");
+
+        const auto invalid = makeRuntimeEstimate(
+            {{
+                1,
+                RuntimeEstimateUnavailableReason::InvalidCalibrationData,
+                RuntimeEstimateUnavailableReason::InvalidCalibrationData}},
+            RuntimeEstimateUnavailableReason::InvalidCalibrationData,
+            RuntimeEstimateAvailability::Unavailable,
+            1,
+            1);
+        require(gui::batchRuntimeEstimateConfirmationText(invalid).contains(
+                    QStringLiteral("the estimate cannot be calculated safely.")),
+            "invalid calibration was presented as missing data");
+
+        const auto overflow = makeRuntimeEstimate(
+            {{
+                1,
+                RuntimeDuration{1},
+                RuntimeEstimateUnavailableReason::ArithmeticOverflow}},
+            RuntimeEstimateUnavailableReason::ArithmeticOverflow,
+            RuntimeEstimateAvailability::Partial,
+            0,
+            1);
+        require(gui::batchRuntimeEstimateConfirmationText(overflow).contains(
+                    QStringLiteral("the estimate cannot be calculated safely.")),
+            "arithmetic overflow was presented as missing data");
+
+        const auto availableZero = makeRuntimeEstimate(
+            {{1, RuntimeDuration{0}, RuntimeDuration{0}}},
+            RuntimeDuration{0},
+            RuntimeEstimateAvailability::Available,
+            0,
+            0);
+        require(gui::batchRuntimeEstimateConfirmationText(availableZero).contains(
+                    QStringLiteral("Estimated batch duration: approximately 0 seconds.")),
+            "available zero was treated as missing");
+
+        const auto warningFor = [](std::size_t count) {
+            std::vector<std::uint32_t> indices;
+            for (std::size_t index = 0; index < count; ++index) {
+                indices.push_back(static_cast<std::uint32_t>(index + 1));
+            }
+            return gui::batchRuntimeEstimateConfirmationText(makeRuntimeEstimate(
+                {},
+                RuntimeEstimateUnavailableReason::BatchOverheadUnavailable,
+                RuntimeEstimateAvailability::Unavailable,
+                0,
+                0,
+                std::move(indices)));
+        };
+        require(!warningFor(0).contains(QStringLiteral("below 1 second")),
+            "zero short entries produced a warning");
+        require(warningFor(1).contains(QStringLiteral("for entry 1.")),
+            "single short entry was not singular");
+        const auto tenText = warningFor(10);
+        require(tenText.contains(QStringLiteral("entries 1, 2, 3, 4, 5, 6, 7, 8, 9, 10."))
+                    && !tenText.contains(QStringLiteral("plus")),
+            "ten short entries were not listed exactly");
+        require(warningFor(11).contains(QStringLiteral(
+                    "entries 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, plus 1 more.")),
+            "eleven short entries were not capped with exact remainder");
+        require(warningFor(1000).contains(QStringLiteral(
+                    "entries 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, plus 990 more.")),
+            "1000 short entries were not capped with exact remainder");
+    }
+
+    QByteArray validBatchFixture();
+    QByteArray multiEntryBatchFixture();
+
+    void testProductionNoDataModalDeclineAndDismissal()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "production no-data dialog directory was not created");
+        const auto inputPath = directory.filePath("no-data-input.json");
+        const auto outputPath = directory.filePath("existing-result.json");
+        writeFile(inputPath, multiEntryBatchFixture());
+        const QByteArray originalOutput{"preserve this existing result"};
+        writeFile(outputPath, originalOutput);
+
+        MainWindow window;
+        window.show();
+        setScenario("completed");
+        configureHash(window);
+        widget<QPushButton>(window, "runButton")->click();
+        waitForCompleted(window);
+        clearScenario();
+        require(widget<QPushButton>(window, "exportJsonButton")->isEnabled()
+                    && widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
+            "production no-data Batch test did not retain a Single result");
+        QString selectedInput = inputPath;
+        QString selectedOutput = outputPath;
+        MainWindow::DialogCallbacks callbacks;
+        callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
+        callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+        callbacks.confirmOverwrite = [](QWidget*, const QString&) { return true; };
+        window.setDialogCallbacks(std::move(callbacks));
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+        const auto initialCompletedCount =
+            widget<QLabel>(window, "batchCompletedCountLabel")->text();
+
+        bool dialogSeen = false;
+        bool exactTextSeen = false;
+        bool noWasDefault = false;
+        QTimer::singleShot(0, [&] {
+            for (auto* topLevel : QApplication::topLevelWidgets()) {
+                auto* dialog = qobject_cast<QMessageBox*>(topLevel);
+                if (dialog == nullptr
+                    || dialog->windowTitle() != QStringLiteral("Confirm Batch Execution")) {
+                    continue;
+                }
+                dialogSeen = true;
+                exactTextSeen =
+                    dialog->text().contains(QStringLiteral(
+                        "Estimated duration unavailable: calibration data is missing for 2 of 2 entries."))
+                    && dialog->text().contains(QStringLiteral(
+                        "No measured-block duration estimates are available."))
+                    && dialog->text().endsWith(QStringLiteral("Start the batch anyway?"));
+                noWasDefault = dialog->defaultButton() == dialog->button(QMessageBox::No)
+                    && dialog->escapeButton() == dialog->button(QMessageBox::No)
+                    && dialog->button(QMessageBox::Yes)->text().remove(QLatin1Char('&'))
+                        == QStringLiteral("Yes")
+                    && dialog->button(QMessageBox::No)->text().remove(QLatin1Char('&'))
+                        == QStringLiteral("No");
+                dialog->button(QMessageBox::No)->click();
+                return;
+            }
+        });
+
+        widget<QPushButton>(window, "batchRunButton")->click();
+        require(dialogSeen && exactTextSeen && noWasDefault,
+            "production no-data modal text or default No contract changed");
+        const bool outputPreserved = readFile(outputPath) == originalOutput;
+        const bool statusPreserved = widget<QLabel>(window, "batchStatusLabel")->text()
+            == QStringLiteral("Not running.");
+        const bool countersPreserved =
+            widget<QLabel>(window, "batchCompletedCountLabel")->text() == initialCompletedCount;
+        const bool runEnabled = widget<QPushButton>(window, "batchRunButton")->isEnabled();
+        const bool targetPreserved =
+            widget<QLineEdit>(window, "batchOutputPathLineEdit")->text() == outputPath;
+        const bool sourcePreserved =
+            widget<QLabel>(window, "batchInputSourceLabel")->text()
+                == QStringLiteral("Input source: Batch input file");
+        require(outputPreserved
+                    && statusPreserved && countersPreserved && runEnabled
+                    && targetPreserved && sourcePreserved
+                    && widget<QPushButton>(window, "exportJsonButton")->isEnabled()
+                    && widget<QPushButton>(window, "exportCsvButton")->isEnabled(),
+            "No changed output, accepted Batch input, status or start availability");
+
+        const auto runDismissal = [&](bool useEscape) {
+            const auto dismissalOutput = directory.filePath(
+                useEscape ? "escape-result.json" : "dismiss-result.json");
+            MainWindow dismissedWindow;
+            dismissedWindow.show();
+            MainWindow::DialogCallbacks dismissalCallbacks;
+            dismissalCallbacks.chooseOpenTarget = [&](QWidget*) { return inputPath; };
+            dismissalCallbacks.chooseSaveTarget = [&](QWidget*) { return dismissalOutput; };
+            dismissedWindow.setDialogCallbacks(std::move(dismissalCallbacks));
+            widget<QPushButton>(dismissedWindow, "batchInputBrowseButton")->click();
+            widget<QPushButton>(dismissedWindow, "batchOutputBrowseButton")->click();
+            bool dismissed = false;
+            QTimer::singleShot(0, [&] {
+                for (auto* topLevel : QApplication::topLevelWidgets()) {
+                    auto* dialog = qobject_cast<QMessageBox*>(topLevel);
+                    if (dialog == nullptr
+                        || dialog->windowTitle() != QStringLiteral("Confirm Batch Execution")) {
+                        continue;
+                    }
+                    dismissed = true;
+                    if (useEscape) {
+                        QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                        QApplication::sendEvent(dialog, &escape);
+                    } else {
+                        dialog->close();
+                    }
+                    return;
+                }
+            });
+            widget<QPushButton>(dismissedWindow, "batchRunButton")->click();
+            require(dismissed && !QFileInfo::exists(dismissalOutput)
+                        && widget<QPushButton>(dismissedWindow, "batchRunButton")->isEnabled()
+                        && widget<QLabel>(dismissedWindow, "batchStatusLabel")->text()
+                            == QStringLiteral("Not running."),
+                useEscape ? "Escape was not treated as No"
+                          : "dialog dismissal was not treated as No");
+        };
+        runDismissal(true);
+        runDismissal(false);
+    }
+
+    void testFakeProviderEstimatesAndCapturedSettings()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "fake-provider integration directory was not created");
+        const auto inputPath = directory.filePath("captured-settings-input.json");
+        const auto outputPath = directory.filePath("captured-settings-output.json");
+        writeFile(inputPath, validBatchFixture());
+
+        auto fixture = std::make_shared<RuntimeCalibrationFixture>();
+        fixture->entryEstimate = {
+            RuntimeDuration{700'000'000},
+            RuntimeDuration{4'000'000'000},
+            RuntimeDuration{300'000'000}};
+        fixture->batchOverhead = RuntimeDuration{0};
+        setScenario("completed");
+        MainWindow window(
+            std::make_unique<FixtureRuntimeCalibrationProvider>(fixture));
+        window.show();
+        QString selectedInput = inputPath;
+        QString selectedOutput = outputPath;
+        std::size_t openChooserCalls = 0;
+        std::size_t saveChooserCalls = 0;
+        std::size_t confirmations = 0;
+        bool controlsLockedDuringConfirmation = false;
+        std::optional<application::RuntimeEstimate> estimateSeen;
+        MainWindow::DialogCallbacks callbacks;
+        callbacks.chooseOpenTarget = [&](QWidget*) {
+            ++openChooserCalls;
+            return selectedInput;
+        };
+        callbacks.chooseSaveTarget = [&](QWidget*) {
+            ++saveChooserCalls;
+            return selectedOutput;
+        };
+        callbacks.confirmBatchExecution = [&](QWidget*, const application::RuntimeEstimate& estimate) {
+            ++confirmations;
+            estimateSeen = estimate;
+            auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+            controlsLockedDuringConfirmation =
+                !widget<QPushButton>(window, "batchRunButton")->isEnabled()
+                && !widget<QPushButton>(window, "runButton")->isEnabled()
+                && !widget<QPushButton>(window, "batchInputBrowseButton")->isEnabled()
+                && !widget<QPushButton>(window, "batchOutputBrowseButton")->isEnabled()
+                && !sampling->isEnabled()
+                && !creatorWidget(window)->useInBatchButton()->isEnabled()
+                && !creatorWidget(window)->exportBatchJsonButton()->isEnabled();
+            sampling->setCurrentIndex(sampling->findData(5));
+            widget<QPushButton>(window, "batchRunButton")->click();
+            widget<QPushButton>(window, "runButton")->click();
+            widget<QPushButton>(window, "batchInputBrowseButton")->click();
+            widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+            creatorWidget(window)->useInBatchButton()->click();
+            return true;
+        };
+        window.setDialogCallbacks(std::move(callbacks));
+        auto* sampling = widget<QComboBox>(window, "memorySamplingIntervalComboBox");
+        sampling->setCurrentIndex(sampling->findData(1));
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+        const auto chooserCallsBeforeConfirm = std::pair{openChooserCalls, saveChooserCalls};
+
+        widget<QPushButton>(window, "batchRunButton")->click();
+        waitUntil([&] {
+            return widget<QLabel>(window, "batchStatusLabel")->text()
+                == QStringLiteral("Completed");
+        }, 30'000);
+        clearScenario();
+
+        require(confirmations == 1 && controlsLockedDuringConfirmation
+                    && estimateSeen.has_value()
+                    && estimateSeen->availability == application::RuntimeEstimateAvailability::Available
+                    && std::get<RuntimeDuration>(
+                        estimateSeen->perEntry[0].estimatedMeasuredBlockDurationPerRun).count()
+                        == 700'000'000
+                    && std::get<RuntimeDuration>(
+                        estimateSeen->perEntry[0].estimatedTotalEntryDuration).count()
+                        == 5'000'000'000
+                    && std::get<RuntimeDuration>(
+                        estimateSeen->estimatedTotalBatchDuration).count()
+                        == 5'000'000'000
+                    && estimateSeen->shortRunEntryIndices == std::vector<std::uint32_t>{1},
+            "MainWindow did not pass the fake-provider estimate to confirmation");
+        require(fixture->requests.size() == 1
+                    && fixture->requests[0].key.measurementSettings
+                        .memorySamplingIntervalMilliseconds == 1
+                    && openChooserCalls == chooserCallsBeforeConfirm.first
+                    && saveChooserCalls == chooserCallsBeforeConfirm.second,
+            "confirmation callback reentered chooser or changed captured estimate context");
+        const auto resultDocument = QJsonDocument::fromJson(readFile(outputPath)).object();
+        require(resultDocument.value("measurement").toObject()
+                    .value("memorySamplingIntervalMilliseconds").toInt() == 1
+                    && resultDocument.value("status").toString() == QStringLiteral("completed"),
+            "Batch execution did not use the exact settings captured for estimation");
+        clearScenario();
+    }
+
+    void testFakeProviderAvailabilityAndSafetyCases()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "estimate-state test directory was not created");
+        const auto inputPath = directory.filePath("estimate-state-input.json");
+        writeFile(inputPath, validBatchFixture());
+
+        struct Scenario {
+            application::CalibrationLookupResult entry;
+            application::RuntimeDurationComponent batch;
+            application::RuntimeEstimateAvailability availability;
+            std::size_t missingTotal;
+            std::vector<std::uint32_t> shortIndices;
+            QString expectedText;
+        };
+        const std::vector<Scenario> scenarios{
+            {
+                {RuntimeDuration{1'200'000'000}, RuntimeDuration{18'000'000'000},
+                 RuntimeDuration{800'000'000}},
+                RuntimeDuration{0},
+                application::RuntimeEstimateAvailability::Available,
+                0,
+                {},
+                QStringLiteral("Estimated batch duration: approximately 20 seconds.")},
+            {
+                {RuntimeDuration{700'000'000},
+                 application::RuntimeEstimateUnavailableReason::NonMeasuredOverheadUnavailable,
+                 RuntimeDuration{0}},
+                RuntimeDuration{0},
+                application::RuntimeEstimateAvailability::Partial,
+                1,
+                {1},
+                QStringLiteral("calibration data is incomplete for 1 of 1 entry.")},
+            {
+                {application::RuntimeEstimateUnavailableReason::CalibrationPointMissing,
+                 application::RuntimeEstimateUnavailableReason::CalibrationPointMissing,
+                 application::RuntimeEstimateUnavailableReason::CalibrationPointMissing},
+                application::RuntimeEstimateUnavailableReason::BatchOverheadUnavailable,
+                application::RuntimeEstimateAvailability::Unavailable,
+                1,
+                {},
+                QStringLiteral("calibration data is missing for 1 of 1 entry.")},
+            {
+                {RuntimeDuration{1'200'000'000}, RuntimeDuration{0}, RuntimeDuration{0}},
+                application::RuntimeEstimateUnavailableReason::BatchOverheadUnavailable,
+                application::RuntimeEstimateAvailability::Partial,
+                0,
+                {},
+                QStringLiteral("batch-level calibration overhead is missing.")},
+            {
+                {RuntimeDuration{-1}, RuntimeDuration{0}, RuntimeDuration{0}},
+                RuntimeDuration{0},
+                application::RuntimeEstimateAvailability::Unavailable,
+                1,
+                {},
+                QStringLiteral("the estimate cannot be calculated safely.")},
+            {
+                {RuntimeDuration{std::numeric_limits<std::int64_t>::max()},
+                 RuntimeDuration{1},
+                 RuntimeDuration{0}},
+                RuntimeDuration{0},
+                application::RuntimeEstimateAvailability::Partial,
+                1,
+                {},
+                QStringLiteral("the estimate cannot be calculated safely.")},
+            {
+                {RuntimeDuration{999'999'999}, RuntimeDuration{0}, RuntimeDuration{0}},
+                RuntimeDuration{0},
+                application::RuntimeEstimateAvailability::Available,
+                0,
+                {1},
+                QStringLiteral("Estimated batch duration: approximately less than 1 second.")},
+            {
+                {RuntimeDuration{1'000'000'000}, RuntimeDuration{0}, RuntimeDuration{0}},
+                RuntimeDuration{0},
+                application::RuntimeEstimateAvailability::Available,
+                0,
+                {},
+                QStringLiteral("Estimated batch duration: approximately 1 second.")},
+            {
+                {RuntimeDuration{1'000'000'001}, RuntimeDuration{0}, RuntimeDuration{0}},
+                RuntimeDuration{0},
+                application::RuntimeEstimateAvailability::Available,
+                0,
+                {},
+                QStringLiteral("Estimated batch duration: approximately 1 second.")}};
+
+        for (std::size_t index = 0; index < scenarios.size(); ++index) {
+            const auto outputPath = directory.filePath(
+                QStringLiteral("estimate-state-%1.json").arg(static_cast<qulonglong>(index)));
+            auto fixture = std::make_shared<RuntimeCalibrationFixture>();
+            fixture->entryEstimate = scenarios[index].entry;
+            fixture->batchOverhead = scenarios[index].batch;
+            MainWindow window(std::make_unique<FixtureRuntimeCalibrationProvider>(fixture));
+            window.show();
+            MainWindow::DialogCallbacks callbacks;
+            callbacks.chooseOpenTarget = [&](QWidget*) { return inputPath; };
+            callbacks.chooseSaveTarget = [&](QWidget*) { return outputPath; };
+            std::optional<application::RuntimeEstimate> estimateSeen;
+            QString displayedText;
+            callbacks.confirmBatchExecution =
+                [&](QWidget*, const application::RuntimeEstimate& estimate) {
+                    estimateSeen = estimate;
+                    displayedText = gui::batchRuntimeEstimateConfirmationText(estimate);
+                    return false;
+                };
+            window.setDialogCallbacks(std::move(callbacks));
+            widget<QPushButton>(window, "batchInputBrowseButton")->click();
+            widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+            widget<QPushButton>(window, "batchRunButton")->click();
+
+            require(estimateSeen.has_value()
+                        && estimateSeen->availability == scenarios[index].availability
+                        && estimateSeen->missingTotalEntryCount == scenarios[index].missingTotal
+                        && estimateSeen->shortRunEntryIndices == scenarios[index].shortIndices
+                        && displayedText.contains(scenarios[index].expectedText)
+                        && !QFileInfo::exists(outputPath)
+                        && widget<QLabel>(window, "batchStatusLabel")->text()
+                            == QStringLiteral("Not running."),
+                "fake provider availability/reason was not faithfully presented");
+        }
+    }
+
+    void testFileCreatorRuntimeEstimateParity()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "File/Creator parity directory was not created");
+        const auto filePath = directory.filePath("parity-input.json");
+        const auto fileOutput = directory.filePath("file-parity-output.json");
+        const auto creatorOutput = directory.filePath("creator-parity-output.json");
+        const QByteArray sameBatch =
+            R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[)"
+            R"({"profileId":"sha256","operation":"hash","iterationsPerRun":2,"runs":2,"parameters":{"inputSizeBytes":8}},)"
+            R"({"profileId":"sha256","operation":"hash","iterationsPerRun":2,"runs":2,"parameters":{"inputSizeBytes":8}}]})";
+        writeFile(filePath, sameBatch);
+
+        const auto createWindow = [](const std::shared_ptr<RuntimeCalibrationFixture>& fixture) {
+            return std::make_unique<MainWindow>(
+                std::make_unique<FixtureRuntimeCalibrationProvider>(fixture));
+        };
+        auto fileFixture = std::make_shared<RuntimeCalibrationFixture>();
+        auto creatorFixture = std::make_shared<RuntimeCalibrationFixture>();
+        for (const auto& fixture : {fileFixture, creatorFixture}) {
+            fixture->entryEstimate = {
+                RuntimeDuration{12},
+                RuntimeDuration{3},
+                RuntimeDuration{4}};
+            fixture->batchOverhead = RuntimeDuration{5};
+        }
+
+        std::optional<application::RuntimeEstimate> fileEstimate;
+        auto fileWindow = createWindow(fileFixture);
+        fileWindow->show();
+        MainWindow::DialogCallbacks fileCallbacks;
+        fileCallbacks.chooseOpenTarget = [&](QWidget*) { return filePath; };
+        fileCallbacks.chooseSaveTarget = [&](QWidget*) { return fileOutput; };
+        fileCallbacks.confirmBatchExecution =
+            [&](QWidget*, const application::RuntimeEstimate& estimate) {
+                fileEstimate = estimate;
+                return false;
+            };
+        fileWindow->setDialogCallbacks(std::move(fileCallbacks));
+        widget<QPushButton>(*fileWindow, "batchInputBrowseButton")->click();
+        widget<QPushButton>(*fileWindow, "batchOutputBrowseButton")->click();
+        widget<QComboBox>(*fileWindow, "memorySamplingIntervalComboBox")
+            ->setCurrentIndex(widget<QComboBox>(*fileWindow, "memorySamplingIntervalComboBox")
+                                  ->findData(5));
+        widget<QPushButton>(*fileWindow, "batchRunButton")->click();
+
+        auto creatorWindow = createWindow(creatorFixture);
+        creatorWindow->show();
+        auto* creator = creatorWidget(*creatorWindow);
+        require(creator->addRow() && creator->addRow(),
+            "parity Creator rows could not be added");
+        configureCreatorHash(creator->rowAt(0), 8, 2, 2);
+        configureCreatorHash(creator->rowAt(1), 8, 2, 2);
+        std::optional<application::RuntimeEstimate> creatorEstimate;
+        MainWindow::DialogCallbacks creatorCallbacks;
+        creatorCallbacks.chooseSaveTarget = [&](QWidget*) { return creatorOutput; };
+        creatorCallbacks.confirmBatchExecution =
+            [&](QWidget*, const application::RuntimeEstimate& estimate) {
+                creatorEstimate = estimate;
+                return false;
+            };
+        creatorWindow->setDialogCallbacks(std::move(creatorCallbacks));
+        widget<QPushButton>(*creatorWindow, "batchOutputBrowseButton")->click();
+        creator->useInBatchButton()->click();
+        widget<QComboBox>(*creatorWindow, "memorySamplingIntervalComboBox")
+            ->setCurrentIndex(widget<QComboBox>(*creatorWindow, "memorySamplingIntervalComboBox")
+                                  ->findData(5));
+        widget<QPushButton>(*creatorWindow, "batchRunButton")->click();
+
+        require(fileEstimate.has_value() && creatorEstimate.has_value(),
+            "File and Creator did not both reach the estimate confirmation path");
+        requireEstimatesEquivalent(*fileEstimate, *creatorEstimate);
+        require(fileEstimate->shortRunEntryIndices == std::vector<std::uint32_t>{1, 2}
+                    && fileFixture->requests.size() == 2
+                    && creatorFixture->requests.size() == 2
+                    && fileFixture->requests[0].key == creatorFixture->requests[0].key
+                    && fileFixture->requests[1].key == creatorFixture->requests[1].key
+                    && !QFileInfo::exists(fileOutput)
+                    && !QFileInfo::exists(creatorOutput),
+            "File/Creator estimates diverged or No wrote output");
+    }
+
+    void testConfirmationCloseAttemptCancelsStart()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "confirmation close-guard directory was not created");
+        const auto inputPath = directory.filePath("close-guard-input.json");
+        const auto outputPath = directory.filePath("close-guard-output.json");
+        writeFile(inputPath, validBatchFixture());
+        auto fixture = std::make_shared<RuntimeCalibrationFixture>();
+        fixture->entryEstimate = {
+            RuntimeDuration{1}, RuntimeDuration{0}, RuntimeDuration{0}};
+        fixture->batchOverhead = RuntimeDuration{0};
+
+        MainWindow window(std::make_unique<FixtureRuntimeCalibrationProvider>(fixture));
+        window.show();
+        MainWindow::DialogCallbacks callbacks;
+        callbacks.chooseOpenTarget = [&](QWidget*) { return inputPath; };
+        callbacks.chooseSaveTarget = [&](QWidget*) { return outputPath; };
+        callbacks.confirmBatchExecution = [&](QWidget*, const application::RuntimeEstimate&) {
+            window.close();
+            return true;
+        };
+        window.setDialogCallbacks(std::move(callbacks));
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+        widget<QPushButton>(window, "batchRunButton")->click();
+
+        const bool guardPreserved = window.isVisible() && !QFileInfo::exists(outputPath)
+                    && fixture->requests.size() == 1
+                    && widget<QLabel>(window, "batchStatusLabel")->text()
+                        == QStringLiteral("Not running.")
+                    && widget<QPushButton>(window, "batchRunButton")->isEnabled();
+        require(guardPreserved,
+            "close attempt during confirmation triggered a Batch start");
+    }
+
+    void testDeclinedEstimatePreservesTerminalBatch()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "terminal Batch retention directory was not created");
+        const auto inputPath = directory.filePath("terminal-retention-input.json");
+        const auto outputPath = directory.filePath("terminal-retention-output.json");
+        writeFile(inputPath, validBatchFixture());
+
+        setScenario("completed");
+        MainWindow window;
+        window.show();
+        bool acceptNext = true;
+        MainWindow::DialogCallbacks callbacks;
+        callbacks.chooseOpenTarget = [&](QWidget*) { return inputPath; };
+        callbacks.chooseSaveTarget = [&](QWidget*) { return outputPath; };
+        callbacks.confirmBatchExecution =
+            [&](QWidget*, const application::RuntimeEstimate&) { return acceptNext; };
+        window.setDialogCallbacks(std::move(callbacks));
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+        widget<QPushButton>(window, "batchRunButton")->click();
+        waitUntil([&] {
+            return widget<QLabel>(window, "batchStatusLabel")->text()
+                == QStringLiteral("Completed");
+        }, 30'000);
+        const auto terminalPayload = readFile(outputPath);
+        const auto terminalCurrentEntry =
+            widget<QLabel>(window, "batchCurrentEntryLabel")->text();
+        const auto terminalCompletedCount =
+            widget<QLabel>(window, "batchCompletedCountLabel")->text();
+        require(widget<QPushButton>(window, "batchExportCsvButton")->isEnabled(),
+            "completed Batch did not retain its terminal export");
+
+        acceptNext = false;
+        widget<QPushButton>(window, "batchRunButton")->click();
+        require(readFile(outputPath) == terminalPayload
+                    && widget<QLabel>(window, "batchStatusLabel")->text()
+                        == QStringLiteral("Completed")
+                    && widget<QLabel>(window, "batchCurrentEntryLabel")->text()
+                        == terminalCurrentEntry
+                    && widget<QLabel>(window, "batchCompletedCountLabel")->text()
+                        == terminalCompletedCount
+                    && widget<QPushButton>(window, "batchExportCsvButton")->isEnabled()
+                    && widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+            "declining a later estimate changed the previous terminal Batch snapshot");
+        clearScenario();
+    }
+
+    void testConfirmationExceptionRestoresIdle()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(), "confirmation-exception directory was not created");
+        const auto inputPath = directory.filePath("exception-input.json");
+        const auto outputPath = directory.filePath("exception-output.json");
+        writeFile(inputPath, validBatchFixture());
+        MainWindow window;
+        window.show();
+        std::size_t confirmationCalls = 0;
+        MainWindow::DialogCallbacks callbacks;
+        callbacks.chooseOpenTarget = [&](QWidget*) { return inputPath; };
+        callbacks.chooseSaveTarget = [&](QWidget*) { return outputPath; };
+        callbacks.confirmBatchExecution =
+            [&](QWidget*, const application::RuntimeEstimate&) -> bool {
+                ++confirmationCalls;
+                if (confirmationCalls == 1) {
+                    throw std::runtime_error("scripted confirmation callback failure");
+                }
+                return false;
+            };
+        window.setDialogCallbacks(std::move(callbacks));
+        widget<QPushButton>(window, "batchInputBrowseButton")->click();
+        widget<QPushButton>(window, "batchOutputBrowseButton")->click();
+        widget<QPushButton>(window, "batchRunButton")->click();
+        require(confirmationCalls == 1
+                    && widget<QLabel>(window, "batchStatusLabel")->text().startsWith(
+                        QStringLiteral("Batch confirmation failed:"))
+                    && widget<QPushButton>(window, "batchRunButton")->isEnabled()
+                    && !QFileInfo::exists(outputPath),
+            "confirmation callback exception left a pending or started Batch");
+
+        widget<QPushButton>(window, "batchRunButton")->click();
+        require(confirmationCalls == 2 && !QFileInfo::exists(outputPath)
+                    && widget<QPushButton>(window, "batchRunButton")->isEnabled(),
+            "pending guard was not cleared after confirmation callback exception");
+    }
 
     QByteArray validBatchFixture()
     {
@@ -1157,6 +1978,7 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
             lastMessageTitle = title;
             lastMessageBody = body;
         };
+        allowBatchExecution(callbacks);
         window.setDialogCallbacks(std::move(callbacks));
 
         widget<QPushButton>(window, "batchOutputBrowseButton")->click();
@@ -1386,6 +2208,7 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         QString selectedOutput = outputPath;
         MainWindow::DialogCallbacks callbacks;
         callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+        allowBatchExecution(callbacks);
         window.setDialogCallbacks(std::move(callbacks));
         widget<QPushButton>(window, "batchOutputBrowseButton")->click();
         creator->useInBatchButton()->click();
@@ -1498,6 +2321,7 @@ void testBatchRunAndCancel()
         messageTitle = title;
         messageText = message;
     };
+    allowBatchExecution(callbacks);
     window.setDialogCallbacks(std::move(callbacks));
 
     auto* inputBrowse = widget<QPushButton>(window, "batchInputBrowseButton");
@@ -1648,6 +2472,7 @@ void testBatchRunAndCancel()
     cancelCallbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     cancelCallbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
     cancelCallbacks.reportMessage = [](QWidget*, const QString&, const QString&) {};
+    allowBatchExecution(cancelCallbacks);
     cancelWindow.setDialogCallbacks(std::move(cancelCallbacks));
     widget<QPushButton>(cancelWindow, "batchInputBrowseButton")->click();
     widget<QPushButton>(cancelWindow, "batchOutputBrowseButton")->click();
@@ -1710,6 +2535,7 @@ void testBatchRunAndCancel()
     failureCallbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     failureCallbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
     failureCallbacks.reportMessage = [](QWidget*, const QString&, const QString&) {};
+    allowBatchExecution(failureCallbacks);
     failureWindow.setDialogCallbacks(std::move(failureCallbacks));
     widget<QPushButton>(failureWindow, "batchInputBrowseButton")->click();
     widget<QPushButton>(failureWindow, "batchOutputBrowseButton")->click();
@@ -1755,6 +2581,7 @@ void testBatchBusyCloseYes()
     MainWindow::DialogCallbacks callbacks;
     callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    allowBatchExecution(callbacks);
     window.setDialogCallbacks(std::move(callbacks));
     widget<QPushButton>(window, "batchInputBrowseButton")->click();
     widget<QPushButton>(window, "batchOutputBrowseButton")->click();
@@ -1787,6 +2614,7 @@ void testBatchCloseDialogAfterTerminalization()
     MainWindow::DialogCallbacks callbacks;
     callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    allowBatchExecution(callbacks);
     window.setDialogCallbacks(std::move(callbacks));
     widget<QPushButton>(window, "batchInputBrowseButton")->click();
     widget<QPushButton>(window, "batchOutputBrowseButton")->click();
@@ -1840,6 +2668,7 @@ void testBatchSaveAsRecovery()
     callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
     callbacks.confirmOverwrite = [&](QWidget*, const QString&) { return overwrite; };
     callbacks.reportMessage = [&](QWidget*, const QString& title, const QString&) { messageTitle = title; };
+    allowBatchExecution(callbacks);
     window.setDialogCallbacks(std::move(callbacks));
 
     widget<QPushButton>(window, "batchInputBrowseButton")->click();
@@ -2016,6 +2845,7 @@ void prepareBatchCloseFailure(
 {
     selectedInput = inputPath;
     selectedOutput = outputPath;
+    allowBatchExecution(callbacks);
     window.setDialogCallbacks(std::move(callbacks));
     widget<QPushButton>(window, "batchInputBrowseButton")->click();
     widget<QPushButton>(window, "batchOutputBrowseButton")->click();
@@ -2215,6 +3045,7 @@ void testBatchCancellingCloseYes()
     MainWindow::DialogCallbacks callbacks;
     callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    allowBatchExecution(callbacks);
     window.setDialogCallbacks(std::move(callbacks));
     widget<QPushButton>(window, "batchInputBrowseButton")->click();
     widget<QPushButton>(window, "batchOutputBrowseButton")->click();
@@ -2264,6 +3095,7 @@ void testBatchCancellingCloseDialogAfterFailedTerminalization()
     MainWindow::DialogCallbacks callbacks;
     callbacks.chooseOpenTarget = [&](QWidget*) { return selectedInput; };
     callbacks.chooseSaveTarget = [&](QWidget*) { return selectedOutput; };
+    allowBatchExecution(callbacks);
     window.setDialogCallbacks(std::move(callbacks));
     bool failedObserved = false;
     bool answered = false;
@@ -2483,6 +3315,14 @@ int main(int argc, char* argv[])
         testSingleCsvExport();
         std::cout << "CASE single-batch-single-parity\n";
         testSingleBatchMemoryV2ParityAndSnapshotIsolation();
+        testRuntimeEstimatePresentationContract();
+        testProductionNoDataModalDeclineAndDismissal();
+        testFakeProviderEstimatesAndCapturedSettings();
+        testFakeProviderAvailabilityAndSafetyCases();
+        testFileCreatorRuntimeEstimateParity();
+        testConfirmationCloseAttemptCancelsStart();
+        testDeclinedEstimatePreservesTerminalBatch();
+        testConfirmationExceptionRestoresIdle();
         std::cout << "CASE batch-gui\n";
         testBatchGui();
         std::cout << "CASE creator-use-export-source-transitions\n";

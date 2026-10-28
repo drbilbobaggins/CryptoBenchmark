@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "CanonicalBenchmarkSelection.h"
+#include "BatchRuntimeEstimatePresentation.h"
 #include "BatchCreatorWidget.h"
 #include "MemoryPresentation.h"
 
@@ -11,12 +12,14 @@
 #include <QListWidget>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPointer>
 #include <QSignalBlocker>
 #include <QTimer>
 
 #include <array>
 #include <cstdint>
 #include <exception>
+#include <stdexcept>
 #include <utility>
 #include <variant>
 
@@ -29,6 +32,7 @@
 #include <cryptobench/application/JsonResultExportService.h>
 #include <cryptobench/application/SingleResultDocumentService.h>
 #include <cryptobench/application/BatchInputParser.h>
+#include <cryptobench/application/RuntimeEstimateService.h>
 
 namespace {
 
@@ -200,6 +204,15 @@ bool sameFilePath(const QString& left, const QString& right)
             Qt::CaseInsensitive) == 0;
 }
 
+std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider> requireRuntimeCalibrationProvider(
+    std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider> provider)
+{
+    if (!provider) {
+        throw std::invalid_argument("MainWindow requires a runtime calibration provider");
+    }
+    return provider;
+}
+
 void displayCompletedResults(Ui::MainWindow* ui, const cryptobench::core::BenchmarkResult& result)
 {
     if (!result.statistics) {
@@ -247,7 +260,19 @@ void displayCompletedResults(Ui::MainWindow* ui, const cryptobench::core::Benchm
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
+    : MainWindow(
+          std::make_unique<cryptobench::application::NoDataRuntimeCalibrationProvider>(),
+          parent)
+{
+}
+
+MainWindow::MainWindow(
+    std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider>
+        runtimeCalibrationProvider,
+    QWidget* parent)
     : QMainWindow(parent)
+    , runtimeCalibrationProvider_(
+          requireRuntimeCalibrationProvider(std::move(runtimeCalibrationProvider)))
     , ui(new Ui::MainWindow)
     , singleController_(std::make_unique<cryptobench::application::BenchmarkController>())
     , batchController_(std::make_unique<cryptobench::application::BatchController>(
@@ -523,6 +548,7 @@ void MainWindow::updateRunAvailability()
     cryptobench::core::ValidationResult validation;
     ui->runButton->setEnabled(
         presentationState_ == PresentationState::Idle &&
+        !batchConfirmationPending_ &&
         buildBenchmarkConfig(validation).has_value());
 }
 
@@ -531,15 +557,19 @@ void MainWindow::applyPresentationState()
     const bool idle = presentationState_ == PresentationState::Idle;
     const bool singleRunning = presentationState_ == PresentationState::SingleRunning;
 
-    setConfigurationEnabled(idle);
-    ui->memorySamplingIntervalComboBox->setEnabled(idle);
+    setConfigurationEnabled(idle && !batchConfirmationPending_);
+    ui->memorySamplingIntervalComboBox->setEnabled(idle && !batchConfirmationPending_);
+    ui->workflowTabWidget->setEnabled(!batchConfirmationPending_);
     batchCreatorWidget_->setFinalizationEnabled(
-        idle && !singleController_->isBusy() && !batchController_->isBusy()
+        idle && !batchConfirmationPending_
+        && !singleController_->isBusy() && !batchController_->isBusy()
         && !closeAfterTerminal_ && !closeAfterBatchTerminal_);
     ui->cancelButton->setEnabled(singleRunning);
-    ui->exportJsonButton->setEnabled(idle && exportableSingleResult_.has_value());
+    ui->exportJsonButton->setEnabled(
+        idle && !batchConfirmationPending_ && exportableSingleResult_.has_value());
     ui->exportCsvButton->setEnabled(
-        idle && !singleController_->isBusy() && !batchController_->isBusy()
+        idle && !batchConfirmationPending_
+        && !singleController_->isBusy() && !batchController_->isBusy()
         && !closeAfterTerminal_ && !closeAfterBatchTerminal_
         && exportableSingleResult_.has_value()
         && exportableSingleResult_->status == cryptobench::core::BenchmarkStatus::Completed);
@@ -551,18 +581,20 @@ void MainWindow::updateBatchPresentation()
 {
     const bool idle = presentationState_ == PresentationState::Idle;
     const bool batchRunning = presentationState_ == PresentationState::BatchRunning;
-    ui->batchInputPathLineEdit->setEnabled(idle);
-    ui->batchInputBrowseButton->setEnabled(idle);
-    ui->batchOutputPathLineEdit->setEnabled(idle);
-    ui->batchOutputBrowseButton->setEnabled(idle);
+    ui->batchInputPathLineEdit->setEnabled(idle && !batchConfirmationPending_);
+    ui->batchInputBrowseButton->setEnabled(idle && !batchConfirmationPending_);
+    ui->batchOutputPathLineEdit->setEnabled(idle && !batchConfirmationPending_);
+    ui->batchOutputBrowseButton->setEnabled(idle && !batchConfirmationPending_);
     ui->batchRunButton->setEnabled(
-        idle && batchDefinition_.has_value() && !batchOutputTarget_.isEmpty());
+        idle && !batchConfirmationPending_
+        && batchDefinition_.has_value() && !batchOutputTarget_.isEmpty());
     ui->batchCancelButton->setEnabled(batchRunning);
     ui->batchSaveAsButton->setEnabled(
-        idle && !batchController_->isBusy() &&
+        idle && !batchConfirmationPending_ && !batchController_->isBusy() &&
         batchController_->state().status == cryptobench::application::BatchStatus::Failed);
     ui->batchExportCsvButton->setEnabled(
-        idle && !singleController_->isBusy() && !batchController_->isBusy()
+        idle && !batchConfirmationPending_
+        && !singleController_->isBusy() && !batchController_->isBusy()
         && !closeAfterTerminal_ && !closeAfterBatchTerminal_
         && isTerminalBatchStatus(batchController_->state().status));
     updateBatchInputSourcePresentation();
@@ -599,6 +631,7 @@ void MainWindow::displayBatchIssues(
 
 void MainWindow::browseBatchInput()
 {
+    if (batchConfirmationPending_) return;
     const auto chooseOpenTarget = dialogCallbacks_.chooseOpenTarget
         ? dialogCallbacks_.chooseOpenTarget
         : [this](QWidget*) {
@@ -627,6 +660,7 @@ void MainWindow::browseBatchInput()
 
 void MainWindow::browseBatchOutput()
 {
+    if (batchConfirmationPending_) return;
     const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
         ? dialogCallbacks_.chooseSaveTarget
         : [this](QWidget*) {
@@ -656,7 +690,8 @@ void MainWindow::browseBatchOutput()
 
 void MainWindow::startBenchmark()
 {
-    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
+    if (batchConfirmationPending_ || presentationState_ != PresentationState::Idle ||
+        singleController_->isBusy() ||
         batchController_->isBusy()) return;
 
     cryptobench::core::ValidationResult validation;
@@ -700,8 +735,80 @@ void MainWindow::startBenchmark()
 
 void MainWindow::startBatch()
 {
-    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
-        batchController_->isBusy() || !batchDefinition_.has_value() || batchOutputTarget_.isEmpty()) {
+    if (batchConfirmationPending_ || presentationState_ != PresentationState::Idle ||
+        singleController_->isBusy() || batchController_->isBusy() ||
+        !batchDefinition_.has_value() || batchDefinition_->entries().empty() ||
+        batchOutputTarget_.isEmpty() || closeAfterTerminal_ || closeAfterBatchTerminal_) {
+        return;
+    }
+
+    const auto capturedDefinition = *batchDefinition_;
+    const auto capturedOutputTarget = batchOutputTarget_;
+    const auto samplingInterval = ui->memorySamplingIntervalComboBox->currentData().toUInt();
+    const cryptobench::core::MeasurementSettings capturedSettings{samplingInterval};
+    if (!cryptobench::core::isValidMeasurementSettings(capturedSettings)) {
+        return;
+    }
+
+    QPointer<MainWindow> lifetimeGuard(this);
+    batchConfirmationPending_ = true;
+    batchConfirmationCloseRequested_ = false;
+    applyPresentationState();
+
+    cryptobench::application::RuntimeEstimate estimate;
+    try {
+        estimate = cryptobench::application::RuntimeEstimateService{}.estimate(
+            capturedDefinition, capturedSettings, *runtimeCalibrationProvider_);
+    } catch (const std::exception& error) {
+        if (lifetimeGuard.isNull()) return;
+        batchConfirmationPending_ = false;
+        batchConfirmationCloseRequested_ = false;
+        applyPresentationState();
+        ui->batchStatusLabel->setText(
+            QStringLiteral("Batch estimate failed: %1").arg(QString::fromUtf8(error.what())));
+        return;
+    }
+    if (lifetimeGuard.isNull()) return;
+    if (batchConfirmationCloseRequested_) {
+        batchConfirmationPending_ = false;
+        batchConfirmationCloseRequested_ = false;
+        applyPresentationState();
+        return;
+    }
+
+    bool accepted = false;
+    try {
+        if (dialogCallbacks_.confirmBatchExecution) {
+            accepted = dialogCallbacks_.confirmBatchExecution(this, estimate);
+        } else {
+            QMessageBox confirmation(
+                QMessageBox::Question,
+                QStringLiteral("Confirm Batch Execution"),
+                cryptobench::gui::batchRuntimeEstimateConfirmationText(estimate),
+                QMessageBox::Yes | QMessageBox::No,
+                this);
+            confirmation.setDefaultButton(QMessageBox::No);
+            confirmation.setEscapeButton(QMessageBox::No);
+            accepted = confirmation.exec() == QMessageBox::Yes;
+        }
+    } catch (const std::exception& error) {
+        if (lifetimeGuard.isNull()) return;
+        batchConfirmationPending_ = false;
+        batchConfirmationCloseRequested_ = false;
+        applyPresentationState();
+        ui->batchStatusLabel->setText(
+            QStringLiteral("Batch confirmation failed: %1").arg(QString::fromUtf8(error.what())));
+        return;
+    }
+
+    if (lifetimeGuard.isNull()) return;
+    const bool closeRequested = batchConfirmationCloseRequested_;
+    batchConfirmationPending_ = false;
+    batchConfirmationCloseRequested_ = false;
+    if (!accepted || closeRequested || presentationState_ != PresentationState::Idle ||
+        singleController_->isBusy() || batchController_->isBusy() ||
+        closeAfterTerminal_ || closeAfterBatchTerminal_) {
+        applyPresentationState();
         return;
     }
 
@@ -717,7 +824,8 @@ void MainWindow::startBatch()
     ui->batchNotStartedCountLabel->setText(QStringLiteral("0"));
 
     try {
-        batchController_->start(*batchDefinition_, batchOutputTarget_);
+        batchController_->start(
+            capturedDefinition, capturedOutputTarget, capturedSettings);
     } catch (const std::exception& error) {
         presentationState_ = PresentationState::Idle;
         ui->batchStatusLabel->setText(QStringLiteral("Batch failed to start: %1")
@@ -728,7 +836,8 @@ void MainWindow::startBatch()
 
 void MainWindow::useCreatorInBatch()
 {
-    if (presentationState_ != PresentationState::Idle || singleController_->isBusy()
+    if (batchConfirmationPending_ || presentationState_ != PresentationState::Idle ||
+        singleController_->isBusy()
         || batchController_->isBusy() || closeAfterTerminal_ || closeAfterBatchTerminal_) {
         return;
     }
@@ -752,7 +861,8 @@ void MainWindow::useCreatorInBatch()
 
 void MainWindow::exportCreatorBatchJson()
 {
-    if (presentationState_ != PresentationState::Idle || singleController_->isBusy()
+    if (batchConfirmationPending_ || presentationState_ != PresentationState::Idle ||
+        singleController_->isBusy()
         || batchController_->isBusy() || closeAfterTerminal_ || closeAfterBatchTerminal_) {
         return;
     }
@@ -1019,7 +1129,8 @@ void MainWindow::handleBatchCloseAfterTerminal()
 
 bool MainWindow::saveBatchAs()
 {
-    if (presentationState_ != PresentationState::Idle || batchController_->isBusy() ||
+    if (batchConfirmationPending_ || presentationState_ != PresentationState::Idle ||
+        batchController_->isBusy() ||
         batchController_->state().status != cryptobench::application::BatchStatus::Failed) {
         return false;
     }
@@ -1078,7 +1189,8 @@ bool MainWindow::saveBatchAs()
 
 void MainWindow::exportSingleResult()
 {
-    if (presentationState_ != PresentationState::Idle || !exportableSingleResult_.has_value()) return;
+    if (batchConfirmationPending_ || presentationState_ != PresentationState::Idle ||
+        !exportableSingleResult_.has_value()) return;
 
     const auto chooseSaveTarget = dialogCallbacks_.chooseSaveTarget
         ? dialogCallbacks_.chooseSaveTarget
@@ -1136,7 +1248,8 @@ void MainWindow::exportSingleResult()
 
 void MainWindow::exportSingleCsvResult()
 {
-    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
+    if (batchConfirmationPending_ || presentationState_ != PresentationState::Idle ||
+        singleController_->isBusy() ||
         batchController_->isBusy() || closeAfterTerminal_ || closeAfterBatchTerminal_ ||
         !exportableSingleResult_.has_value() ||
         exportableSingleResult_->status != cryptobench::core::BenchmarkStatus::Completed) {
@@ -1208,7 +1321,8 @@ void MainWindow::exportSingleCsvResult()
 
 void MainWindow::exportBatchCsvResult()
 {
-    if (presentationState_ != PresentationState::Idle || singleController_->isBusy() ||
+    if (batchConfirmationPending_ || presentationState_ != PresentationState::Idle ||
+        singleController_->isBusy() ||
         batchController_->isBusy() || closeAfterTerminal_ || closeAfterBatchTerminal_ ||
         !isTerminalBatchStatus(batchController_->state().status)) {
         return;
@@ -1296,6 +1410,12 @@ void MainWindow::exportBatchCsvResult()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    if (batchConfirmationPending_) {
+        batchConfirmationCloseRequested_ = true;
+        event->ignore();
+        return;
+    }
+
     if (presentationState_ == PresentationState::BatchRunning) {
         const auto decision = QMessageBox::question(
             this, QStringLiteral("Batch running"),

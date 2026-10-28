@@ -10,6 +10,8 @@
 #include <cryptobench/application/BenchmarkController.h>
 #include <cryptobench/application/BatchController.h>
 #include <cryptobench/application/BatchInputParser.h>
+#include <cryptobench/application/RuntimeCalibrationProvider.h>
+#include <cryptobench/application/RuntimeEstimate.h>
 #include <cryptobench/core/AlgorithmProfileId.h>
 #include <cryptobench/core/BenchmarkConfig.h>
 #include <cryptobench/core/BenchmarkResult.h>
@@ -37,9 +39,14 @@ public:
         std::function<QString(QWidget*)> chooseSaveTarget;
         std::function<bool(QWidget*, const QString&)> confirmOverwrite;
         std::function<void(QWidget*, const QString&, const QString&)> reportMessage;
+        std::function<bool(QWidget*, const cryptobench::application::RuntimeEstimate&)>
+            confirmBatchExecution;
     };
 
     explicit MainWindow(QWidget* parent = nullptr);
+    explicit MainWindow(
+        std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider> runtimeCalibrationProvider,
+        QWidget* parent = nullptr);
     ~MainWindow() override;
 
     void setDialogCallbacks(DialogCallbacks callbacks);
@@ -90,6 +97,8 @@ private:
     std::optional<cryptobench::core::BenchmarkConfig> buildBenchmarkConfig(
         cryptobench::core::ValidationResult& validation) const;
     void closeEvent(QCloseEvent* event) override;
+    std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider>
+        runtimeCalibrationProvider_;
     Ui::MainWindow* ui;
     cryptobench::gui::BatchCreatorWidget* batchCreatorWidget_ = nullptr;
     std::unique_ptr<cryptobench::application::BenchmarkController> singleController_;
@@ -101,6 +110,8 @@ private:
     QString batchOutputTarget_;
     DialogCallbacks dialogCallbacks_;
     bool cancelRequested_ = false;
+    bool batchConfirmationPending_ = false;
+    bool batchConfirmationCloseRequested_ = false;
     bool closeAfterTerminal_ = false;
     bool closeAfterBatchTerminal_ = false;
 };
