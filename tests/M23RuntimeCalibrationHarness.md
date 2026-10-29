@@ -30,44 +30,14 @@ Generate a plan file without starting a worker:
   --write-candidate-plan C:\path\new-m23-candidate-plan.json
 ```
 
-## Explicit real-worker observation
+## Observation authorization boundary
 
-The harness has one opt-in observation path through the production
-`BatchController` -> `BenchmarkController` -> fresh `WorkerRunSession` ->
-`CryptoBenchmarkWorker` path. It requires a Release build, clean Git worktree,
-valid canonical config, new absolute output directory, resolvable app/worker
-binaries, environment/provenance capture, and the explicit
-`--i-confirm-m23-2-go` acknowledgment. Use it only after the separate M23.2
-human GO for a reviewed measurement plan. No observation or calibration
-campaign was run for M23.1.
-
-Example command shape (this tuple is candidate-plan row 696; do not run before
-that GO):
-
-```powershell
-& .\build-m23-baseline-release\test-runtime\CryptoBenchmarkM23CalibrationTests.exe `
-  --observe-once `
-  --case ed25519/sign/message `
-  --input-bytes 64 `
-  --iterations 1 `
-  --runs 1 `
-  --sampling-ms 5 `
-  --role holdout `
-  --repetition 1 `
-  --order 696 `
-  --output-dir C:\path\new-m23-observation `
-  --i-confirm-m23-2-go
-```
-
-`--role` is explicitly `reference` or `holdout`. Each observation records the
-typed case, exact workload bytes (or `no-size`), `N`, `M`, sampling interval,
-repetition, order, deterministic observation identity, inventory/plan hashes,
-UTC timestamp, build/app/worker hashes, Git provenance, OS/architecture,
-processor/logical-processor and RAM identity, power plan, Qt/OpenSSL versions,
-worker PID/creation-time pairs, and per-run plus enclosing elapsed values.
-Evidence is written atomically; failed/incomplete runs do not receive a success
-marker and are rejected by the evidence validator. A successful result is one
-observation only, not a campaign or a qualified dataset.
+The original M23.1 `--observe-once` route is disabled. The 2,505-row plan below
+is inventory/planning evidence only and cannot be used to launch a worker.
+M23.2-PREP adds a distinct twelve-case pilot plan and a separate approved-plan
+path. No observation or calibration campaign was executed during preparation.
+See [M23PilotPreparation.md](./M23PilotPreparation.md) for dry-run/analyzer
+commands and the gated post-GO observation command shape.
 
 ## Timing ownership
 

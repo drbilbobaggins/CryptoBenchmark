@@ -11,6 +11,7 @@
 #include <QString>
 
 #include <cryptobench/application/RuntimeCalibrationInventory.h>
+#include "M23PilotPlan.h"
 
 namespace cryptobench::tests {
 
@@ -53,8 +54,9 @@ std::string m23ObservationIdentity(
     std::string_view applicationSha256,
     std::string_view workerSha256,
     std::string_view environmentSha256);
-int executeM23Observation(
-    const M23ObservationRequest& request,
+int executeApprovedM23PilotBatchObservation(
+    const M23PilotExecutionGroup& group,
+    const M23PilotApprovedPlan& approvedPlan,
     const QString& outputDirectory);
 
 } // namespace cryptobench::tests

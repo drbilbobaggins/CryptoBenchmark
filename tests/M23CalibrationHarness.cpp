@@ -1,4 +1,6 @@
 #include "M23CalibrationHarness.h"
+#include "M23PilotAnalyzer.h"
+#include "M23PilotPlan.h"
 
 #include <cryptobench/application/AtomicFileWriter.h>
 #include <cryptobench/application/BatchController.h>
@@ -23,7 +25,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QStorageInfo>
 #include <QSysInfo>
+#include <QTimer>
 
 #include <openssl/crypto.h>
 
@@ -71,10 +75,16 @@ struct CapturedRun {
     std::uint64_t workerCreationTime100ns = 0;
 };
 
+struct CapturedPilotRun {
+    std::uint32_t entryIndex = 0;
+    CapturedRun run{};
+};
+
 struct RunStart {
     QElapsedTimer timer;
     std::uint32_t workerPid = 0;
     std::uint64_t workerCreationTime100ns = 0;
+    std::uint32_t entryIndex = 0;
 };
 
 struct CheckpointObservation {
@@ -510,10 +520,14 @@ cryptobench::core::BenchmarkConfig makeConfig(
         std::move(parameters)};
 }
 
-cryptobench::application::BatchDefinition oneEntryDefinition(
-    const cryptobench::core::BenchmarkConfig& config)
+cryptobench::application::BatchDefinition definitionForConfigs(
+    const std::vector<cryptobench::core::BenchmarkConfig>& configs)
 {
-    const QJsonArray entries{cryptobench::application::benchmarkConfigToJson(config)};
+    require(!configs.empty(), "M23 Batch definition requires at least one entry");
+    QJsonArray entries;
+    for (const auto& config : configs) {
+        entries.append(cryptobench::application::benchmarkConfigToJson(config));
+    }
     const auto inputDocument = QJsonDocument(QJsonObject{
         {"entries", entries},
         {"format", QStringLiteral("cryptobenchmark-batch-input")},
@@ -608,6 +622,17 @@ void writeJsonAtomically(const QString& path, const QJsonDocument& document)
     const auto result = cryptobench::application::AtomicFileWriter{}.writeAtomically(
         path, document.toJson(QJsonDocument::Indented));
     require(result.success, result.technicalMessage.toStdString());
+}
+
+QJsonObject intervalJson(
+    std::string_view kind,
+    std::uint64_t startOffset,
+    std::uint64_t endOffset)
+{
+    return {
+        {"endOffsetNanoseconds", QString::number(endOffset)},
+        {"kind", qString(kind)},
+        {"startOffsetNanoseconds", QString::number(startOffset)}};
 }
 
 std::string fileHash(const QString& path)
@@ -1056,73 +1081,184 @@ void validateM23ObservationEvidence(
         "checkpoint writes exceed their containing Batch-only intervals");
 }
 
-int executeM23Observation(
-    const M23ObservationRequest& request,
+int executeApprovedM23PilotBatchObservation(
+    const M23PilotExecutionGroup& group,
+    const M23PilotApprovedPlan& approvedPlan,
     const QString& outputDirectory)
 {
-    validateRequest(request);
-    require(QString::fromStdString(
-            std::string(cryptobench::application::build_info::buildType))
-            == QStringLiteral("Release"),
-        "M23 observations require a Release build");
-    require(QFileInfo(outputDirectory).isAbsolute(),
-        "M23 output directory must be absolute");
-    require(!QFileInfo::exists(outputDirectory),
-        "M23 output directory already exists");
+    const auto canonicalGroup = m23PilotExecutionGroup(group.groupId);
+    require(canonicalGroup.has_value()
+            && canonicalGroup->entries.size() == group.entries.size()
+            && canonicalGroup->batchShape == group.batchShape,
+        "M23 pilot group is absent, deferred, or differs from its plan");
+    require(!group.entries.empty()
+            && group.entries.size() <= kM23PilotMaximumBatchEntries,
+        "M23 pilot Batch exceeds the initial three-entry cap");
+    require(!approvedPlan.approvalReference.empty()
+            && !approvedPlan.approvalReference.starts_with("SYNTHETIC")
+            && validLowerSha256(approvedPlan.approvalSha256.toStdString()),
+        "M23 pilot execution requires a validated human GO approval");
+    for (std::size_t index = 0; index < group.entries.size(); ++index) {
+        const auto& actual = group.entries[index];
+        const auto& expected = canonicalGroup->entries[index];
+        require(actual.rowId == expected.rowId
+                && runtimeCalibrationCaseId(actual.calibrationCase)
+                    == runtimeCalibrationCaseId(expected.calibrationCase)
+                && actual.role == expected.role
+                && actual.probeKind == expected.probeKind
+                && actual.inputBytes == expected.inputBytes
+                && actual.iterationsPerRun == expected.iterationsPerRun
+                && actual.runs == expected.runs
+                && actual.samplingIntervalMilliseconds
+                    == expected.samplingIntervalMilliseconds
+                && actual.repetition == expected.repetition
+                && actual.order == expected.order,
+            "M23 pilot entry differs from its candidate-plan row");
+    }
+    std::uint64_t totalLogicalRuns = 0;
+    for (const auto& entry : group.entries) {
+        require(entry.iterationsPerRun <= kM23PilotMaximumN
+                && entry.runs <= kM23PilotMaximumM
+                && (!entry.inputBytes
+                    || *entry.inputBytes <= kM23PilotMaximumInitialInputBytes),
+            "M23 pilot entry exceeds the initial executable N/M/size caps");
+        totalLogicalRuns = checkedSum(
+            totalLogicalRuns, entry.runs,
+            "M23 pilot total logical-run count overflowed");
+    }
+    require(totalLogicalRuns <= 30,
+        "M23 pilot Batch exceeds the 30-logical-run initial cap");
 
-    const auto workerExecutable = workerPath();
-    const auto applicationExecutable = applicationPath();
-    const auto workerHash = fileSha256(workerExecutable);
-    const auto applicationHash = fileSha256(applicationExecutable);
+    require(QString::fromStdString(
+            std::string(application::build_info::buildType))
+            == QStringLiteral("Release"),
+        "M23 pilot observations require a Release build");
+    require(QFileInfo(outputDirectory).isAbsolute()
+            && !QFileInfo::exists(outputDirectory),
+        "M23 pilot output directory must be new and absolute");
     const auto repositoryRoot = findRepositoryRoot();
-    const auto gitCommit = gitOutput(repositoryRoot, {QStringLiteral("rev-parse"),
-        QStringLiteral("HEAD")});
-    const auto gitStatus = gitOutput(repositoryRoot, {
-        QStringLiteral("status"), QStringLiteral("--porcelain")});
-    require(gitStatus.isEmpty(), "M23 observations require a clean Git worktree");
+    const auto gitCommit = gitOutput(repositoryRoot, {
+        QStringLiteral("rev-parse"), QStringLiteral("HEAD")});
+    require(gitCommit.toStdString()
+            == std::string(cryptobench::application::build_info::gitCommit),
+        "M23 pilot executable build commit does not match the clean worktree");
+    require(gitOutput(repositoryRoot, {
+                QStringLiteral("status"), QStringLiteral("--porcelain")}).isEmpty(),
+        "M23 pilot observations require a clean Git worktree");
     const auto relativeOutputPath = QDir(repositoryRoot).relativeFilePath(
         QFileInfo(outputDirectory).absoluteFilePath());
     require(relativeOutputPath == QStringLiteral("..")
             || relativeOutputPath.startsWith(QStringLiteral("../"))
             || relativeOutputPath.startsWith(QStringLiteral("..\\"))
             || QDir::isAbsolutePath(relativeOutputPath),
-        "M23 observation output directory must be outside the repository");
+        "M23 pilot output must be outside the repository");
+
+    QStorageInfo storage(QFileInfo(outputDirectory).absolutePath());
+    storage.refresh();
+    const auto availableDiskBytes = storage.bytesAvailable() > 0
+        ? static_cast<std::uint64_t>(storage.bytesAvailable())
+        : 0;
+    require(storage.isValid()
+            && availableDiskBytes >= kM23PilotMinimumFreeDiskBytes,
+        "M23 pilot requires 512 MiB of free disk space");
+    MEMORYSTATUSEX memoryStatus{};
+    memoryStatus.dwLength = sizeof(memoryStatus);
+    require(GlobalMemoryStatusEx(&memoryStatus) != FALSE,
+        "M23 pilot available memory query failed");
+    const auto availableMemoryBytes = memoryStatus.ullAvailPhys;
+    require(availableMemoryBytes >= kM23PilotMinimumAvailableMemoryBytes,
+        "M23 pilot requires 512 MiB of available physical memory");
+
+    const auto applicationExecutable = applicationPath();
+    const auto workerExecutable = workerPath();
+    const auto applicationHash = fileSha256(applicationExecutable);
+    const auto workerHash = fileSha256(workerExecutable);
+    const auto gitStatus = gitOutput(repositoryRoot, {
+        QStringLiteral("status"), QStringLiteral("--porcelain")});
+    require(gitStatus.isEmpty(), "M23 pilot worktree changed during preflight");
     const auto environment = captureEnvironment();
-    const auto inventory =
-        cryptobench::application::enumerateRuntimeCalibrationInventory();
-    const auto inventoryHash =
-        cryptobench::application::runtimeCalibrationInventorySha256(inventory);
-
-    require(QDir().mkpath(outputDirectory),
-        "M23 output directory could not be created");
-    const auto manifestPath =
-        QDir(outputDirectory).filePath(QStringLiteral("manifest.json"));
-    const auto evidencePath =
-        QDir(outputDirectory).filePath(QStringLiteral("observation.json"));
-    const auto batchResultPath =
-        QDir(outputDirectory).filePath(QStringLiteral("batch-result.json"));
-    const auto markerPath =
-        QDir(outputDirectory).filePath(QStringLiteral("success.marker"));
-
-    const auto planHash = m23CalibrationPlanSha256();
     const auto environmentJson = environmentObject(
         environment, gitCommit.toStdString(), false);
     const auto environmentHash = sha256(
         QJsonDocument(environmentJson).toJson(QJsonDocument::Compact));
-    const auto observationId = m23ObservationIdentity(
-        request, applicationHash, workerHash, environmentHash);
+    const auto inventory =
+        application::enumerateRuntimeCalibrationInventory();
+    const auto inventoryHash =
+        application::runtimeCalibrationInventorySha256(inventory);
+
+    const auto samplingMilliseconds =
+        group.entries.front().samplingIntervalMilliseconds;
+    std::vector<cryptobench::core::BenchmarkConfig> configurations;
+    configurations.reserve(group.entries.size());
+    for (const auto& entry : group.entries) {
+        require(entry.samplingIntervalMilliseconds == samplingMilliseconds,
+            "one pilot Batch cannot mix sampling contexts");
+        const M23ObservationRequest request{
+            entry.calibrationCase,
+            entry.role == M23PilotRole::Holdout
+                ? M23ObservationRole::Holdout
+                : M23ObservationRole::Reference,
+            entry.inputBytes,
+            entry.iterationsPerRun,
+            entry.runs,
+            entry.samplingIntervalMilliseconds,
+            entry.repetition,
+            entry.order};
+        const auto config = makeConfig(request);
+        cryptobench::core::ValidationResult validation;
+        require(cryptobench::core::ConfigValidator{}.validateAndCreate(
+                    config, validation).has_value(),
+            "pilot entry failed the canonical ConfigValidator");
+        configurations.push_back(config);
+    }
+    const auto definition = definitionForConfigs(configurations);
+
+    require(QDir().mkpath(outputDirectory),
+        "M23 pilot output directory could not be created");
+    const auto manifestPath =
+        QDir(outputDirectory).filePath(QStringLiteral("manifest.json"));
+    const auto evidencePath =
+        QDir(outputDirectory).filePath(QStringLiteral("pilot-evidence.json"));
+    const auto batchResultPath =
+        QDir(outputDirectory).filePath(QStringLiteral("batch-result.json"));
+    const auto outputTarget = batchResultPath;
+    const auto markerPath =
+        QDir(outputDirectory).filePath(QStringLiteral("success.marker"));
+
+    QJsonArray plannedEntries;
+    for (const auto& entry : group.entries) {
+        plannedEntries.append(QJsonObject{
+            {"caseId", qString(runtimeCalibrationCaseId(entry.calibrationCase))},
+            {"inputBytes", sizeValue(entry.inputBytes)},
+            {"iterationsPerRun", QString::number(entry.iterationsPerRun)},
+            {"order", static_cast<qint64>(entry.order)},
+            {"probeKind", qString(toStableString(entry.probeKind))},
+            {"role", qString(toStableString(entry.role))},
+            {"rowId", qString(entry.rowId)},
+            {"runs", static_cast<qint64>(entry.runs)},
+            {"samplingIntervalMilliseconds",
+                static_cast<qint64>(entry.samplingIntervalMilliseconds)}});
+    }
     QJsonObject manifest{
         {"applicationExecutable", applicationExecutable},
         {"applicationSha256", qString(applicationHash)},
-        {"case", caseObject(request)},
+        {"approvedPlanSha256", qString(approvedPlan.approvalSha256.toStdString())},
+        {"approvalReference", qString(approvedPlan.approvalReference)},
+        {"batchId", qString(group.groupId)},
+        {"candidatePlanSha256", QString::fromLatin1(m23PilotPlanSha256())},
+        {"entries", plannedEntries},
         {"environment", environmentJson},
-        {"format", QStringLiteral("cryptobenchmark-m23-observation-manifest")},
+        {"environmentSha256", qString(environmentHash)},
+        {"format", QStringLiteral("cryptobenchmark-m23-pilot-observation-manifest")},
         {"inventorySha256", QString::fromLatin1(inventoryHash)},
-        {"measurementAuthorization",
-            QStringLiteral("Explicit M23.2 GO acknowledgment supplied by operator")},
-        {"measurementAuthorized", true},
-        {"observationId", qString(observationId)},
-        {"planSha256", QString::fromLatin1(planHash)},
+        {"maximumObservationSeconds",
+            static_cast<qint64>(kM23PilotMaximumObservationSeconds)},
+        {"availableDiskBytes", QString::number(availableDiskBytes)},
+        {"availablePhysicalMemoryBytes", QString::number(availableMemoryBytes)},
+        {"minimumAvailableMemoryBytes",
+            QString::number(kM23PilotMinimumAvailableMemoryBytes)},
+        {"minimumFreeDiskBytes", QString::number(kM23PilotMinimumFreeDiskBytes)},
+        {"riskClass", qString(toStableString(group.risk))},
         {"sourceGitCommit", gitCommit},
         {"status", QStringLiteral("started")},
         {"workerExecutable", workerExecutable},
@@ -1130,33 +1266,40 @@ int executeM23Observation(
         {"schemaVersion", 1}};
     writeJsonAtomically(manifestPath, QJsonDocument(manifest));
 
-    const auto config = makeConfig(request);
-    const auto definition = oneEntryDefinition(config);
-    const auto target = batchResultPath;
-    const auto settings = cryptobench::core::MeasurementSettings{
-        request.samplingIntervalMilliseconds};
-
-    std::vector<CapturedRun> capturedRuns;
+    std::vector<CapturedPilotRun> capturedRuns;
     std::map<cryptobench::application::WorkerRunSession*, RunStart> activeRuns;
+    std::vector<std::uint64_t> entryStarts(group.entries.size(), 0);
+    std::vector<std::uint64_t> entryEnds(group.entries.size(), 0);
+    std::vector<bool> entryStarted(group.entries.size(), false);
+    std::vector<bool> entryEnded(group.entries.size(), false);
+    std::vector<std::optional<cryptobench::core::BenchmarkStatus>> executorStatuses(
+        group.entries.size());
     std::vector<CheckpointObservation> checkpointIntervals;
-    std::optional<std::uint64_t> entryStartOffset;
-    std::optional<std::uint64_t> entryEndOffset;
+    std::optional<std::uint32_t> activeEntryIndex;
+    std::optional<cryptobench::application::BatchStatus> terminalStatus;
+    std::optional<cryptobench::application::BatchExecutionState> terminalState;
     std::optional<std::uint64_t> batchElapsedAtTerminal;
-    std::optional<cryptobench::core::BenchmarkStatus> executorStatus;
-    std::optional<cryptobench::application::BatchStatus> batchStatus;
-    QString callbackError;
     cryptobench::application::WorkerRunSession* activeSession = nullptr;
+    QString callbackError;
+    bool timedOut = false;
     QElapsedTimer batchTimer;
 
     cryptobench::application::BatchController* batchPointer = nullptr;
     const auto executorFactory =
-        [&](const cryptobench::core::MeasurementSettings& factorySettings) {
+        [&](const cryptobench::core::MeasurementSettings& settings) {
             cryptobench::application::WorkerRunSessionTestHooks hooks;
             hooks.sessionCreated =
                 [&](cryptobench::application::WorkerRunSession* session) {
+                    if (!activeEntryIndex || *activeEntryIndex == 0
+                        || *activeEntryIndex > group.entries.size()) {
+                        callbackError = QStringLiteral(
+                            "pilot worker session has no active Batch entry");
+                        return;
+                    }
                     activeSession = session;
                     RunStart runStart;
                     runStart.timer.start();
+                    runStart.entryIndex = *activeEntryIndex;
                     activeRuns.emplace(session, std::move(runStart));
                     QObject::connect(
                         session,
@@ -1165,13 +1308,15 @@ int executeM23Observation(
                         [&, session](
                             const cryptobench::application::WorkerRunSessionResult& result) {
                             const auto found = activeRuns.find(session);
-                            if (found == activeRuns.end()) {
+                            if (found == activeRuns.end()
+                                || found->second.entryIndex == 0) {
                                 callbackError = QStringLiteral(
-                                    "M23 completed worker has no start boundary");
+                                    "pilot run completed without an entry boundary");
                                 return;
                             }
                             const auto& start = found->second;
                             capturedRuns.push_back({
+                                start.entryIndex,
                                 result.logicalRunIndex,
                                 static_cast<std::uint64_t>(
                                     std::max<qint64>(0, start.timer.nsecsElapsed())),
@@ -1185,7 +1330,7 @@ int executeM23Observation(
                         session,
                         &cryptobench::application::WorkerRunSession::failed,
                         batchPointer,
-                        [&, session](const cryptobench::core::ErrorInfo& error) {
+                        [&, session](const core::ErrorInfo& error) {
                             callbackError = QString::fromStdString(error.technicalMessage);
                             activeRuns.erase(session);
                             activeSession = nullptr;
@@ -1196,7 +1341,7 @@ int executeM23Observation(
                         batchPointer,
                         [&, session] {
                             callbackError = QStringLiteral(
-                                "M23 worker session was cancelled");
+                                "pilot worker session was cancelled");
                             activeRuns.erase(session);
                             activeSession = nullptr;
                         });
@@ -1204,13 +1349,13 @@ int executeM23Observation(
             hooks.workerStarted = [&](qint64 pid) {
                 if (activeSession == nullptr || pid <= 0) {
                     callbackError = QStringLiteral(
-                        "M23 worker start did not match a live session");
+                        "pilot worker start did not match a live session");
                     return;
                 }
                 const auto found = activeRuns.find(activeSession);
                 if (found == activeRuns.end()) {
                     callbackError = QStringLiteral(
-                        "M23 worker start has no session timing boundary");
+                        "pilot worker has no active run boundary");
                     return;
                 }
                 try {
@@ -1224,13 +1369,19 @@ int executeM23Observation(
 
             auto executor = std::make_unique<
                 cryptobench::application::BenchmarkController>(
-                    nullptr, workerExecutable, std::move(hooks), factorySettings);
+                    nullptr, workerExecutable, std::move(hooks), settings);
             QObject::connect(
                 executor.get(),
                 &cryptobench::application::BenchmarkSessionExecutor::benchmarkFinished,
                 batchPointer,
                 [&](const cryptobench::core::BenchmarkResult& result) {
-                    executorStatus = result.status;
+                    if (!activeEntryIndex || *activeEntryIndex == 0
+                        || *activeEntryIndex > executorStatuses.size()) {
+                        callbackError = QStringLiteral(
+                            "pilot benchmark result has no active entry");
+                        return;
+                    }
+                    executorStatuses[*activeEntryIndex - 1] = result.status;
                 });
             return executor;
         };
@@ -1242,11 +1393,18 @@ int executeM23Observation(
                 cryptobench::application::AtomicFileWriter{}.writeAtomically(path, bytes);
             const auto endOffset = static_cast<std::uint64_t>(
                 std::max<qint64>(0, batchTimer.nsecsElapsed()));
-            const auto kind = checkpointIntervals.empty()
+            const auto index = checkpointIntervals.size();
+            const auto kind = index == 0
                 ? std::string{"initial"}
-                : checkpointIntervals.size() == 1
-                    ? std::string{"final"}
-                    : std::string{"unexpected"};
+                : index < group.entries.size()
+                    ? std::string{"entryCheckpoint-"} + std::to_string(index)
+                    : index == group.entries.size()
+                        ? std::string{"final"}
+                        : std::string{"unexpected"};
+            if (kind == "unexpected") {
+                callbackError = QStringLiteral(
+                    "pilot Batch emitted an unexpected extra checkpoint");
+            }
             checkpointIntervals.push_back({kind, startOffset, endOffset});
             return result;
         };
@@ -1260,7 +1418,8 @@ int executeM23Observation(
         &cryptobench::application::BatchController::batchFinished,
         &eventLoop,
         [&](const cryptobench::application::BatchExecutionState& state) {
-            batchStatus = state.status;
+            terminalState = state;
+            terminalStatus = state.status;
             batchElapsedAtTerminal = static_cast<std::uint64_t>(
                 std::max<qint64>(0, batchTimer.nsecsElapsed()));
             eventLoop.quit();
@@ -1270,127 +1429,245 @@ int executeM23Observation(
         &cryptobench::application::BatchController::progressChanged,
         &eventLoop,
         [&](const cryptobench::application::BatchProgress& progress) {
-            if (progress.currentEntryIndex != std::optional<std::uint32_t>{1}) {
+            if (!progress.currentEntryIndex
+                || *progress.currentEntryIndex == 0
+                || *progress.currentEntryIndex > group.entries.size()) {
                 return;
             }
+            const auto index =
+                static_cast<std::size_t>(*progress.currentEntryIndex - 1);
             const auto offset = static_cast<std::uint64_t>(
                 std::max<qint64>(0, batchTimer.nsecsElapsed()));
-            if (!progress.persistenceInProgress && !entryStartOffset.has_value()) {
-                entryStartOffset = offset;
-            } else if (progress.persistenceInProgress
-                && entryStartOffset.has_value()
-                && !entryEndOffset.has_value()) {
-                entryEndOffset = offset;
+            if (!progress.persistenceInProgress && !entryStarted[index]) {
+                entryStarted[index] = true;
+                entryStarts[index] = offset;
+                activeEntryIndex = *progress.currentEntryIndex;
+            } else if (progress.persistenceInProgress && entryStarted[index]
+                && !entryEnded[index]) {
+                entryEnded[index] = true;
+                entryEnds[index] = offset;
             }
         });
+    QTimer watchdog;
+    watchdog.setSingleShot(true);
+    QObject::connect(&watchdog, &QTimer::timeout, &batch, [&] {
+        timedOut = true;
+        batch.requestCancel();
+    });
+
     const auto startedAtUtc =
         QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     manifest.insert("startedAtUtc", startedAtUtc);
     writeJsonAtomically(manifestPath, QJsonDocument(manifest));
     batchTimer.start();
-    batch.start(definition, target, settings);
-    if (!batchStatus.has_value()) {
+    watchdog.start(static_cast<int>(
+        kM23PilotMaximumObservationSeconds * 1000U));
+    const cryptobench::core::MeasurementSettings settings{samplingMilliseconds};
+    batch.start(definition, outputTarget, settings);
+    if (!terminalStatus) {
         eventLoop.exec();
     }
+    watchdog.stop();
+
     const auto batchElapsed = batchElapsedAtTerminal.value_or(0);
-    const auto validEntryOffsets = entryStartOffset.has_value()
-        && entryEndOffset.has_value()
-        && *entryEndOffset > *entryStartOffset
-        && *entryEndOffset <= batchElapsed;
-    const auto entryElapsed = validEntryOffsets
-        ? *entryEndOffset - *entryStartOffset
-        : 0;
-    const auto batchBeforeEntry = validEntryOffsets ? *entryStartOffset : 0;
-    const auto batchAfterEntry = validEntryOffsets
-        ? batchElapsed - *entryEndOffset
-        : 0;
-    const auto batchOnlyResidual = checkedSum(
-        batchBeforeEntry,
-        batchAfterEntry,
-        "M23 Batch-only timing sum overflowed");
-
-    QJsonArray runValues;
-    std::uint64_t totalRunElapsed = 0;
-    std::set<std::string> workerIdentities;
+    bool validTimings = batchElapsedAtTerminal.has_value()
+        && terminalStatus == cryptobench::application::BatchStatus::Completed
+        && terminalState.has_value()
+        && !timedOut;
+    std::vector<std::uint64_t> entryElapsed(group.entries.size(), 0);
+    std::vector<std::uint64_t> entryOutsideRuns(group.entries.size(), 0);
+    std::vector<std::vector<CapturedRun>> runsByEntry(group.entries.size());
     std::sort(capturedRuns.begin(), capturedRuns.end(),
-        [](const CapturedRun& left, const CapturedRun& right) {
-            return left.runIndex < right.runIndex;
+        [](const CapturedPilotRun& left, const CapturedPilotRun& right) {
+            return std::tie(left.entryIndex, left.run.runIndex)
+                < std::tie(right.entryIndex, right.run.runIndex);
         });
-    for (const auto& run : capturedRuns) {
-        require(run.workerPid != 0 && run.workerCreationTime100ns != 0,
-            "M23 worker identity was not fully observed");
-        require(run.controllerElapsedNanoseconds >= run.measuredBlockNanoseconds,
-            "M23 controller time was smaller than the measured worker block");
-        const auto identity = std::to_string(run.workerPid)
-            + "/" + std::to_string(run.workerCreationTime100ns);
-        require(workerIdentities.emplace(identity).second,
-            "M23 worker process identity was reused");
-        totalRunElapsed = checkedSum(
-            totalRunElapsed,
-            run.controllerElapsedNanoseconds,
-            "M23 run timing sum overflowed");
-        runValues.append(QJsonObject{
-            {"controllerElapsedNanoseconds",
-                QString::number(run.controllerElapsedNanoseconds)},
-            {"measuredBlockNanoseconds",
-                QString::number(run.measuredBlockNanoseconds)},
-            {"runIndex", static_cast<qint64>(run.runIndex)},
-            {"workerCreationTime100ns",
-                QString::number(run.workerCreationTime100ns)},
-            {"workerPid", QString::number(run.workerPid)}});
+    for (const auto& capture : capturedRuns) {
+        if (capture.entryIndex == 0 || capture.entryIndex > group.entries.size()) {
+            validTimings = false;
+            continue;
+        }
+        runsByEntry[capture.entryIndex - 1].push_back(capture.run);
     }
 
-    const bool completed =
-        batchStatus == cryptobench::application::BatchStatus::Completed
-        && executorStatus == cryptobench::core::BenchmarkStatus::Completed
-        && capturedRuns.size() == request.runs
-        && activeRuns.empty()
-        && callbackError.isEmpty()
-        && validEntryOffsets
-        && entryElapsed >= totalRunElapsed
-        && batchElapsedAtTerminal.has_value()
-        && checkpointIntervals.size() == 2;
-    const auto entryOutsideRuns = entryElapsed >= totalRunElapsed
-        ? entryElapsed - totalRunElapsed
-        : 0;
-    QJsonArray checkpointValues;
-    for (const auto& interval : checkpointIntervals) {
-        checkpointValues.append(QJsonObject{
-            {"endOffsetNanoseconds", QString::number(interval.endOffsetNanoseconds)},
-            {"kind", qString(interval.kind)},
-            {"startOffsetNanoseconds", QString::number(interval.startOffsetNanoseconds)}});
+    QJsonArray entryEvidence;
+    std::set<std::string> workerIdentities;
+    std::uint64_t sumEntryElapsed = 0;
+    for (std::size_t index = 0; index < group.entries.size(); ++index) {
+        const auto& planned = group.entries[index];
+        if (!entryStarted[index] || !entryEnded[index]
+            || entryEnds[index] <= entryStarts[index]
+            || entryEnds[index] > batchElapsed) {
+            validTimings = false;
+        } else {
+            entryElapsed[index] = entryEnds[index] - entryStarts[index];
+        }
+        const auto& runs = runsByEntry[index];
+        if (runs.size() != planned.runs
+            || executorStatuses[index]
+                != cryptobench::core::BenchmarkStatus::Completed) {
+            validTimings = false;
+        }
+        QJsonArray runValues;
+        std::uint64_t runElapsed = 0;
+        for (std::size_t runIndex = 0; runIndex < runs.size(); ++runIndex) {
+            const auto& run = runs[runIndex];
+            if (run.runIndex != runIndex || run.workerPid == 0
+                || run.workerCreationTime100ns == 0
+                || run.controllerElapsedNanoseconds < run.measuredBlockNanoseconds) {
+                validTimings = false;
+            }
+            if (!workerIdentities.emplace(
+                    std::to_string(run.workerPid) + "/"
+                    + std::to_string(run.workerCreationTime100ns)).second) {
+                validTimings = false;
+            }
+            runElapsed = checkedSum(
+                runElapsed, run.controllerElapsedNanoseconds,
+                "pilot run elapsed sum overflowed");
+            runValues.append(QJsonObject{
+                {"controllerElapsedNanoseconds",
+                    QString::number(run.controllerElapsedNanoseconds)},
+                {"measuredBlockNanoseconds",
+                    QString::number(run.measuredBlockNanoseconds)},
+                {"runIndex", static_cast<qint64>(run.runIndex)},
+                {"workerCreationTime100ns",
+                    QString::number(run.workerCreationTime100ns)},
+                {"workerPid", QString::number(run.workerPid)}});
+        }
+        if (runElapsed > entryElapsed[index]) {
+            validTimings = false;
+        } else {
+            entryOutsideRuns[index] = entryElapsed[index] - runElapsed;
+        }
+        sumEntryElapsed = checkedSum(
+            sumEntryElapsed, entryElapsed[index],
+            "pilot entry elapsed sum overflowed");
+        entryEvidence.append(QJsonObject{
+            {"caseId", qString(runtimeCalibrationCaseId(planned.calibrationCase))},
+            {"entryElapsedNanoseconds", QString::number(entryElapsed[index])},
+            {"entryEndOffsetNanoseconds", QString::number(entryEnds[index])},
+            {"entryOutsideRunNanoseconds",
+                QString::number(entryOutsideRuns[index])},
+            {"entryStartOffsetNanoseconds", QString::number(entryStarts[index])},
+            {"inputBytes", sizeValue(planned.inputBytes)},
+            {"iterationsPerRun", QString::number(planned.iterationsPerRun)},
+            {"order", static_cast<qint64>(planned.order)},
+            {"probeKind", qString(toStableString(planned.probeKind))},
+            {"repetition", static_cast<qint64>(planned.repetition)},
+            {"role", qString(toStableString(planned.role))},
+            {"rowId", qString(planned.rowId)},
+            {"runObservations", runValues},
+            {"runs", static_cast<qint64>(planned.runs)},
+            {"samplingIntervalMilliseconds",
+                static_cast<qint64>(planned.samplingIntervalMilliseconds)}});
     }
+
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> batchOnlyBounds;
+    std::uint64_t previousEntryEnd = 0;
+    for (std::size_t index = 0; index < group.entries.size(); ++index) {
+        if (entryStarts[index] < previousEntryEnd) {
+            validTimings = false;
+        }
+        batchOnlyBounds.emplace_back(previousEntryEnd, entryStarts[index]);
+        previousEntryEnd = entryEnds[index];
+    }
+    if (previousEntryEnd > batchElapsed) {
+        validTimings = false;
+    }
+    batchOnlyBounds.emplace_back(previousEntryEnd, batchElapsed);
+    std::uint64_t batchOnly = 0;
+    QJsonArray batchOnlyIntervals;
+    for (std::size_t index = 0; index < batchOnlyBounds.size(); ++index) {
+        const auto [start, end] = batchOnlyBounds[index];
+        if (end < start) {
+            validTimings = false;
+            continue;
+        }
+        batchOnly = checkedSum(
+            batchOnly, end - start,
+            "pilot Batch-only interval sum overflowed");
+        const auto kind = index == 0
+            ? std::string{"beforeEntries"}
+            : index + 1 == batchOnlyBounds.size()
+                ? std::string{"afterEntries"}
+                : std::string{"betweenEntries-"} + std::to_string(index)
+                    + "-" + std::to_string(index + 1);
+        batchOnlyIntervals.append(intervalJson(kind, start, end));
+    }
+
+    QJsonArray checkpointValues;
+    std::uint64_t checkpointWriteTotal = 0;
+    for (const auto& checkpoint : checkpointIntervals) {
+        if (checkpoint.endOffsetNanoseconds < checkpoint.startOffsetNanoseconds) {
+            validTimings = false;
+            continue;
+        }
+        checkpointWriteTotal = checkedSum(
+            checkpointWriteTotal,
+            checkpoint.endOffsetNanoseconds - checkpoint.startOffsetNanoseconds,
+            "pilot checkpoint sum overflowed");
+        checkpointValues.append(intervalJson(
+            checkpoint.kind,
+            checkpoint.startOffsetNanoseconds,
+            checkpoint.endOffsetNanoseconds));
+    }
+    validTimings = validTimings
+        && checkpointIntervals.size() == group.entries.size() + 1
+        && checkpointWriteTotal <= batchOnly
+        && sumEntryElapsed + batchOnly == batchElapsed;
+    if (terminalState
+        && terminalState->entries.size() == group.entries.size()) {
+        for (const auto& entry : terminalState->entries) {
+            if (entry.status != cryptobench::application::BatchEntryStatus::Completed
+                || !entry.result
+                || entry.result->status
+                    != cryptobench::core::BenchmarkStatus::Completed) {
+                validTimings = false;
+            }
+        }
+    } else {
+        validTimings = false;
+    }
+
+    const auto completed =     validTimings && callbackError.isEmpty();
+    const QJsonObject resourcePreflight{
+    {"availableDiskBytes", QString::number(availableDiskBytes)},
+    {"availablePhysicalMemoryBytes", QString::number(availableMemoryBytes)},
+    {"maximumObservationSeconds",
+        static_cast<qint64>(kM23PilotMaximumObservationSeconds)},
+    {"minimumAvailableMemoryBytes",
+        QString::number(kM23PilotMinimumAvailableMemoryBytes)},
+    {"minimumFreeDiskBytes", QString::number(kM23PilotMinimumFreeDiskBytes)}};
+    const QJsonObject batchEvidence{
+        {"batchElapsedNanoseconds", QString::number(batchElapsed)},
+        {"batchOnlyIntervals", batchOnlyIntervals},
+        {"batchOnlyNanoseconds", QString::number(batchOnly)},
+        {"checkpointIntervals", checkpointValues},
+        {"entryCount", static_cast<qint64>(group.entries.size())},
+        {"groupId", qString(group.groupId)},
+        {"status", completed ? QStringLiteral("completed")
+                             : QStringLiteral("incomplete")}};
     QJsonObject evidence{
         {"applicationSha256", qString(applicationHash)},
-        {"batchAfterEntryNanoseconds", QString::number(batchAfterEntry)},
-        {"batchBeforeEntryNanoseconds", QString::number(batchBeforeEntry)},
-        {"batchElapsedNanoseconds", QString::number(batchElapsed)},
-        {"batchOnlyResidualNanoseconds", QString::number(batchOnlyResidual)},
-        {"case", caseObject(request)},
-        {"checkpointIntervals", checkpointValues},
+        {"approvalReference", qString(approvedPlan.approvalReference)},
+        {"approvedPlanSha256", qString(approvedPlan.approvalSha256.toStdString())},
+        {"batch", batchEvidence},
+        {"candidatePlanSha256", QString::fromLatin1(m23PilotPlanSha256())},
         {"completedAtUtc",
             QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+        {"entries", entryEvidence},
         {"environment", environmentJson},
         {"environmentSha256", qString(environmentHash)},
-        {"evidenceKind", QStringLiteral("realObservation")},
-        {"entryElapsedNanoseconds",
-            QString::number(entryElapsed)},
-        {"entryEndOffsetNanoseconds",
-            QString::number(entryEndOffset.value_or(0))},
-        {"entryOutsideRunNanoseconds", QString::number(entryOutsideRuns)},
-        {"entryStartOffsetNanoseconds",
-            QString::number(entryStartOffset.value_or(0))},
-        {"format", QStringLiteral("cryptobenchmark-m23-observation-evidence")},
-        {"inventorySha256", QString::fromLatin1(inventoryHash)},
-        {"observationId", qString(observationId)},
-        {"planSha256", QString::fromLatin1(planHash)},
-        {"runObservations", runValues},
+        {"evidenceKind", QStringLiteral("realPilotObservation")},
+        {"format", QStringLiteral("cryptobenchmark-m23-pilot-evidence")},
+        {"groupId", qString(group.groupId)},
+        {"resourcePreflight", resourcePreflight},
         {"schemaVersion", 1},
         {"startedAtUtc", startedAtUtc},
         {"status", completed ? QStringLiteral("completed")
                              : QStringLiteral("incomplete")},
         {"workerSha256", qString(workerHash)}};
-
     if (!callbackError.isEmpty()) {
         evidence.insert("failureDiagnostic", callbackError);
     }
@@ -1398,14 +1675,14 @@ int executeM23Observation(
     if (!completed) {
         manifest.insert("status", QStringLiteral("incomplete"));
         manifest.insert("failureDiagnostic", callbackError.isEmpty()
-            ? QStringLiteral("Batch or worker observation did not complete")
+            ? QStringLiteral("Pilot Batch timed out, failed, or had invalid timing")
             : callbackError);
         writeJsonAtomically(manifestPath, QJsonDocument(manifest));
         throw std::runtime_error(
-            "M23 observation is incomplete; no success marker was written");
+            "M23 pilot evidence is quarantined without a success marker");
     }
 
-    validateM23ObservationEvidence(evidence);
+    static_cast<void>(analyzeM23PilotEvidence({evidence}, false));
     manifest.insert("status", QStringLiteral("completed"));
     manifest.insert("evidenceSha256", qString(fileHash(evidencePath)));
     manifest.insert("batchResultSha256", qString(fileHash(batchResultPath)));
@@ -1415,7 +1692,7 @@ int executeM23Observation(
     writeJsonAtomically(markerPath, QJsonDocument(QJsonObject{
         {"complete", true},
         {"evidenceSha256", qString(fileHash(evidencePath))},
-        {"format", QStringLiteral("cryptobenchmark-m23-observation-success")},
+        {"format", QStringLiteral("cryptobenchmark-m23-pilot-success")},
         {"manifestSha256", qString(fileHash(manifestPath))},
         {"schemaVersion", 1}}));
     return 0;

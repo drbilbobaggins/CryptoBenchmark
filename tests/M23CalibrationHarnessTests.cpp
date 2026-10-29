@@ -1,16 +1,22 @@
 #include "M23CalibrationHarness.h"
+#include "M23PilotAnalyzer.h"
+#include "M23PilotTests.h"
 
 #include <cryptobench/application/RuntimeCalibrationInventory.h>
 #include <cryptobench/core/BenchmarkConfig.h>
 #include <cryptobench/core/ConfigValidator.h>
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
 #include <QStringList>
+
+#include <cryptobench/application/StrictJsonPreflight.h>
 
 #include <charconv>
 #include <algorithm>
@@ -380,113 +386,12 @@ void runSelfTests()
     verifyEvidenceValidation();
     verifyStableObservationIdentity();
     verifyExplicitOptInGuard();
-}
-
-std::uint64_t parseUnsignedArgument(const QString& text, const char* name)
-{
-    const auto bytes = text.toUtf8();
-    const auto parsed = std::string_view(
-        bytes.constData(), static_cast<std::size_t>(bytes.size()));
-    std::uint64_t value = 0;
-    const auto [end, error] = std::from_chars(
-        parsed.data(), parsed.data() + parsed.size(), value);
-    require(!parsed.empty()
-            && !(parsed.size() > 1 && parsed.front() == '0')
-            && error == std::errc{}
-            && end == parsed.data() + parsed.size(),
-        std::string("invalid numeric argument: ") + name);
-    return value;
+    cryptobench::tests::runM23PilotPreparationTests();
 }
 
 bool hasSingleM23GoAcknowledgment(const QStringList& arguments)
 {
     return arguments.count(QStringLiteral("--i-confirm-m23-2-go")) == 1;
-}
-
-const cryptobench::application::RuntimeCalibrationCase& findCase(
-    std::string_view caseId)
-{
-    static const auto inventory = application::enumerateRuntimeCalibrationInventory();
-    const auto found = std::ranges::find_if(
-        inventory.cases,
-        [&](const application::RuntimeCalibrationCase& calibrationCase) {
-            return application::runtimeCalibrationCaseId(calibrationCase) == caseId;
-        });
-    require(found != inventory.cases.end(),
-        "unknown canonical M23 case ID");
-    return *found;
-}
-
-int runOptInObservation(const QStringList& arguments)
-{
-    std::map<QString, QString> values;
-    const auto hasGoAcknowledgment =
-        hasSingleM23GoAcknowledgment(arguments);
-    for (qsizetype index = 1; index < arguments.size();) {
-        const auto key = arguments[index++];
-        if (key == QStringLiteral("--i-confirm-m23-2-go")) {
-            continue;
-        }
-        require(index < arguments.size(),
-            "M23 opt-in argument is missing its value");
-        require(values.emplace(key, arguments[index++]).second,
-            "M23 opt-in argument was supplied more than once");
-    }
-    constexpr std::array requiredFlags{
-        "--case",
-        "--input-bytes",
-        "--iterations",
-        "--runs",
-        "--sampling-ms",
-        "--role",
-        "--repetition",
-        "--order",
-        "--output-dir"
-    };
-    require(values.size() == requiredFlags.size() && hasGoAcknowledgment,
-        "M23 observation requires the explicit M23.2 GO acknowledgment and all fields");
-    for (const auto* flag : requiredFlags) {
-        require(values.contains(QString::fromLatin1(flag)),
-            std::string("M23 opt-in argument is missing: ") + flag);
-    }
-
-    const auto& calibrationCase = findCase(
-        values.at(QStringLiteral("--case")).toStdString());
-    const auto inputArgument = values.at(QStringLiteral("--input-bytes"));
-    std::optional<std::uint64_t> inputBytes;
-    if (inputArgument != QStringLiteral("no-size")) {
-        inputBytes = parseUnsignedArgument(inputArgument, "--input-bytes");
-    }
-    const auto roleText = values.at(QStringLiteral("--role"));
-    require(roleText == QStringLiteral("reference")
-            || roleText == QStringLiteral("holdout"),
-        "M23 observation role must be reference or holdout");
-
-    const auto runs = parseUnsignedArgument(values.at(QStringLiteral("--runs")), "--runs");
-    const auto sampling = parseUnsignedArgument(
-        values.at(QStringLiteral("--sampling-ms")), "--sampling-ms");
-    const auto repetition = parseUnsignedArgument(
-        values.at(QStringLiteral("--repetition")), "--repetition");
-    const auto order = parseUnsignedArgument(
-        values.at(QStringLiteral("--order")), "--order");
-    require(runs <= std::numeric_limits<std::uint32_t>::max()
-            && sampling <= std::numeric_limits<std::uint32_t>::max()
-            && repetition <= std::numeric_limits<std::uint32_t>::max()
-            && order <= std::numeric_limits<std::uint32_t>::max(),
-        "M23 observation coordinate exceeds its supported integer range");
-    const M23ObservationRequest request{
-        calibrationCase,
-        roleText == QStringLiteral("reference")
-            ? M23ObservationRole::Reference
-            : M23ObservationRole::Holdout,
-        inputBytes,
-        parseUnsignedArgument(values.at(QStringLiteral("--iterations")), "--iterations"),
-        static_cast<std::uint32_t>(runs),
-        static_cast<std::uint32_t>(sampling),
-        static_cast<std::uint32_t>(repetition),
-        static_cast<std::uint32_t>(order)};
-    return cryptobench::tests::executeM23Observation(
-        request, values.at(QStringLiteral("--output-dir")));
 }
 
 int writeCandidatePlan(const QString& path)
@@ -503,6 +408,160 @@ int writeCandidatePlan(const QString& path)
         "candidate plan output write was incomplete");
     require(file.commit(), "candidate plan output commit failed");
     return 0;
+}
+
+int writePilotPlan(const QString& path)
+{
+    require(QFileInfo(path).isAbsolute()
+            && !QFileInfo::exists(path),
+        "M23 pilot plan output must be a new absolute file");
+    QSaveFile file(path);
+    require(file.open(QIODevice::WriteOnly),
+        "M23 pilot plan output could not be opened");
+    const auto bytes = cryptobench::tests::m23PilotPlanManifest();
+    require(file.write(bytes) == bytes.size(),
+        "M23 pilot plan write was incomplete");
+    require(file.commit(), "M23 pilot plan atomic commit failed");
+    return 0;
+}
+
+QJsonObject readJsonObject(const QString& path, qsizetype maxBytes)
+{
+    require(QFileInfo(path).isAbsolute(),
+        "M23 input JSON path must be absolute");
+    QFile file(path);
+    require(file.open(QIODevice::ReadOnly),
+        "M23 input JSON file could not be opened");
+    require(file.size() >= 0 && file.size() <= maxBytes,
+        "M23 input JSON exceeds its byte limit");
+    const auto bytes = file.read(maxBytes + 1);
+    require(file.error() == QFileDevice::NoError
+            && bytes.size() == file.size()
+            && bytes.size() <= maxBytes,
+        "M23 input JSON read was incomplete");
+    require(QString::fromUtf8(bytes.constData(), bytes.size()).toUtf8() == bytes,
+        "M23 input JSON is not strict UTF-8");
+    if (const auto issue = cryptobench::application::strictJsonPreflight(bytes)) {
+        throw std::runtime_error(
+            "M23 strict JSON preflight failed: " + issue->technicalMessage);
+    }
+    QJsonParseError error{};
+    const auto document = QJsonDocument::fromJson(bytes, &error);
+    require(error.error == QJsonParseError::NoError && document.isObject(),
+        "M23 input is not a JSON object");
+    return document.object();
+}
+
+int dryRunPilotPlan()
+{
+    const auto report = QJsonDocument::fromJson(
+        cryptobench::tests::m23PilotDryRunReport());
+    std::cout << report.toJson(QJsonDocument::Indented).constData();
+    return 0;
+}
+
+int analyzeSyntheticPilot()
+{
+    const auto report = cryptobench::tests::analyzeM23PilotEvidence(
+        cryptobench::tests::syntheticM23PilotEvidenceForTests(), true);
+    std::cout << QJsonDocument(report).toJson(QJsonDocument::Indented).constData();
+    return 0;
+}
+
+int analyzePilotFiles(const QStringList& arguments)
+{
+    std::vector<QString> evidencePaths;
+    QString reportPath;
+    std::size_t reportOptionCount = 0;
+    for (qsizetype index = 1; index < arguments.size();) {
+        const auto option = arguments[index++];
+        if (option == QStringLiteral("--evidence")) {
+            require(index < arguments.size(),
+                "--evidence requires an absolute JSON file");
+            evidencePaths.push_back(arguments[index++]);
+        } else if (option == QStringLiteral("--report")) {
+            require(index < arguments.size(),
+                "--report requires a new absolute output file");
+            reportPath = arguments[index++];
+            ++reportOptionCount;
+        } else {
+            throw std::runtime_error(
+                "unknown --analyze-pilot option: " + option.toStdString());
+        }
+    }
+    require(!evidencePaths.empty() && reportOptionCount == 1
+            && QFileInfo(reportPath).isAbsolute()
+            && !QFileInfo::exists(reportPath),
+        "--analyze-pilot requires evidence file(s) and a new absolute report path");
+    std::vector<QJsonObject> evidence;
+    evidence.reserve(evidencePaths.size());
+    for (const auto& path : evidencePaths) {
+        evidence.push_back(readJsonObject(path, 64 * 1024 * 1024));
+    }
+    const auto report =
+        cryptobench::tests::analyzeM23PilotEvidence(evidence, false);
+    QSaveFile file(reportPath);
+    require(file.open(QIODevice::WriteOnly),
+        "M23 pilot report could not be opened");
+    const auto bytes = QJsonDocument(report).toJson(QJsonDocument::Indented);
+    require(file.write(bytes) == bytes.size(),
+        "M23 pilot report write was incomplete");
+    require(file.commit(), "M23 pilot report atomic commit failed");
+    return 0;
+}
+
+int observeApprovedPilotBatch(const QStringList& arguments)
+{
+    std::map<QString, QString> values;
+    std::size_t acknowledgmentCount = 0;
+    const auto hasOneGoAcknowledgment =
+        hasSingleM23GoAcknowledgment(arguments);
+    for (qsizetype index = 1; index < arguments.size();) {
+        const auto option = arguments[index++];
+        if (option == QStringLiteral("--i-confirm-m23-2-go")) {
+            ++acknowledgmentCount;
+            continue;
+        }
+        require(index < arguments.size(),
+            "pilot observation option is missing its value");
+        require(values.emplace(option, arguments[index++]).second,
+            "pilot observation option was supplied more than once");
+    }
+    constexpr std::array requiredOptions{
+        "--approved-plan",
+        "--approved-plan-sha256",
+        "--batch-id",
+        "--output-dir"};
+    require(values.size() == requiredOptions.size()
+            && acknowledgmentCount == 1
+            && hasOneGoAcknowledgment,
+        "pilot observation requires an approved plan and exactly one GO acknowledgment");
+    for (const auto* option : requiredOptions) {
+        require(values.contains(QString::fromLatin1(option)),
+            std::string("missing pilot observation option: ") + option);
+    }
+
+    const auto planPath = values.at(QStringLiteral("--approved-plan"));
+    const auto planObject = readJsonObject(planPath, 1 * 1024 * 1024);
+    QFile planFile(planPath);
+    require(planFile.open(QIODevice::ReadOnly),
+        "approved pilot plan could not be reopened for checksum verification");
+    const auto planBytes = planFile.readAll();
+    const auto actualPlanSha =
+        QCryptographicHash::hash(planBytes, QCryptographicHash::Sha256).toHex();
+    require(actualPlanSha == values.at(
+                QStringLiteral("--approved-plan-sha256")).toLatin1(),
+        "approved pilot plan SHA-256 does not match");
+    const auto approval =
+        cryptobench::tests::validateApprovedM23PilotPlan(planObject);
+    require(approval.has_value(),
+        "pilot plan has no valid independent human GO approval");
+    const auto group = cryptobench::tests::m23PilotExecutionGroup(
+        values.at(QStringLiteral("--batch-id")).toStdString());
+    require(group.has_value(),
+        "pilot Batch ID is unknown or deferred pending feasibility review");
+    return cryptobench::tests::executeApprovedM23PilotBatchObservation(
+        *group, *approval, values.at(QStringLiteral("--output-dir")));
 }
 
 } // namespace
@@ -522,16 +581,37 @@ int main(int argc, char* argv[])
             && arguments[1] == QStringLiteral("--write-candidate-plan")) {
             return writeCandidatePlan(arguments[2]);
         }
+        if (arguments.size() == 2
+            && arguments[1] == QStringLiteral("--dry-run-pilot-plan")) {
+            return dryRunPilotPlan();
+        }
+        if (arguments.size() == 3
+            && arguments[1] == QStringLiteral("--write-pilot-plan")) {
+            return writePilotPlan(arguments[2]);
+        }
+        if (arguments.size() == 2
+            && arguments[1] == QStringLiteral("--analyze-synthetic-pilot")) {
+            return analyzeSyntheticPilot();
+        }
+        if (arguments.size() >= 2
+            && arguments[1] == QStringLiteral("--analyze-pilot")) {
+            return analyzePilotFiles(arguments.mid(1));
+        }
+        if (arguments.size() >= 2
+            && arguments[1] == QStringLiteral("--observe-pilot-batch")) {
+            return observeApprovedPilotBatch(arguments.mid(1));
+        }
         if (arguments.size() >= 2
             && arguments[1] == QStringLiteral("--observe-once")) {
-            return runOptInObservation(arguments.mid(1));
+            throw std::runtime_error(
+                "legacy --observe-once is disabled; only an approved M23.2 pilot plan may be observed");
         }
         throw std::runtime_error(
-            "usage: [--write-candidate-plan <absolute-file>] or "
-            "--observe-once --case <case-id> --input-bytes <bytes|no-size> "
-            "--iterations <N> --runs <M> --sampling-ms <1..5> "
-            "--role <reference|holdout> --repetition <n> --order <n> "
-            "--output-dir <new-absolute-directory> --i-confirm-m23-2-go");
+            "usage: --dry-run-pilot-plan | --write-pilot-plan <file> | "
+            "--analyze-synthetic-pilot | --analyze-pilot --evidence <file>... "
+            "--report <new-file> | --observe-pilot-batch --approved-plan <file> "
+            "--approved-plan-sha256 <sha256> --batch-id <id> "
+            "--output-dir <new-directory> --i-confirm-m23-2-go");
     } catch (const std::exception& error) {
         std::cerr << "FAIL M23 calibration harness: " << error.what() << '\n';
         return 1;

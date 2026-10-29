@@ -89,6 +89,12 @@ add_executable(CryptoBenchmarkM23CalibrationTests
 	M23CalibrationHarness.cpp
 	M23CalibrationHarness.h
 	M23CalibrationHarnessTests.cpp
+	M23PilotPlan.cpp
+	M23PilotPlan.h
+	M23PilotAnalyzer.cpp
+	M23PilotAnalyzer.h
+	M23PilotTests.cpp
+	M23PilotTests.h
 )
 
 set_target_properties(CryptoBenchmarkM23CalibrationTests
