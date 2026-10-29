@@ -85,6 +85,60 @@ target_link_libraries(CryptoBenchmarkRuntimeEstimateTests
 
 add_test(NAME CryptoBenchmarkRuntimeEstimateTests COMMAND CryptoBenchmarkRuntimeEstimateTests)
 
+add_executable(CryptoBenchmarkM23CalibrationTests
+	M23CalibrationHarness.cpp
+	M23CalibrationHarness.h
+	M23CalibrationHarnessTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkM23CalibrationTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkM23CalibrationTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+		Qt6::Network
+		OpenSSL::Crypto
+)
+
+add_dependencies(CryptoBenchmarkM23CalibrationTests
+	CryptoBenchmark
+	CryptoBenchmarkWorker
+)
+
+add_test(NAME CryptoBenchmarkM23CalibrationTests
+	COMMAND CryptoBenchmarkM23CalibrationTests
+)
+
+set_tests_properties(CryptoBenchmarkM23CalibrationTests
+	PROPERTIES
+		TIMEOUT 30
+)
+
+add_executable(CryptoBenchmarkM23CalibrationResourceTests
+	M23CalibrationResourceTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkM23CalibrationResourceTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkM23CalibrationResourceTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_dependencies(CryptoBenchmarkM23CalibrationResourceTests CryptoBenchmark)
+
+add_test(NAME CryptoBenchmarkM23CalibrationResourceTests
+	COMMAND CryptoBenchmarkM23CalibrationResourceTests
+)
+
 add_executable(CryptoBenchmarkResultDocumentTests
 	ResultDocumentTests.cpp
 )

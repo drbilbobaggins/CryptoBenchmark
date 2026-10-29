@@ -28,6 +28,38 @@ if(CRYPTOBENCH_BUILD_TYPE STREQUAL "")
     set(CRYPTOBENCH_BUILD_TYPE "Unknown")
 endif()
 
+set(CRYPTOBENCH_RUNTIME_CALIBRATION_SHA256 "")
+set(CRYPTOBENCH_RUNTIME_CALIBRATION_SOURCE
+    "${CMAKE_SOURCE_DIR}/calibration/runtime-calibration-v1.json")
+set(CRYPTOBENCH_RUNTIME_CALIBRATION_DESTINATION
+    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/calibration/runtime-calibration-v1.json")
+get_filename_component(
+    CRYPTOBENCH_RUNTIME_CALIBRATION_DESTINATION_DIR
+    "${CRYPTOBENCH_RUNTIME_CALIBRATION_DESTINATION}"
+    DIRECTORY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CRYPTOBENCH_RUNTIME_CALIBRATION_SOURCE}")
+if(EXISTS "${CRYPTOBENCH_RUNTIME_CALIBRATION_SOURCE}")
+    if(IS_DIRECTORY "${CRYPTOBENCH_RUNTIME_CALIBRATION_SOURCE}")
+        message(FATAL_ERROR "Runtime calibration resource path must be a file")
+    endif()
+    file(SIZE "${CRYPTOBENCH_RUNTIME_CALIBRATION_SOURCE}"
+        CRYPTOBENCH_RUNTIME_CALIBRATION_SIZE)
+    if(CRYPTOBENCH_RUNTIME_CALIBRATION_SIZE GREATER 16777216)
+        message(FATAL_ERROR
+            "Runtime calibration resource exceeds the 16 MiB loader limit")
+    endif()
+    file(SHA256 "${CRYPTOBENCH_RUNTIME_CALIBRATION_SOURCE}"
+        CRYPTOBENCH_RUNTIME_CALIBRATION_SHA256)
+    file(MAKE_DIRECTORY "${CRYPTOBENCH_RUNTIME_CALIBRATION_DESTINATION_DIR}")
+    configure_file(
+        "${CRYPTOBENCH_RUNTIME_CALIBRATION_SOURCE}"
+        "${CRYPTOBENCH_RUNTIME_CALIBRATION_DESTINATION}"
+        COPYONLY)
+else()
+    file(REMOVE "${CRYPTOBENCH_RUNTIME_CALIBRATION_DESTINATION}")
+endif()
+
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/BuildInfo.h.in"
     "${CRYPTOBENCH_BUILD_INFO_INCLUDE_DIR}/cryptobench/application/BuildInfo.h"
@@ -77,6 +109,10 @@ add_library(cryptobench_application STATIC
     AtomicFileWriter.cpp
     include/cryptobench/application/AtomicFileWriter.h
     include/cryptobench/application/RuntimeCalibrationProvider.h
+    RuntimeCalibrationInventory.cpp
+    include/cryptobench/application/RuntimeCalibrationInventory.h
+    RuntimeCalibrationResource.cpp
+    include/cryptobench/application/RuntimeCalibrationResource.h
     RuntimeEstimateService.cpp
     include/cryptobench/application/RuntimeEstimate.h
     include/cryptobench/application/RuntimeEstimateService.h

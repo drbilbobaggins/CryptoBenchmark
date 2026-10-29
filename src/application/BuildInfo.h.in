@@ -8,5 +8,7 @@ inline constexpr std::string_view applicationVersion = "@CRYPTOBENCH_APPLICATION
 inline constexpr std::string_view gitCommit = "@CRYPTOBENCH_GIT_COMMIT@";
 inline constexpr std::string_view opensslVersion = "@CRYPTOBENCH_OPENSSL_VERSION@";
 inline constexpr std::string_view buildType = "@CRYPTOBENCH_BUILD_TYPE@";
+inline constexpr std::string_view runtimeCalibrationResourceSha256 =
+    "@CRYPTOBENCH_RUNTIME_CALIBRATION_SHA256@";
 
 } // namespace cryptobench::application::build_info
