@@ -1,0 +1,425 @@
+{
+  "approvalReferenceAllowlist": [],
+  "candidatePlanSha256": "f38e4d0cdeee79fbfe0f68876d5a6fb15bbcd92bd5a2e7cb8df9b524657a34fc",
+  "canonicalCaseIds": [
+    "rsa-3072-keygen/keyGen/noSignature",
+    "rsa-pss-3072-sha256/sign/prehashed",
+    "rsa-pss-3072-sha256/verify/message",
+    "ed25519/sign/message",
+    "ml-dsa-65/sign/message",
+    "slh-dsa-sha2-128s/sign/message",
+    "x25519/derive/keyEstablishment",
+    "ml-kem-768/decapsulate/keyEstablishment",
+    "aes-256-gcm/encrypt/aead",
+    "aes-256-gcm/decrypt/aead",
+    "sha256/hash/hashXof",
+    "shake256-64bytes/xof/hashXof"
+  ],
+  "format": "cryptobenchmark-m23-pilot-selection",
+  "groups": [
+    {
+      "groupId": "pilot-sha256-hash-hashxof-workloadSize-reference-s4096-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 1,
+      "selector": {
+        "caseId": "sha256/hash/hashXof",
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-x25519-derive-keyestablishment-fixed-n-reference-snone-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 2,
+      "selector": {
+        "caseId": "x25519/derive/keyEstablishment",
+        "inputBytes": null,
+        "iterationsPerRun": "1",
+        "probeKind": "iterationScaling",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-aes-256-gcm-encrypt-aead-workloadSize-reference-s4096-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 3,
+      "selector": {
+        "caseId": "aes-256-gcm/encrypt/aead",
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-aes-256-gcm-decrypt-aead-workloadSize-reference-s4096-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 4,
+      "selector": {
+        "caseId": "aes-256-gcm/decrypt/aead",
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-ed25519-sign-message-workloadSize-reference-s4096-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 5,
+      "selector": {
+        "caseId": "ed25519/sign/message",
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-ml-kem-768-decapsulate-keyestablishment-fixed-n-reference-snone-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 6,
+      "selector": {
+        "caseId": "ml-kem-768/decapsulate/keyEstablishment",
+        "inputBytes": null,
+        "iterationsPerRun": "1",
+        "probeKind": "iterationScaling",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-rsa-pss-3072-sha256-sign-prehashed-fixed-n-reference-snone-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 7,
+      "selector": {
+        "caseId": "rsa-pss-3072-sha256/sign/prehashed",
+        "inputBytes": null,
+        "iterationsPerRun": "1",
+        "probeKind": "iterationScaling",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-rsa-pss-3072-sha256-verify-message-workloadSize-reference-s4096-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 8,
+      "selector": {
+        "caseId": "rsa-pss-3072-sha256/verify/message",
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-ml-dsa-65-sign-message-workloadSize-reference-s4096-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 9,
+      "selector": {
+        "caseId": "ml-dsa-65/sign/message",
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-shake256-64bytes-xof-hashxof-workloadSize-reference-s4096-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 10,
+      "selector": {
+        "caseId": "shake256-64bytes/xof/hashXof",
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-rsa-3072-keygen-keygen-nosignature-fixed-n-reference-snone-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 11,
+      "selector": {
+        "caseId": "rsa-3072-keygen/keyGen/noSignature",
+        "inputBytes": null,
+        "iterationsPerRun": "1",
+        "probeKind": "iterationScaling",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-slh-dsa-sha2-128s-sign-message-workloadSize-reference-s1-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 12,
+      "selector": {
+        "caseId": "slh-dsa-sha2-128s/sign/message",
+        "inputBytes": "1",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-sha256-hash-hashxof-workloadSize-reference-s0-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 13,
+      "selector": {
+        "caseId": "sha256/hash/hashXof",
+        "inputBytes": "0",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-sha256-hash-hashxof-workloadSize-reference-s1048576-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 14,
+      "selector": {
+        "caseId": "sha256/hash/hashXof",
+        "inputBytes": "1048576",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-sha256-hash-hashxof-workloadSize-holdout-s65536-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 15,
+      "selector": {
+        "caseId": "sha256/hash/hashXof",
+        "inputBytes": "65536",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "holdout",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-aes-256-gcm-encrypt-aead-workloadSize-reference-s1-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 16,
+      "selector": {
+        "caseId": "aes-256-gcm/encrypt/aead",
+        "inputBytes": "1",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-aes-256-gcm-encrypt-aead-workloadSize-reference-s1048576-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 17,
+      "selector": {
+        "caseId": "aes-256-gcm/encrypt/aead",
+        "inputBytes": "1048576",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "reference",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-aes-256-gcm-encrypt-aead-workloadSize-holdout-s65536-n1-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 18,
+      "selector": {
+        "caseId": "aes-256-gcm/encrypt/aead",
+        "inputBytes": "65536",
+        "iterationsPerRun": "1",
+        "probeKind": "workloadSize",
+        "repetition": 1,
+        "role": "holdout",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-x25519-derive-keyestablishment-runCountSensitivity-sensitivity-snone-n1-m3-t5-r1",
+      "logicalWorkerRuns": 3,
+      "ordinal": 19,
+      "selector": {
+        "caseId": "x25519/derive/keyEstablishment",
+        "inputBytes": null,
+        "iterationsPerRun": "1",
+        "probeKind": "runCountSensitivity",
+        "repetition": 1,
+        "role": "sensitivity",
+        "runs": 3,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "batch-e1-sha256",
+      "logicalWorkerRuns": 1,
+      "ordinal": 20,
+      "selector": {
+        "batchId": "batch-e1-sha256",
+        "caseId": "sha256/hash/hashXof",
+        "entries": 1,
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "batchEntryCount",
+        "repetition": 1,
+        "role": "batchShape",
+        "runsPerEntry": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "batch"
+    },
+    {
+      "groupId": "batch-e3-sha256",
+      "logicalWorkerRuns": 3,
+      "ordinal": 21,
+      "selector": {
+        "batchId": "batch-e3-sha256",
+        "caseId": "sha256/hash/hashXof",
+        "entries": 3,
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "batchEntryCount",
+        "repetition": 1,
+        "role": "batchShape",
+        "runsPerEntry": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "batch"
+    },
+    {
+      "groupId": "pilot-sha256-hash-hashxof-samplingSensitivity-sensitivity-s4096-n1-m1-t1-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 22,
+      "selector": {
+        "caseId": "sha256/hash/hashXof",
+        "inputBytes": "4096",
+        "iterationsPerRun": "1",
+        "probeKind": "samplingSensitivity",
+        "repetition": 1,
+        "role": "sensitivity",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 1,
+        "status": "candidate"
+      },
+      "type": "row"
+    },
+    {
+      "groupId": "pilot-ed25519-sign-message-iterationScaling-holdout-s4096-n10-m1-t5-r1",
+      "logicalWorkerRuns": 1,
+      "ordinal": 23,
+      "selector": {
+        "caseId": "ed25519/sign/message",
+        "inputBytes": "4096",
+        "iterationsPerRun": "10",
+        "probeKind": "iterationScaling",
+        "repetition": 1,
+        "role": "holdout",
+        "runs": 1,
+        "samplingIntervalMilliseconds": 5,
+        "status": "candidate"
+      },
+      "type": "row"
+    }
+  ],
+  "logicalWorkerRunCount": 27,
+  "measurementAuthorized": false,
+  "planVersion": "m23.2-prep-v1",
+  "proposedGroupCount": 23,
+  "reservedContingencyLogicalRuns": 3,
+  "status": "PROPOSED_NOT_APPROVED",
+  "totalBudgetSeconds": 14400,
+  "maximumChildSeconds": 900,
+  "schemaVersion": 1
+}

@@ -1,5 +1,8 @@
 # M23.2-PREP: pilot plan, safe observation path, and offline analysis
 
+For the separately reviewed M23.2-EXEC selection and operator-session safety
+package, see [M23PilotExecutionGuide.md](./M23PilotExecutionGuide.md).
+
 ## Status and authorization
 
 This is preparation only. The generated plan has
