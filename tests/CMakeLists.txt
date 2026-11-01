@@ -145,6 +145,21 @@ add_test(NAME CryptoBenchmarkM23CalibrationResourceTests
 	COMMAND CryptoBenchmarkM23CalibrationResourceTests
 )
 
+add_executable(CryptoBenchmarkM23PragmaticDatasetTests
+	M23PragmaticDatasetTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkM23PragmaticDatasetTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkM23PragmaticDatasetTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
 add_executable(CryptoBenchmarkResultDocumentTests
 	ResultDocumentTests.cpp
 )
