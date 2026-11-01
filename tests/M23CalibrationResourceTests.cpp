@@ -1,6 +1,8 @@
 #include <cryptobench/application/RuntimeCalibrationInventory.h>
 #include <cryptobench/application/RuntimeCalibrationResource.h>
 #include <cryptobench/application/BuildInfo.h>
+#include <cryptobench/application/BenchmarkConfigJson.h>
+#include <cryptobench/core/ConfigValidator.h>
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -12,6 +14,7 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
@@ -22,6 +25,7 @@
 namespace {
 
 namespace application = cryptobench::application;
+namespace core = cryptobench::core;
 using application::RuntimeCalibrationResourceStatus;
 
 constexpr auto kProtocolId = "memory-v2-calibration-v1";
@@ -118,6 +122,145 @@ QJsonObject validResource()
         {"sourceGitCommit", QString(40, QLatin1Char('0'))}};
 }
 
+QJsonObject pragmaticRecord(
+    const application::RuntimeCalibrationCase& calibrationCase)
+{
+    const auto inputKind = application::toStableString(calibrationCase.inputKind);
+    const auto variableSize = calibrationCase.hasVariableInputSize;
+    const auto minimumInputBytes =
+        calibrationCase.inputKind == application::RuntimeCalibrationInputKind::HashXof
+        ? std::uint64_t{0}
+        : std::uint64_t{1};
+    QJsonObject model;
+    if (variableSize) {
+        model = {
+            {"anchorInputBytes", QString::number(minimumInputBytes)},
+            {"anchorPicosecondsPerOperation", QStringLiteral("1200")},
+            {"kind", QStringLiteral("anchoredAffinePerOperation")},
+            {"slopePicosecondsPerBytePerOperation", QStringLiteral("2")}};
+    } else {
+        model = {
+            {"kind", QStringLiteral("constantPerOperation")},
+            {"picosecondsPerOperation", QStringLiteral("1200")}};
+    }
+    const auto operation = application::toStableOperationString(
+        calibrationCase.operation);
+    const auto profileId = core::toStableProfileId(calibrationCase.profileId);
+    QJsonObject record{
+        {"evidenceSubsetSha256", QLatin1String(kZeroHash)},
+        {"inputKind", QString::fromUtf8(
+            inputKind.data(), static_cast<qsizetype>(inputKind.size()))},
+        {"measuredModel", model},
+        {"modelQualificationStatus", variableSize
+            ? QStringLiteral("perOperationReferenceFitSizeHoldoutOnly")
+            : QStringLiteral("perOperationReferenceFitOnly")},
+        {"operation", QString::fromUtf8(
+            operation.data(), static_cast<qsizetype>(operation.size()))},
+        {"profileId", QString::fromUtf8(
+            profileId.data(), static_cast<qsizetype>(profileId.size()))},
+        {"samplingIntervalMilliseconds", 5},
+        {"holdoutSubsetSha256", QLatin1String(kZeroHash)}};
+    if (variableSize) {
+        record.insert("validInputBytesMin", QString::number(minimumInputBytes));
+        record.insert(
+            "validInputBytesMax",
+            QString::number(core::kMaxWorkloadBytes));
+    }
+    return record;
+}
+
+QJsonObject validPragmaticResource()
+{
+    auto resource = validResource();
+    const auto inventory = application::enumerateRuntimeCalibrationInventory();
+    QJsonArray records;
+    for (const auto& calibrationCase : inventory.cases) {
+        records.append(pragmaticRecord(calibrationCase));
+    }
+    const QJsonObject missingReasons{
+        {"referenceWorkerSha256", QStringLiteral("notRecordedInCampaignEvidence")},
+        {"referenceAppSha256", QStringLiteral("notRecordedInCampaignEvidence")},
+        {"qtVersion", QStringLiteral("notRecordedInCampaignEvidence")},
+        {"compilerId", QStringLiteral("notRecordedInCampaignEvidence")},
+        {"referenceCpu", QStringLiteral("notRecordedInCampaignEvidence")},
+        {"referenceRamBytes", QStringLiteral("notRecordedInCampaignEvidence")},
+        {"powerPlan", QStringLiteral("notRecordedInCampaignEvidence")}};
+    const QJsonObject approximationPolicy{
+        {"warmupOperationsPerLogicalRun", 1},
+        {"fixedEntryOverhead", QJsonObject{
+            {"nanoseconds", QStringLiteral("0")},
+            {"status", QStringLiteral("assumedUnmeasured")}}},
+        {"batchOverhead", QJsonObject{
+            {"nanoseconds", QStringLiteral("0")},
+            {"status", QStringLiteral("assumedUnmeasured")}}},
+        {"samplingIntervalAssumptions", QJsonArray{
+            QJsonObject{
+                {"requestedIntervalMilliseconds", 1},
+                {"sourceMeasuredIntervalMilliseconds", 5},
+                {"status", QStringLiteral("assumedFrom5ms")}},
+            QJsonObject{
+                {"requestedIntervalMilliseconds", 2},
+                {"sourceMeasuredIntervalMilliseconds", 5},
+                {"status", QStringLiteral("assumedFrom5ms")}},
+            QJsonObject{
+                {"requestedIntervalMilliseconds", 3},
+                {"sourceMeasuredIntervalMilliseconds", 5},
+                {"status", QStringLiteral("assumedFrom5ms")}},
+            QJsonObject{
+                {"requestedIntervalMilliseconds", 4},
+                {"sourceMeasuredIntervalMilliseconds", 5},
+                {"status", QStringLiteral("assumedFrom5ms")}}}}};
+    resource.insert("modelSchemaVersion", QStringLiteral("m23-pragmatic-1"));
+    resource.insert("qualificationStatus", QStringLiteral("reducedScopeApproximate"));
+    resource.insert(
+        "qualificationSummary",
+        QStringLiteral(
+            "Per-operation size holdouts only; no end-to-end Batch qualification"));
+    resource.insert("referenceWorkerSha256", QJsonValue(QJsonValue::Null));
+    resource.insert("referenceAppSha256", QJsonValue(QJsonValue::Null));
+    resource.insert("qtVersion", QJsonValue(QJsonValue::Null));
+    resource.insert("compilerId", QJsonValue(QJsonValue::Null));
+    resource.insert("referenceCpu", QJsonValue(QJsonValue::Null));
+    resource.insert("referenceRamBytes", QJsonValue(QJsonValue::Null));
+    resource.insert("powerPlan", QJsonValue(QJsonValue::Null));
+    resource.insert("provenanceMissingReasons", missingReasons);
+    resource.insert("sourceEvidenceSha256", QJsonObject{
+        {"nightResultSha256", QLatin1String(kZeroHash)},
+        {"supplementalResultSha256", QLatin1String(kZeroHash)},
+        {"splitManifestSha256", QLatin1String(kZeroHash)}});
+    resource.insert("approximationPolicy", approximationPolicy);
+    resource.insert("records", records);
+    return resource;
+}
+
+qsizetype findPragmaticRecord(
+    const QJsonArray& records,
+    const QString& inputKind)
+{
+    for (qsizetype index = 0; index < records.size(); ++index) {
+        if (records[index].toObject().value(QStringLiteral("inputKind")).toString()
+            == inputKind) {
+            return index;
+        }
+    }
+    throw std::runtime_error("pragmatic synthetic fixture is missing an input kind");
+}
+
+template <typename Mutator>
+QJsonObject mutatePragmaticRecord(
+    QJsonObject resource,
+    const QString& inputKind,
+    Mutator mutate)
+{
+    auto records = resource.value(QStringLiteral("records")).toArray();
+    const auto index = findPragmaticRecord(records, inputKind);
+    auto record = records[index].toObject();
+    mutate(record);
+    records[index] = record;
+    resource.insert("records", records);
+    return resource;
+}
+
 void writeFile(const QString& path, const QByteArray& bytes)
 {
     QFile file(path);
@@ -167,7 +310,16 @@ void verifyValidAndUnavailableSemantics(QTemporaryDir& directory)
         path, digest(bytes).toStdString(), expectedEnvironment());
     require(loaded.resource.has_value()
             && loaded.resource->qualificationStatus == "unqualified"
-            && loaded.resource->records.size() == 1,
+            && loaded.resource->dialect
+                == application::RuntimeCalibrationResourceDialect::M23_1Provisional
+            && loaded.resource->records.size() == 1
+            && loaded.resource->records[0].modelKind
+                == application::RuntimeCalibrationMeasuredModelKind::ExactReference
+            && !loaded.resource->records[0].pragmaticModel
+            && loaded.resource->records[0].evidenceStatus
+                == application::RuntimeCalibrationRecordEvidenceStatus::Unqualified
+            && loaded.diagnostic
+                == "resource integrity and provisional schema validation passed",
         "M23 resource did not preserve its explicitly unqualified status");
 
     const auto missingPath = QDir(directory.path()).filePath(QStringLiteral("missing.json"));
@@ -197,6 +349,404 @@ void verifyValidAndUnavailableSemantics(QTemporaryDir& directory)
         "valid resource for a different registry was not inapplicable");
 }
 
+void verifyPragmaticValidAndHashSemantics(QTemporaryDir& directory)
+{
+    const auto bytes = serialize(validPragmaticResource());
+    const auto path = QDir(directory.path()).filePath(
+        QStringLiteral("pragmatic-valid.json"));
+    require(loadBytes(path, bytes) == RuntimeCalibrationResourceStatus::Loaded,
+        "valid pragmatic resource did not load");
+    const auto loaded = application::loadRuntimeCalibrationResource(
+        path, digest(bytes).toStdString(), expectedEnvironment());
+    require(loaded.resource.has_value()
+            && loaded.resource->dialect
+                == application::RuntimeCalibrationResourceDialect::M23Pragmatic
+            && loaded.resource->qualificationStatus == "reducedScopeApproximate"
+            && loaded.resource->records.size() == 175
+            && loaded.resource->approximationPolicy.has_value()
+            && loaded.resource->pragmaticProvenance.has_value()
+            && loaded.diagnostic
+                == "resource integrity and pragmatic schema validation passed",
+        "pragmatic resource did not preserve its dialect, policy, and inventory");
+    const auto constants = std::ranges::count_if(
+        loaded.resource->records,
+        [](const auto& record) {
+            return record.modelKind
+                == application::RuntimeCalibrationMeasuredModelKind::ConstantPerOperation;
+        });
+    const auto affine = std::ranges::count_if(
+        loaded.resource->records,
+        [](const auto& record) {
+            return record.modelKind
+                == application::RuntimeCalibrationMeasuredModelKind::AnchoredAffinePerOperation;
+        });
+    require(constants == 78 && affine == 97,
+        "pragmatic resource model counts are not 78 constant / 97 anchored affine");
+    require(loaded.resource->pragmaticProvenance->missingFields.size() == 7
+            && !loaded.resource->pragmaticProvenance->referenceWorkerSha256
+            && !loaded.resource->pragmaticProvenance->referenceRamBytes,
+        "pragmatic missing historical provenance was not preserved as typed absence");
+    const auto& policy = *loaded.resource->approximationPolicy;
+    require(policy.warmupOperationsPerLogicalRun == 1
+            && policy.fixedEntryOverhead.nanoseconds == 0
+            && policy.batchOverhead.nanoseconds == 0
+            && policy.fixedEntryOverhead.tag
+                == application::RuntimeCalibrationAssumptionTag::AssumedUnmeasured
+            && policy.batchOverhead.tag
+                == application::RuntimeCalibrationAssumptionTag::AssumedUnmeasured
+            && policy.samplingAssumptions.size() == 4
+            && policy.samplingAssumptions.front().requestedIntervalMilliseconds == 1
+            && policy.samplingAssumptions.back().requestedIntervalMilliseconds == 4
+            && policy.samplingAssumptions.front().sourceMeasuredIntervalMilliseconds == 5
+            && policy.samplingAssumptions.front().tag
+                == application::RuntimeCalibrationAssumptionTag::AssumedFrom5ms,
+        "pragmatic policy did not preserve the explicit approximation assumptions");
+
+    const auto firstVariable = std::ranges::find_if(
+        loaded.resource->records,
+        [](const auto& record) { return record.calibrationCase.hasVariableInputSize; });
+    require(firstVariable != loaded.resource->records.end()
+            && firstVariable->pragmaticModel.has_value()
+            && std::holds_alternative<
+                application::RuntimeCalibrationAnchoredAffinePerOperationModel>(
+                    *firstVariable->pragmaticModel),
+        "pragmatic typed anchored-affine model was not retained");
+    const auto firstFixed = std::ranges::find_if(
+        loaded.resource->records,
+        [](const auto& record) { return !record.calibrationCase.hasVariableInputSize; });
+    require(firstFixed != loaded.resource->records.end()
+            && firstFixed->pragmaticModel.has_value()
+            && std::holds_alternative<
+                application::RuntimeCalibrationConstantPerOperationModel>(
+                    *firstFixed->pragmaticModel),
+        "pragmatic typed constant model was not retained");
+    require(firstFixed->evidenceStatus
+                == application::RuntimeCalibrationRecordEvidenceStatus::PerOperationReferenceFitOnly
+            && firstVariable->evidenceStatus
+                == application::RuntimeCalibrationRecordEvidenceStatus::PerOperationReferenceFitSizeHoldoutOnly,
+        "pragmatic evidence status did not distinguish fixed and size-holdout records");
+    require(loaded.resource->pragmaticProvenance->sourceEvidenceSha256.splitManifest
+                == loaded.resource->pragmaticProvenance->rawEvidenceManifestSha256,
+        "pragmatic split-manifest hash was not retained consistently");
+    require(firstVariable->samplingIntervalMilliseconds == 5
+            && firstFixed->samplingIntervalMilliseconds == 5,
+        "assumed 1-4 ms intervals were incorrectly represented as measured records");
+    const auto zeroByteHash = std::ranges::find_if(
+        loaded.resource->records,
+        [](const auto& record) {
+            return record.calibrationCase.inputKind
+                == application::RuntimeCalibrationInputKind::HashXof;
+        });
+    require(zeroByteHash != loaded.resource->records.end()
+            && zeroByteHash->minimumInputBytes == std::optional<std::uint64_t>{0}
+            && zeroByteHash->pragmaticModel.has_value()
+            && std::get<
+                application::RuntimeCalibrationAnchoredAffinePerOperationModel>(
+                    *zeroByteHash->pragmaticModel).anchorInputBytes == 0,
+        "pragmatic Hash/XOF records did not preserve the legal zero-byte anchor");
+
+    require(application::loadRuntimeCalibrationResource(
+                path, kZeroHash, expectedEnvironment()).status
+            == RuntimeCalibrationResourceStatus::Corrupt,
+        "wrong compiled expected resource SHA was accepted for pragmatic dialect");
+    auto otherEnvironment = expectedEnvironment();
+    otherEnvironment.opensslVersion = "other-openssl";
+    require(application::loadRuntimeCalibrationResource(
+                path, digest(bytes).toStdString(), otherEnvironment).status
+            == RuntimeCalibrationResourceStatus::Inapplicable,
+        "pragmatic resource with mismatched runtime context was not inapplicable");
+}
+
+void verifyPragmaticProvenanceRejections(QTemporaryDir& directory)
+{
+    auto value = validPragmaticResource();
+    auto missingReasons = value.value(
+        QStringLiteral("provenanceMissingReasons")).toObject();
+    missingReasons.remove(QStringLiteral("referenceCpu"));
+    value.insert("provenanceMissingReasons", missingReasons);
+    expectCorrupt(directory, "pragmatic-null-without-reason.json", serialize(value));
+
+    value = validPragmaticResource();
+    value.insert("referenceCpu", QStringLiteral("synthetic current CPU"));
+    expectCorrupt(directory, "pragmatic-present-with-missing-reason.json", serialize(value));
+
+    value = validPragmaticResource();
+    missingReasons = value.value(
+        QStringLiteral("provenanceMissingReasons")).toObject();
+    missingReasons.insert(
+        "referenceCpu", QStringLiteral("unknownReason"));
+    value.insert("provenanceMissingReasons", missingReasons);
+    expectCorrupt(directory, "pragmatic-unknown-null-reason.json", serialize(value));
+
+    value = validPragmaticResource();
+    missingReasons = value.value(
+        QStringLiteral("provenanceMissingReasons")).toObject();
+    missingReasons.insert(
+        "sourceGitCommit", QStringLiteral("notRecordedInCampaignEvidence"));
+    value.insert("provenanceMissingReasons", missingReasons);
+    expectCorrupt(directory, "pragmatic-spurious-null-reason.json", serialize(value));
+
+    value = validPragmaticResource();
+    value.insert("sourceGitCommit", QJsonValue(QJsonValue::Null));
+    missingReasons = value.value(
+        QStringLiteral("provenanceMissingReasons")).toObject();
+    missingReasons.insert(
+        "sourceGitCommit", QStringLiteral("notRecordedInCampaignEvidence"));
+    value.insert("provenanceMissingReasons", missingReasons);
+    expectCorrupt(directory, "pragmatic-known-provenance-null.json", serialize(value));
+
+    value = validPragmaticResource();
+    value.insert("referenceRamBytes", QStringLiteral("0"));
+    missingReasons = value.value(
+        QStringLiteral("provenanceMissingReasons")).toObject();
+    missingReasons.remove(QStringLiteral("referenceRamBytes"));
+    value.insert("provenanceMissingReasons", missingReasons);
+    expectCorrupt(directory, "pragmatic-zero-recorded-ram.json", serialize(value));
+
+    value = validPragmaticResource();
+    auto sourceHashes = value.value(
+        QStringLiteral("sourceEvidenceSha256")).toObject();
+    sourceHashes.insert("nightResultSha256", QStringLiteral("bad-hash"));
+    value.insert("sourceEvidenceSha256", sourceHashes);
+    expectCorrupt(directory, "pragmatic-source-hash-malformed.json", serialize(value));
+
+    value = validPragmaticResource();
+    value.insert("rawEvidenceManifestSha256", QString(64, QLatin1Char('a')));
+    expectCorrupt(directory, "pragmatic-manifest-hash-conflict.json", serialize(value));
+}
+
+void verifyPragmaticModelAndIdentityRejections(QTemporaryDir& directory)
+{
+    auto value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("message"),
+        [](QJsonObject& record) {
+            record.insert("validInputBytesMin", QStringLiteral("0"));
+            auto model = record.value(QStringLiteral("measuredModel")).toObject();
+            model.insert("anchorInputBytes", QStringLiteral("0"));
+            record.insert("measuredModel", model);
+        });
+    expectCorrupt(directory, "pragmatic-message-zero-minimum.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("aead"),
+        [](QJsonObject& record) {
+            record.insert("validInputBytesMin", QStringLiteral("0"));
+            auto model = record.value(QStringLiteral("measuredModel")).toObject();
+            model.insert("anchorInputBytes", QStringLiteral("0"));
+            record.insert("measuredModel", model);
+        });
+    expectCorrupt(directory, "pragmatic-aead-zero-minimum.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("hashXof"),
+        [](QJsonObject& record) {
+            auto model = record.value(QStringLiteral("measuredModel")).toObject();
+            model.insert("anchorInputBytes", QStringLiteral("1"));
+            record.insert("measuredModel", model);
+        });
+    expectCorrupt(directory, "pragmatic-anchor-mismatch.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("aead"),
+        [](QJsonObject& record) {
+            record.insert("validInputBytesMax", QStringLiteral("268435457"));
+        });
+    expectCorrupt(directory, "pragmatic-size-out-of-range.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("message"),
+        [](QJsonObject& record) {
+            auto model = record.value(QStringLiteral("measuredModel")).toObject();
+            model.insert("slopePicosecondsPerBytePerOperation",
+                QStringLiteral("18446744073709551615"));
+            record.insert("measuredModel", model);
+        });
+    expectCorrupt(directory, "pragmatic-size-prediction-overflow.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("hashXof"),
+        [](QJsonObject& record) {
+            auto model = record.value(QStringLiteral("measuredModel")).toObject();
+            model.insert("anchorPicosecondsPerOperation",
+                QStringLiteral("18446744073709551615"));
+            model.insert("slopePicosecondsPerBytePerOperation", QStringLiteral("1"));
+            record.insert("measuredModel", model);
+        });
+    expectCorrupt(directory, "pragmatic-anchor-prediction-overflow.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("message"),
+        [](QJsonObject& record) {
+            auto model = record.value(QStringLiteral("measuredModel")).toObject();
+            model.insert("anchorPicosecondsPerOperation", QStringLiteral("01"));
+            record.insert("measuredModel", model);
+        });
+    expectCorrupt(directory, "pragmatic-noncanonical-coefficient.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("message"),
+        [](QJsonObject& record) {
+            auto model = record.value(QStringLiteral("measuredModel")).toObject();
+            model.insert("anchorPicosecondsPerOperation",
+                QStringLiteral("18446744073709551616"));
+            record.insert("measuredModel", model);
+        });
+    expectCorrupt(directory, "pragmatic-coefficient-overflow.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("noSignature"),
+        [](QJsonObject& record) {
+            record.insert("profileId", QStringLiteral("unknown-profile"));
+        });
+    expectCorrupt(directory, "pragmatic-unknown-profile.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("noSignature"),
+        [](QJsonObject& record) {
+            record.insert("operation", QStringLiteral("unknown-operation"));
+        });
+    expectCorrupt(directory, "pragmatic-unknown-operation.json", serialize(value));
+
+    value = validPragmaticResource();
+    auto records = value.value(QStringLiteral("records")).toArray();
+    records.replace(0, records[1]);
+    value.insert("records", records);
+    expectCorrupt(directory, "pragmatic-duplicate-record.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("message"),
+        [](QJsonObject& record) {
+            record.insert("modelQualificationStatus", QStringLiteral("qualified"));
+        });
+    expectCorrupt(directory, "pragmatic-overqualified-record.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("message"),
+        [](QJsonObject& record) {
+            record.insert("samplingIntervalMilliseconds", 4);
+        });
+    expectCorrupt(directory, "pragmatic-unmeasured-record-context.json", serialize(value));
+}
+
+void verifyPragmaticPolicyAndDialectRejections(QTemporaryDir& directory)
+{
+    auto value = validPragmaticResource();
+    auto policy = value.value(QStringLiteral("approximationPolicy")).toObject();
+    auto assumptions = policy.value(
+        QStringLiteral("samplingIntervalAssumptions")).toArray();
+    auto assumption = assumptions[0].toObject();
+    assumption.insert("status", QStringLiteral("qualified"));
+    assumptions[0] = assumption;
+    policy.insert("samplingIntervalAssumptions", assumptions);
+    value.insert("approximationPolicy", policy);
+    expectCorrupt(directory, "pragmatic-sampling-assumption-tag.json", serialize(value));
+
+    value = validPragmaticResource();
+    policy = value.value(QStringLiteral("approximationPolicy")).toObject();
+    assumptions = policy.value(
+        QStringLiteral("samplingIntervalAssumptions")).toArray();
+    assumptions.removeAt(3);
+    policy.insert("samplingIntervalAssumptions", assumptions);
+    value.insert("approximationPolicy", policy);
+    expectCorrupt(directory, "pragmatic-sampling-assumption-missing.json", serialize(value));
+
+    value = validPragmaticResource();
+    policy = value.value(QStringLiteral("approximationPolicy")).toObject();
+    auto overhead = policy.value(QStringLiteral("batchOverhead")).toObject();
+    overhead.insert("status", QStringLiteral("measuredZero"));
+    policy.insert("batchOverhead", overhead);
+    value.insert("approximationPolicy", policy);
+    expectCorrupt(directory, "pragmatic-batch-overhead-not-assumed.json", serialize(value));
+
+    value = validPragmaticResource();
+    policy = value.value(QStringLiteral("approximationPolicy")).toObject();
+    overhead = policy.value(QStringLiteral("fixedEntryOverhead")).toObject();
+    overhead.insert("nanoseconds", QStringLiteral("1"));
+    policy.insert("fixedEntryOverhead", overhead);
+    value.insert("approximationPolicy", policy);
+    expectCorrupt(directory, "pragmatic-nonzero-fixed-overhead.json", serialize(value));
+
+    value = validPragmaticResource();
+    auto contexts = value.value(QStringLiteral("qualifiedRuntimeContexts")).toArray();
+    auto context = contexts[0].toObject();
+    context.insert("samplingIntervalMilliseconds", 4);
+    contexts[0] = context;
+    value.insert("qualifiedRuntimeContexts", contexts);
+    expectCorrupt(directory, "pragmatic-assumption-as-measured-context.json", serialize(value));
+
+    value = validPragmaticResource();
+    contexts = value.value(QStringLiteral("qualifiedRuntimeContexts")).toArray();
+    contexts.append(contexts[0]);
+    value.insert("qualifiedRuntimeContexts", contexts);
+    expectCorrupt(directory, "pragmatic-duplicate-measured-context.json", serialize(value));
+
+    value = validPragmaticResource();
+    value.insert("qualificationStatus", QStringLiteral("unqualified"));
+    expectCorrupt(directory, "pragmatic-legacy-status-mix.json", serialize(value));
+
+    value = validPragmaticResource();
+    value.insert("batchOverheadModels", QJsonArray{QJsonObject{
+        {"kind", QStringLiteral("constantNs")},
+        {"nanoseconds", QStringLiteral("0")}}});
+    expectCorrupt(directory, "pragmatic-batch-model-not-empty.json", serialize(value));
+
+    value = validPragmaticResource();
+    contexts = value.value(QStringLiteral("qualifiedRuntimeContexts")).toArray();
+    context = contexts[0].toObject();
+    context.insert("buildType", QStringLiteral("Debug"));
+    contexts[0] = context;
+    value.insert("qualifiedRuntimeContexts", contexts);
+    expectCorrupt(directory, "pragmatic-context-environment-conflict.json", serialize(value));
+
+    value = mutatePragmaticRecord(
+        validPragmaticResource(),
+        QStringLiteral("message"),
+        [](QJsonObject& record) {
+            record.insert("measuredModel", QJsonObject{
+                {"kind", QStringLiteral("exactReference")},
+                {"referenceInputBytes", QStringLiteral("1")},
+                {"referenceMeasuredBlockNanoseconds", QStringLiteral("123")},
+                {"referenceN", QStringLiteral("1")}});
+        });
+    expectCorrupt(directory, "pragmatic-legacy-model-mix.json", serialize(value));
+
+    value = validPragmaticResource();
+    value.insert("schemaVersion", 2);
+    expectCorrupt(directory, "pragmatic-schema-version.json", serialize(value));
+
+    value = validPragmaticResource();
+    value.insert("modelSchemaVersion", QStringLiteral("m23-pragmatic-2"));
+    expectCorrupt(directory, "pragmatic-model-schema-version.json", serialize(value));
+
+    value = validPragmaticResource();
+    value.insert("unexpectedPragmaticField", true);
+    expectCorrupt(directory, "pragmatic-unknown-root-field.json", serialize(value));
+
+    auto bytes = serialize(validPragmaticResource());
+    const auto qualificationField = QByteArrayLiteral(
+        "\"qualificationStatus\":\"reducedScopeApproximate\"");
+    require(bytes.contains(qualificationField),
+        "synthetic pragmatic JSON was missing its qualification marker");
+    bytes.replace(
+        qualificationField,
+        QByteArrayLiteral(
+            "\"qualificationStatus\":\"reducedScopeApproximate\","
+            "\"qualificationStatus\":\"reducedScopeApproximate\""));
+    expectCorrupt(directory, "pragmatic-duplicate-member.json", bytes);
+}
+
 void verifySchemaRejections(QTemporaryDir& directory)
 {
     auto value = validResource();
@@ -213,6 +763,10 @@ void verifySchemaRejections(QTemporaryDir& directory)
     value = validResource();
     value.insert("modelSchemaVersion", QStringLiteral("future-model"));
     expectCorrupt(directory, "model-schema.json", serialize(value));
+
+    value = validResource();
+    value.insert("modelSchemaVersion", QStringLiteral("m23-pragmatic-1"));
+    expectCorrupt(directory, "legacy-root-with-pragmatic-dialect.json", serialize(value));
 
     value = validResource();
     value.insert("unexpected", true);
@@ -332,6 +886,16 @@ void verifyIntegerAndModelRejections(QTemporaryDir& directory)
     expectCorrupt(directory, "unknown-measured-model.json", serialize(value));
 
     value = validResource();
+    records = value.value(QStringLiteral("records")).toArray();
+    record = records[0].toObject();
+    model = record.value(QStringLiteral("measuredModel")).toObject();
+    model.insert("kind", QStringLiteral("constantPerOperation"));
+    record.insert("measuredModel", model);
+    records[0] = record;
+    value.insert("records", records);
+    expectCorrupt(directory, "legacy-record-with-pragmatic-model.json", serialize(value));
+
+    value = validResource();
     value.insert("qualificationStatus", QStringLiteral("qualified"));
     records = value.value(QStringLiteral("records")).toArray();
     record = records[0].toObject();
@@ -444,6 +1008,10 @@ void runResourceTests()
     verifyCanonicalContextRejections(directory);
     verifyIntegerAndModelRejections(directory);
     verifyByteAndJsonRejections(directory);
+    verifyPragmaticValidAndHashSemantics(directory);
+    verifyPragmaticProvenanceRejections(directory);
+    verifyPragmaticModelAndIdentityRejections(directory);
+    verifyPragmaticPolicyAndDialectRejections(directory);
     verifyExecutableRelativeAndRelocatedPath(directory);
 }
 
