@@ -2,6 +2,7 @@
 #include <cryptobench/application/RuntimeCalibrationResource.h>
 #include <cryptobench/application/BuildInfo.h>
 #include <cryptobench/application/BenchmarkConfigJson.h>
+#include <cryptobench/application/EnvironmentInfoProvider.h>
 #include <cryptobench/core/ConfigValidator.h>
 
 #include <QCoreApplication>
@@ -33,6 +34,8 @@ constexpr auto kTestOs = "test-os";
 constexpr auto kTestArchitecture = "x86_64";
 constexpr auto kTestBuildType = "Release";
 constexpr auto kTestOpenSsl = "test-openssl";
+constexpr auto kApprovedPragmaticResourceSha256 =
+    "d3f2cd021afebf742414ea7bf2a42aae99803ced8e9fef2f220c034d86d46129";
 constexpr auto kZeroHash =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -950,10 +953,62 @@ void verifyExecutableRelativeAndRelocatedPath(QTemporaryDir& directory)
     require(QDir::cleanPath(buildResourcePath)
             == QDir::cleanPath(expectedBuildResourcePath),
         "build-tree calibration path is not application-executable-relative");
-    require(!QFileInfo::exists(buildResourcePath),
-        "synthetic calibration fixture was deployed beside the production executable");
-    require(cryptobench::application::build_info::runtimeCalibrationResourceSha256.empty(),
-        "M23 test fixture unexpectedly configured a production calibration hash");
+    const auto compiledSha256 = std::string(
+        cryptobench::application::build_info::runtimeCalibrationResourceSha256);
+    require(compiledSha256 == kApprovedPragmaticResourceSha256,
+        "compiled calibration SHA-256 differs from the approved resource");
+    QFile productionResource(buildResourcePath);
+    require(productionResource.open(QIODevice::ReadOnly),
+        "approved calibration resource was not staged beside the application");
+    const auto productionBytes = productionResource.readAll();
+    require(productionResource.error() == QFileDevice::NoError
+            && digest(productionBytes).toStdString() == compiledSha256,
+        "staged calibration bytes do not match the compiled expected SHA-256");
+
+    const auto environmentInfo = application::collectEnvironmentInfo();
+    const application::RuntimeCalibrationEnvironment productionEnvironment{
+        kProtocolId,
+        environmentInfo.operatingSystem,
+        environmentInfo.architecture,
+        environmentInfo.buildType,
+        environmentInfo.opensslVersion};
+    const auto productionLoad = application::loadRuntimeCalibrationResource(
+        buildResourcePath, compiledSha256, productionEnvironment);
+    if (environmentInfo.buildType == "Release") {
+        require(productionLoad.status == RuntimeCalibrationResourceStatus::Loaded
+                && productionLoad.resource.has_value()
+                && productionLoad.resource->dialect
+                    == application::RuntimeCalibrationResourceDialect::M23Pragmatic
+                && productionLoad.resource->records.size() == 175,
+            "approved pragmatic resource did not load in the measured Release context");
+    } else if (environmentInfo.buildType == "Debug") {
+        require(productionLoad.status == RuntimeCalibrationResourceStatus::Inapplicable
+                && !productionLoad.resource.has_value(),
+            "Debug build unexpectedly accepted a Release calibration context");
+    } else {
+        throw std::runtime_error(
+            "resource compatibility test requires a Debug or Release build");
+    }
+
+    const auto corruptStageDirectory =
+        QDir(directory.path()).filePath(QStringLiteral("corrupt-stage"));
+    require(QDir().mkpath(corruptStageDirectory),
+        "corrupt staged-package test directory could not be created");
+    const auto corruptExecutable =
+        QDir(corruptStageDirectory).filePath(QStringLiteral("CryptoBenchmark.exe"));
+    writeFile(corruptExecutable, QByteArrayLiteral("test-only executable placeholder"));
+    const auto corruptResourcePath =
+        application::runtimeCalibrationResourcePath(corruptExecutable);
+    require(QDir().mkpath(QFileInfo(corruptResourcePath).absolutePath()),
+        "corrupt staged-resource directory could not be created");
+    auto corruptedBytes = productionBytes;
+    require(!corruptedBytes.isEmpty(), "approved calibration resource is empty");
+    corruptedBytes[0] = corruptedBytes[0] == '{' ? '[' : '{';
+    writeFile(corruptResourcePath, corruptedBytes);
+    require(application::loadRuntimeCalibrationResource(
+                corruptResourcePath, compiledSha256, productionEnvironment).status
+            == RuntimeCalibrationResourceStatus::Corrupt,
+        "corrupted temporary staged copy was not rejected by the compiled SHA");
 
     const auto stageOne = QDir(directory.path()).filePath(QStringLiteral("stage-one"));
     const auto stageTwo = QDir(directory.path()).filePath(QStringLiteral("stage-two"));

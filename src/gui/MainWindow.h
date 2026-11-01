@@ -7,6 +7,8 @@
 #include <memory>
 #include <optional>
 
+#include "BatchRuntimeEstimatePresentation.h"
+
 #include <cryptobench/application/BenchmarkController.h>
 #include <cryptobench/application/BatchController.h>
 #include <cryptobench/application/BatchInputParser.h>
@@ -46,6 +48,10 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     explicit MainWindow(
         std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider> runtimeCalibrationProvider,
+        QWidget* parent = nullptr);
+    MainWindow(
+        std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider> runtimeCalibrationProvider,
+        cryptobench::gui::BatchRuntimeEstimatePresentationMode presentationMode,
         QWidget* parent = nullptr);
     ~MainWindow() override;
 
@@ -99,6 +105,9 @@ private:
     void closeEvent(QCloseEvent* event) override;
     std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider>
         runtimeCalibrationProvider_;
+    cryptobench::gui::BatchRuntimeEstimatePresentationMode
+        batchRuntimeEstimatePresentationMode_ =
+            cryptobench::gui::BatchRuntimeEstimatePresentationMode::Standard;
     Ui::MainWindow* ui;
     cryptobench::gui::BatchCreatorWidget* batchCreatorWidget_ = nullptr;
     std::unique_ptr<cryptobench::application::BenchmarkController> singleController_;

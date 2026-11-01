@@ -32,6 +32,10 @@
 #include <cryptobench/core/DomainTypes.h>
 #include <cryptobench/application/BatchInputParser.h>
 #include <cryptobench/application/BenchmarkConfigJson.h>
+#include <cryptobench/application/BuildInfo.h>
+#include <cryptobench/application/EnvironmentInfoProvider.h>
+#include <cryptobench/application/PragmaticRuntimeCalibrationProvider.h>
+#include <cryptobench/application/RuntimeCalibrationResource.h>
 
 #include <cstdlib>
 #include <array>
@@ -192,6 +196,38 @@ public:
 private:
     std::shared_ptr<RuntimeCalibrationFixture> fixture_;
 };
+
+std::unique_ptr<application::RuntimeCalibrationProvider>
+makeInstalledPragmaticProvider()
+{
+    const auto executable = QFileInfo(QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("../bin/CryptoBenchmark.exe"))).absoluteFilePath();
+    require(QFileInfo::exists(executable),
+        "production application executable is missing from build-*/bin");
+    const auto environment = application::collectEnvironmentInfo();
+    const application::RuntimeCalibrationEnvironment expectedEnvironment{
+        "memory-v2-calibration-v1",
+        environment.operatingSystem,
+        environment.architecture,
+        environment.buildType,
+        environment.opensslVersion};
+    auto loadResult = application::loadRuntimeCalibrationResource(
+        application::runtimeCalibrationResourcePath(executable),
+        application::build_info::runtimeCalibrationResourceSha256,
+        expectedEnvironment);
+    if (environment.buildType == "Release") {
+        require(loadResult.status == application::RuntimeCalibrationResourceStatus::Loaded,
+            "approved pragmatic resource did not load in Release GUI test");
+    } else if (environment.buildType == "Debug") {
+        require(loadResult.status
+                == application::RuntimeCalibrationResourceStatus::Inapplicable,
+            "Release pragmatic resource was not inapplicable in Debug GUI test");
+    } else {
+        throw std::runtime_error("GUI resource test requires a Debug or Release build");
+    }
+    return application::makePragmaticRuntimeCalibrationProvider(
+        std::move(loadResult));
+}
 
 application::RuntimeEstimate makeRuntimeEstimate(
     std::vector<application::EntryRuntimeEstimate> entries,
@@ -1262,6 +1298,33 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         require(gui::batchRuntimeEstimateConfirmationText(availableZero).contains(
                     QStringLiteral("Estimated batch duration: approximately 0 seconds.")),
             "available zero was treated as missing");
+        const auto pragmaticAvailableText =
+            gui::batchRuntimeEstimateConfirmationText(
+                availableZero,
+                gui::BatchRuntimeEstimatePresentationMode::PragmaticReducedScope);
+        require(pragmaticAvailableText.contains(QStringLiteral(
+                    "rough, approximate order-of-magnitude estimate"))
+                    && pragmaticAvailableText.contains(QStringLiteral(
+                        "worker startup, setup/preparation, IPC, checkpoint/persistence"))
+                    && pragmaticAvailableText.contains(QStringLiteral(
+                        "actual elapsed time may be longer"))
+                    && pragmaticAvailableText.contains(QStringLiteral(
+                        "Source timings use 5 ms memory sampling"))
+                    && pragmaticAvailableText.contains(QStringLiteral(
+                        "1–4 ms estimates assume comparable timing and were not measured separately")),
+            "pragmatic numerical disclosure omitted a required limitation");
+        require(!gui::batchRuntimeEstimateConfirmationText(availableZero).contains(
+                    QStringLiteral("order-of-magnitude estimate")),
+            "legacy/fake-provider presentation unexpectedly enabled pragmatic disclosure");
+        const auto pragmaticUnavailableText =
+            gui::batchRuntimeEstimateConfirmationText(
+                allMissing,
+                gui::BatchRuntimeEstimatePresentationMode::PragmaticReducedScope);
+        require(pragmaticUnavailableText.contains(QStringLiteral(
+                    "Estimated duration unavailable: calibration data is missing"))
+                    && !pragmaticUnavailableText.contains(QStringLiteral(
+                        "order-of-magnitude estimate")),
+            "unavailable pragmatic estimate received numeric disclosure");
 
         const auto warningFor = [](std::size_t count) {
             std::vector<std::uint32_t> indices;
@@ -1716,6 +1779,131 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
                     && !QFileInfo::exists(fileOutput)
                     && !QFileInfo::exists(creatorOutput),
             "File/Creator estimates diverged or No wrote output");
+    }
+
+    void testPragmaticProductionCandidateDisclosureAndFileCreatorParity()
+    {
+        QTemporaryDir directory;
+        require(directory.isValid(),
+            "production pragmatic GUI integration directory was not created");
+        const auto inputPath = directory.filePath("production-pragmatic-input.json");
+        const auto fileOutput = directory.filePath("production-pragmatic-file-output.json");
+        const auto creatorOutput =
+            directory.filePath("production-pragmatic-creator-output.json");
+        const QByteArray sameBatch =
+            R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[)"
+            R"({"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}},)"
+            R"({"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}}]})";
+        writeFile(inputPath, sameBatch);
+
+        const auto captureAndDecline = [](MainWindow& window) {
+            QString displayedText;
+            bool dialogSeen = false;
+            bool timedOut = false;
+            QTimer poll;
+            poll.setInterval(10);
+            QObject::connect(&poll, &QTimer::timeout, &window, [&] {
+                for (auto* topLevel : QApplication::topLevelWidgets()) {
+                    auto* dialog = qobject_cast<QMessageBox*>(topLevel);
+                    if (dialog == nullptr
+                        || dialog->windowTitle()
+                            != QStringLiteral("Confirm Batch Execution")) {
+                        continue;
+                    }
+                    displayedText = dialog->text();
+                    if (auto* noButton = dialog->button(QMessageBox::No)) {
+                        dialogSeen = true;
+                        noButton->click();
+                        poll.stop();
+                    }
+                    return;
+                }
+            });
+            QTimer watchdog;
+            watchdog.setSingleShot(true);
+            QObject::connect(&watchdog, &QTimer::timeout, &window, [&] {
+                timedOut = true;
+                for (auto* topLevel : QApplication::topLevelWidgets()) {
+                    auto* dialog = qobject_cast<QMessageBox*>(topLevel);
+                    if (dialog != nullptr
+                        && dialog->windowTitle()
+                            == QStringLiteral("Confirm Batch Execution")) {
+                        if (auto* noButton = dialog->button(QMessageBox::No)) {
+                            noButton->click();
+                        }
+                    }
+                }
+                poll.stop();
+            });
+            poll.start();
+            watchdog.start(5'000);
+            widget<QPushButton>(window, "batchRunButton")->click();
+            poll.stop();
+            watchdog.stop();
+            require(dialogSeen && !timedOut,
+                "production pragmatic Batch confirmation was not shown in time");
+            require(widget<QPushButton>(window, "batchRunButton")->isEnabled()
+                    && widget<QLabel>(window, "batchStatusLabel")->text()
+                        == QStringLiteral("Not running."),
+                "declining production pragmatic ETA changed Batch execution state");
+            return displayedText;
+        };
+
+        MainWindow fileWindow(
+            makeInstalledPragmaticProvider(),
+            gui::BatchRuntimeEstimatePresentationMode::PragmaticReducedScope);
+        fileWindow.show();
+        MainWindow::DialogCallbacks fileCallbacks;
+        fileCallbacks.chooseOpenTarget = [&](QWidget*) { return inputPath; };
+        fileCallbacks.chooseSaveTarget = [&](QWidget*) { return fileOutput; };
+        fileWindow.setDialogCallbacks(std::move(fileCallbacks));
+        widget<QPushButton>(fileWindow, "batchInputBrowseButton")->click();
+        widget<QPushButton>(fileWindow, "batchOutputBrowseButton")->click();
+        const auto fileText = captureAndDecline(fileWindow);
+
+        MainWindow creatorWindow(
+            makeInstalledPragmaticProvider(),
+            gui::BatchRuntimeEstimatePresentationMode::PragmaticReducedScope);
+        creatorWindow.show();
+        MainWindow::DialogCallbacks creatorCallbacks;
+        creatorCallbacks.chooseSaveTarget = [&](QWidget*) { return creatorOutput; };
+        creatorWindow.setDialogCallbacks(std::move(creatorCallbacks));
+        auto* creator = creatorWidget(creatorWindow);
+        require(creator->addRow() && creator->addRow(),
+            "production pragmatic parity Creator rows could not be added");
+        configureCreatorHash(creator->rowAt(0), 8, 1, 1);
+        configureCreatorHash(creator->rowAt(1), 8, 1, 1);
+        widget<QPushButton>(creatorWindow, "batchOutputBrowseButton")->click();
+        creator->useInBatchButton()->click();
+        const auto creatorText = captureAndDecline(creatorWindow);
+
+        require(fileText == creatorText,
+            "equivalent File and Creator batches showed different production ETA text");
+        require(!QFileInfo::exists(fileOutput)
+                && !QFileInfo::exists(creatorOutput),
+            "declining production pragmatic ETA created an output file");
+
+        const auto environment = application::collectEnvironmentInfo();
+        if (environment.buildType == "Release") {
+            require(fileText.contains(QStringLiteral(
+                        "Estimated batch duration: approximately "))
+                    && fileText.contains(QStringLiteral(
+                        "rough, approximate order-of-magnitude estimate"))
+                    && fileText.contains(QStringLiteral(
+                        "worker startup, setup/preparation, IPC, checkpoint/persistence"))
+                    && fileText.contains(QStringLiteral(
+                        "1–4 ms estimates assume comparable timing and were not measured separately")),
+                "Release numeric ETA omitted its reduced-scope disclosure");
+        } else {
+            require(environment.buildType == "Debug"
+                    && fileText.contains(QStringLiteral(
+                        "Estimated total batch duration unavailable"))
+                    && !fileText.contains(QStringLiteral(
+                        "Estimated batch duration: approximately "))
+                    && !fileText.contains(QStringLiteral(
+                        "order-of-magnitude estimate")),
+                "inapplicable Debug resource showed a numeric ETA or disclosure");
+        }
     }
 
     void testConfirmationCloseAttemptCancelsStart()
@@ -3320,6 +3508,7 @@ int main(int argc, char* argv[])
         testFakeProviderEstimatesAndCapturedSettings();
         testFakeProviderAvailabilityAndSafetyCases();
         testFileCreatorRuntimeEstimateParity();
+        testPragmaticProductionCandidateDisclosureAndFileCreatorParity();
         testConfirmationCloseAttemptCancelsStart();
         testDeclinedEstimatePreservesTerminalBatch();
         testConfirmationExceptionRestoresIdle();

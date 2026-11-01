@@ -262,6 +262,7 @@ void displayCompletedResults(Ui::MainWindow* ui, const cryptobench::core::Benchm
 MainWindow::MainWindow(QWidget* parent)
     : MainWindow(
           std::make_unique<cryptobench::application::NoDataRuntimeCalibrationProvider>(),
+          cryptobench::gui::BatchRuntimeEstimatePresentationMode::Standard,
           parent)
 {
 }
@@ -270,9 +271,22 @@ MainWindow::MainWindow(
     std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider>
         runtimeCalibrationProvider,
     QWidget* parent)
+    : MainWindow(
+          std::move(runtimeCalibrationProvider),
+          cryptobench::gui::BatchRuntimeEstimatePresentationMode::Standard,
+          parent)
+{
+}
+
+MainWindow::MainWindow(
+    std::unique_ptr<cryptobench::application::RuntimeCalibrationProvider>
+        runtimeCalibrationProvider,
+    cryptobench::gui::BatchRuntimeEstimatePresentationMode presentationMode,
+    QWidget* parent)
     : QMainWindow(parent)
     , runtimeCalibrationProvider_(
           requireRuntimeCalibrationProvider(std::move(runtimeCalibrationProvider)))
+    , batchRuntimeEstimatePresentationMode_(presentationMode)
     , ui(new Ui::MainWindow)
     , singleController_(std::make_unique<cryptobench::application::BenchmarkController>())
     , batchController_(std::make_unique<cryptobench::application::BatchController>(
@@ -784,7 +798,8 @@ void MainWindow::startBatch()
             QMessageBox confirmation(
                 QMessageBox::Question,
                 QStringLiteral("Confirm Batch Execution"),
-                cryptobench::gui::batchRuntimeEstimateConfirmationText(estimate),
+                cryptobench::gui::batchRuntimeEstimateConfirmationText(
+                    estimate, batchRuntimeEstimatePresentationMode_),
                 QMessageBox::Yes | QMessageBox::No,
                 this);
             confirmation.setDefaultButton(QMessageBox::No);

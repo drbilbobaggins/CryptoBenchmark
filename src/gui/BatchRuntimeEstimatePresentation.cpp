@@ -197,6 +197,14 @@ QString formatRuntimeDuration(RuntimeDuration duration)
 
 QString batchRuntimeEstimateConfirmationText(const RuntimeEstimate& estimate)
 {
+    return batchRuntimeEstimateConfirmationText(
+        estimate, BatchRuntimeEstimatePresentationMode::Standard);
+}
+
+QString batchRuntimeEstimateConfirmationText(
+    const RuntimeEstimate& estimate,
+    BatchRuntimeEstimatePresentationMode mode)
+{
     QStringList paragraphs;
     if (const auto* duration = std::get_if<RuntimeDuration>(
             &estimate.estimatedTotalBatchDuration);
@@ -205,6 +213,16 @@ QString batchRuntimeEstimateConfirmationText(const RuntimeEstimate& estimate)
         paragraphs.push_back(
             QStringLiteral("Estimated batch duration: approximately %1.")
                 .arg(formatRuntimeDuration(*duration)));
+        if (mode == BatchRuntimeEstimatePresentationMode::PragmaticReducedScope) {
+            paragraphs.push_back(QStringLiteral(
+                "This rough, approximate order-of-magnitude estimate is based on "
+                "cryptographic-operation timings, not end-to-end Batch timing. It excludes "
+                "worker startup, setup/preparation, IPC, checkpoint/persistence, and fixed "
+                "per-entry and Batch overhead, so actual elapsed time may be longer, "
+                "especially for many short runs. Source timings use 5 ms memory sampling; "
+                "1–4 ms estimates assume comparable timing and were not measured separately. "
+                "Actual timings may differ by machine."));
+        }
     } else {
         paragraphs.push_back(durationUnavailableText(estimate));
     }
