@@ -36,6 +36,7 @@ constexpr auto kTestBuildType = "Release";
 constexpr auto kTestOpenSsl = "test-openssl";
 constexpr auto kApprovedPragmaticResourceSha256 =
     "d3f2cd021afebf742414ea7bf2a42aae99803ced8e9fef2f220c034d86d46129";
+constexpr qsizetype kApprovedPragmaticResourceBytes = 92'881;
 constexpr auto kZeroHash =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -965,30 +966,71 @@ void verifyExecutableRelativeAndRelocatedPath(QTemporaryDir& directory)
             && digest(productionBytes).toStdString() == compiledSha256,
         "staged calibration bytes do not match the compiled expected SHA-256");
 
+    const application::RuntimeCalibrationEnvironment referenceEnvironment{
+        kProtocolId,
+        "Windows 11 Version 25H2",
+        "x86_64",
+        "Release",
+        "3.6.5"};
+    require(productionBytes.size() == kApprovedPragmaticResourceBytes,
+        "approved calibration resource size changed");
+    const auto referenceLoad = application::loadRuntimeCalibrationResource(
+        buildResourcePath, compiledSha256, referenceEnvironment);
+    require(referenceLoad.status == RuntimeCalibrationResourceStatus::Loaded
+            && referenceLoad.resource.has_value()
+            && referenceLoad.resource->dialect
+                    == application::RuntimeCalibrationResourceDialect::M23Pragmatic
+            && referenceLoad.resource->records.size() == 175
+            && referenceLoad.resource->qualificationStatus
+                == "reducedScopeApproximate",
+        "approved pragmatic resource did not load in its recorded reference context");
+
     const auto environmentInfo = application::collectEnvironmentInfo();
-    const application::RuntimeCalibrationEnvironment productionEnvironment{
+    const application::RuntimeCalibrationEnvironment actualEnvironment{
         kProtocolId,
         environmentInfo.operatingSystem,
         environmentInfo.architecture,
         environmentInfo.buildType,
         environmentInfo.opensslVersion};
-    const auto productionLoad = application::loadRuntimeCalibrationResource(
-        buildResourcePath, compiledSha256, productionEnvironment);
-    if (environmentInfo.buildType == "Release") {
-        require(productionLoad.status == RuntimeCalibrationResourceStatus::Loaded
-                && productionLoad.resource.has_value()
-                && productionLoad.resource->dialect
-                    == application::RuntimeCalibrationResourceDialect::M23Pragmatic
-                && productionLoad.resource->records.size() == 175,
-            "approved pragmatic resource did not load in the measured Release context");
-    } else if (environmentInfo.buildType == "Debug") {
-        require(productionLoad.status == RuntimeCalibrationResourceStatus::Inapplicable
-                && !productionLoad.resource.has_value(),
-            "Debug build unexpectedly accepted a Release calibration context");
-    } else {
-        throw std::runtime_error(
-            "resource compatibility test requires a Debug or Release build");
-    }
+    const bool actualContextMatchesReference =
+        actualEnvironment.calibrationProtocolId
+            == referenceEnvironment.calibrationProtocolId
+        && actualEnvironment.operatingSystem == referenceEnvironment.operatingSystem
+        && actualEnvironment.architecture == referenceEnvironment.architecture
+        && actualEnvironment.buildType == referenceEnvironment.buildType
+        && actualEnvironment.opensslVersion == referenceEnvironment.opensslVersion;
+    const auto actualLoad = application::loadRuntimeCalibrationResource(
+        buildResourcePath, compiledSha256, actualEnvironment);
+    const auto expectedActualStatus = actualContextMatchesReference
+        ? RuntimeCalibrationResourceStatus::Loaded
+        : RuntimeCalibrationResourceStatus::Inapplicable;
+    require(actualLoad.status == expectedActualStatus
+            && actualLoad.resource.has_value() == actualContextMatchesReference,
+        "actual-host compatibility did not match all recorded context fields");
+
+    const auto requireInapplicableContext = [&](auto incompatibleEnvironment) {
+        require(application::loadRuntimeCalibrationResource(
+                    buildResourcePath,
+                    compiledSha256,
+                    incompatibleEnvironment).status
+                == RuntimeCalibrationResourceStatus::Inapplicable,
+            "deliberately mismatched runtime context was not inapplicable");
+    };
+    auto incompatibleEnvironment = referenceEnvironment;
+    incompatibleEnvironment.operatingSystem += " (different)";
+    requireInapplicableContext(incompatibleEnvironment);
+    incompatibleEnvironment = referenceEnvironment;
+    incompatibleEnvironment.architecture = "different-architecture";
+    requireInapplicableContext(incompatibleEnvironment);
+    incompatibleEnvironment = referenceEnvironment;
+    incompatibleEnvironment.buildType = "Debug";
+    requireInapplicableContext(incompatibleEnvironment);
+    incompatibleEnvironment = referenceEnvironment;
+    incompatibleEnvironment.opensslVersion = "different-openssl";
+    requireInapplicableContext(incompatibleEnvironment);
+    incompatibleEnvironment = referenceEnvironment;
+    incompatibleEnvironment.calibrationProtocolId = "different-protocol";
+    requireInapplicableContext(incompatibleEnvironment);
 
     const auto corruptStageDirectory =
         QDir(directory.path()).filePath(QStringLiteral("corrupt-stage"));
@@ -1006,7 +1048,7 @@ void verifyExecutableRelativeAndRelocatedPath(QTemporaryDir& directory)
     corruptedBytes[0] = corruptedBytes[0] == '{' ? '[' : '{';
     writeFile(corruptResourcePath, corruptedBytes);
     require(application::loadRuntimeCalibrationResource(
-                corruptResourcePath, compiledSha256, productionEnvironment).status
+                corruptResourcePath, compiledSha256, referenceEnvironment).status
             == RuntimeCalibrationResourceStatus::Corrupt,
         "corrupted temporary staged copy was not rejected by the compiled SHA");
 

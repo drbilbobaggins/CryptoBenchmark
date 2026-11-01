@@ -198,35 +198,64 @@ private:
 };
 
 std::unique_ptr<application::RuntimeCalibrationProvider>
-makeInstalledPragmaticProvider()
+makeInstalledPragmaticProvider(
+    const application::RuntimeCalibrationEnvironment& expectedEnvironment,
+    application::RuntimeCalibrationResourceStatus expectedStatus)
 {
     const auto executable = QFileInfo(QDir(QCoreApplication::applicationDirPath())
         .filePath(QStringLiteral("../bin/CryptoBenchmark.exe"))).absoluteFilePath();
     require(QFileInfo::exists(executable),
         "production application executable is missing from build-*/bin");
+    auto loadResult = application::loadRuntimeCalibrationResource(
+        application::runtimeCalibrationResourcePath(executable),
+        application::build_info::runtimeCalibrationResourceSha256,
+        expectedEnvironment);
+    require(loadResult.status == expectedStatus,
+        "strict loader returned an unexpected resource compatibility status");
+    if (expectedStatus == application::RuntimeCalibrationResourceStatus::Loaded) {
+        require(loadResult.resource.has_value()
+                && loadResult.resource->dialect
+                    == application::RuntimeCalibrationResourceDialect::M23Pragmatic
+                && loadResult.resource->records.size() == 175,
+            "reference-context GUI provider did not receive the approved pragmatic resource");
+    } else {
+        require(!loadResult.resource.has_value(),
+            "inapplicable GUI provider unexpectedly received a resource");
+    }
+    return application::makePragmaticRuntimeCalibrationProvider(
+        std::move(loadResult));
+}
+
+application::RuntimeCalibrationEnvironment recordedReferenceEnvironment()
+{
+    return {
+        "memory-v2-calibration-v1",
+        "Windows 11 Version 25H2",
+        "x86_64",
+        "Release",
+        "3.6.5"};
+}
+
+application::RuntimeCalibrationEnvironment currentRuntimeEnvironment()
+{
     const auto environment = application::collectEnvironmentInfo();
-    const application::RuntimeCalibrationEnvironment expectedEnvironment{
+    return {
         "memory-v2-calibration-v1",
         environment.operatingSystem,
         environment.architecture,
         environment.buildType,
         environment.opensslVersion};
-    auto loadResult = application::loadRuntimeCalibrationResource(
-        application::runtimeCalibrationResourcePath(executable),
-        application::build_info::runtimeCalibrationResourceSha256,
-        expectedEnvironment);
-    if (environment.buildType == "Release") {
-        require(loadResult.status == application::RuntimeCalibrationResourceStatus::Loaded,
-            "approved pragmatic resource did not load in Release GUI test");
-    } else if (environment.buildType == "Debug") {
-        require(loadResult.status
-                == application::RuntimeCalibrationResourceStatus::Inapplicable,
-            "Release pragmatic resource was not inapplicable in Debug GUI test");
-    } else {
-        throw std::runtime_error("GUI resource test requires a Debug or Release build");
-    }
-    return application::makePragmaticRuntimeCalibrationProvider(
-        std::move(loadResult));
+}
+
+bool matchesRecordedReferenceContext(
+    const application::RuntimeCalibrationEnvironment& environment)
+{
+    const auto reference = recordedReferenceEnvironment();
+    return environment.calibrationProtocolId == reference.calibrationProtocolId
+        && environment.operatingSystem == reference.operatingSystem
+        && environment.architecture == reference.architecture
+        && environment.buildType == reference.buildType
+        && environment.opensslVersion == reference.opensslVersion;
 }
 
 application::RuntimeEstimate makeRuntimeEstimate(
@@ -1790,11 +1819,14 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         const auto fileOutput = directory.filePath("production-pragmatic-file-output.json");
         const auto creatorOutput =
             directory.filePath("production-pragmatic-creator-output.json");
+        const auto actualHostOutput =
+            directory.filePath("production-pragmatic-actual-host-output.json");
         const QByteArray sameBatch =
             R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[)"
             R"({"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}},)"
             R"({"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}}]})";
         writeFile(inputPath, sameBatch);
+        const auto referenceEnvironment = recordedReferenceEnvironment();
 
         const auto captureAndDecline = [](MainWindow& window) {
             QString displayedText;
@@ -1850,7 +1882,9 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         };
 
         MainWindow fileWindow(
-            makeInstalledPragmaticProvider(),
+            makeInstalledPragmaticProvider(
+                referenceEnvironment,
+                application::RuntimeCalibrationResourceStatus::Loaded),
             gui::BatchRuntimeEstimatePresentationMode::PragmaticReducedScope);
         fileWindow.show();
         MainWindow::DialogCallbacks fileCallbacks;
@@ -1862,7 +1896,9 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         const auto fileText = captureAndDecline(fileWindow);
 
         MainWindow creatorWindow(
-            makeInstalledPragmaticProvider(),
+            makeInstalledPragmaticProvider(
+                referenceEnvironment,
+                application::RuntimeCalibrationResourceStatus::Loaded),
             gui::BatchRuntimeEstimatePresentationMode::PragmaticReducedScope);
         creatorWindow.show();
         MainWindow::DialogCallbacks creatorCallbacks;
@@ -1883,27 +1919,53 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
                 && !QFileInfo::exists(creatorOutput),
             "declining production pragmatic ETA created an output file");
 
-        const auto environment = application::collectEnvironmentInfo();
-        if (environment.buildType == "Release") {
-            require(fileText.contains(QStringLiteral(
+        require(fileText.contains(QStringLiteral(
                         "Estimated batch duration: approximately "))
-                    && fileText.contains(QStringLiteral(
+                && fileText.contains(QStringLiteral(
                         "rough, approximate order-of-magnitude estimate"))
-                    && fileText.contains(QStringLiteral(
+                && fileText.contains(QStringLiteral(
                         "worker startup, setup/preparation, IPC, checkpoint/persistence"))
-                    && fileText.contains(QStringLiteral(
+                && fileText.contains(QStringLiteral(
                         "1–4 ms estimates assume comparable timing and were not measured separately")),
-                "Release numeric ETA omitted its reduced-scope disclosure");
-        } else {
-            require(environment.buildType == "Debug"
-                    && fileText.contains(QStringLiteral(
-                        "Estimated total batch duration unavailable"))
-                    && !fileText.contains(QStringLiteral(
+            "reference-context numerical ETA omitted its reduced-scope disclosure");
+
+        const auto actualEnvironment = currentRuntimeEnvironment();
+        const bool actualContextMatchesReference =
+            matchesRecordedReferenceContext(actualEnvironment);
+        const auto actualExpectedStatus = actualContextMatchesReference
+            ? application::RuntimeCalibrationResourceStatus::Loaded
+            : application::RuntimeCalibrationResourceStatus::Inapplicable;
+        MainWindow actualHostWindow(
+            makeInstalledPragmaticProvider(
+                actualEnvironment, actualExpectedStatus),
+            gui::BatchRuntimeEstimatePresentationMode::PragmaticReducedScope);
+        actualHostWindow.show();
+        MainWindow::DialogCallbacks actualHostCallbacks;
+        actualHostCallbacks.chooseOpenTarget =
+            [&](QWidget*) { return inputPath; };
+        actualHostCallbacks.chooseSaveTarget =
+            [&](QWidget*) { return actualHostOutput; };
+        actualHostWindow.setDialogCallbacks(std::move(actualHostCallbacks));
+        widget<QPushButton>(actualHostWindow, "batchInputBrowseButton")->click();
+        widget<QPushButton>(actualHostWindow, "batchOutputBrowseButton")->click();
+        const auto actualHostText = captureAndDecline(actualHostWindow);
+        if (actualContextMatchesReference) {
+            require(actualHostText.contains(QStringLiteral(
                         "Estimated batch duration: approximately "))
-                    && !fileText.contains(QStringLiteral(
+                    && actualHostText.contains(QStringLiteral(
                         "order-of-magnitude estimate")),
-                "inapplicable Debug resource showed a numeric ETA or disclosure");
+                "matching actual runtime context did not show its numerical ETA");
+        } else {
+            require(actualHostText.contains(QStringLiteral(
+                        "Estimated total batch duration unavailable"))
+                    && !actualHostText.contains(QStringLiteral(
+                        "Estimated batch duration: approximately "))
+                    && !actualHostText.contains(QStringLiteral(
+                        "order-of-magnitude estimate")),
+                "incompatible actual runtime context showed a numeric ETA");
         }
+        require(!QFileInfo::exists(actualHostOutput),
+            "declining actual-host compatibility confirmation wrote output");
     }
 
     void testConfirmationCloseAttemptCancelsStart()
