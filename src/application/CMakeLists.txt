@@ -113,6 +113,8 @@ add_library(cryptobench_application STATIC
     include/cryptobench/application/RuntimeCalibrationInventory.h
     RuntimeCalibrationResource.cpp
     include/cryptobench/application/RuntimeCalibrationResource.h
+    PragmaticRuntimeCalibrationProvider.cpp
+    include/cryptobench/application/PragmaticRuntimeCalibrationProvider.h
     RuntimeEstimateService.cpp
     include/cryptobench/application/RuntimeEstimate.h
     include/cryptobench/application/RuntimeEstimateService.h

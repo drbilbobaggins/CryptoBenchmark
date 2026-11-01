@@ -85,6 +85,25 @@ target_link_libraries(CryptoBenchmarkRuntimeEstimateTests
 
 add_test(NAME CryptoBenchmarkRuntimeEstimateTests COMMAND CryptoBenchmarkRuntimeEstimateTests)
 
+add_executable(CryptoBenchmarkM23PragmaticProviderTests
+	M23PragmaticProviderTests.cpp
+)
+
+set_target_properties(CryptoBenchmarkM23PragmaticProviderTests
+	PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-runtime"
+)
+
+target_link_libraries(CryptoBenchmarkM23PragmaticProviderTests
+	PRIVATE
+		cryptobench_application
+		Qt6::Core
+)
+
+add_test(NAME CryptoBenchmarkM23PragmaticProviderTests
+	COMMAND CryptoBenchmarkM23PragmaticProviderTests
+)
+
 add_executable(CryptoBenchmarkM23CalibrationTests
 	M23CalibrationHarness.cpp
 	M23CalibrationHarness.h
