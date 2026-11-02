@@ -140,8 +140,7 @@ QString shortRunWarning(const RuntimeEstimate& estimate)
         ? QStringLiteral("entry")
         : QStringLiteral("entries");
     return QStringLiteral(
-        "The estimated measured cryptographic block duration per logical run is below 1 second for %1 %2.\n"
-        "Shorter runs may be more sensitive to fixed overhead and system noise.")
+        "Measured block below 1 s per run for %1 %2; overhead and noise may affect accuracy.")
         .arg(itemWord, indices);
 }
 
@@ -215,13 +214,7 @@ QString batchRuntimeEstimateConfirmationText(
                 .arg(formatRuntimeDuration(*duration)));
         if (mode == BatchRuntimeEstimatePresentationMode::PragmaticReducedScope) {
             paragraphs.push_back(QStringLiteral(
-                "This rough, approximate order-of-magnitude estimate is based on "
-                "cryptographic-operation timings, not end-to-end Batch timing. It excludes "
-                "worker startup, setup/preparation, IPC, checkpoint/persistence, and fixed "
-                "per-entry and Batch overhead, so actual elapsed time may be longer, "
-                "especially for many short runs. Source timings use 5 ms memory sampling; "
-                "1–4 ms estimates assume comparable timing and were not measured separately. "
-                "Actual timings may differ by machine."));
+                "Rough, order-of-magnitude estimate of cryptographic work, actual time may be longer."));
         }
     } else {
         paragraphs.push_back(durationUnavailableText(estimate));

@@ -32,12 +32,13 @@ resources safely produce no-data behavior; none can produce a numeric ETA.
 
 The production MainWindow is explicitly constructed with the
 `PragmaticReducedScope` presentation mode. The disclosure is appended only
-when the estimate has a numeric `Available` Batch total. It identifies the
-number as a rough order-of-magnitude estimate based on cryptographic-operation
-timings, says it is not end-to-end Batch timing, and explains that worker
-startup, setup/preparation, IPC, checkpoint/persistence and fixed per-entry
-and Batch overhead are excluded. It warns that actual elapsed time may be
-longer, especially for many short runs, and that timing may vary by machine.
+when the estimate has a numeric `Available` Batch total and consists of this
+single sentence:
+
+> Rough, order-of-magnitude estimate of cryptographic work, actual time may be longer.
+
+The concise dialog copy does not enumerate all model limitations. Those
+limitations are documented here and in the pragmatic ETA closure record.
 
 The resource is measured at 5 ms memory sampling. Reuse for 1–4 ms is an
 explicit `assumedFrom5ms` approximation, not interval-specific measurement.

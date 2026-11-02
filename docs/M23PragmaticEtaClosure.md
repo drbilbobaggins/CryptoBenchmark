@@ -82,10 +82,12 @@ passed, as did related worker lifecycle tests; the subsequent complete serial
 Debug and Release suites both passed. The transient is documented, not claimed
 as a source fix.
 
-## User manual Windows GUI smoke checklist — PASS (user-reported)
+## Prior user-reported Windows GUI smoke — PASS (pre-M23.5-C copy)
 
 Use the Release build only when its actual runtime context is compatible with
-the recorded reference. Do not press Yes.
+the recorded reference. Do not press Yes. This smoke was completed before
+M23.5-C shortened the dialog copy; it is historical evidence for the prior
+copy and does not verify the updated wording.
 
 1. Launch `build-m23-release/bin/CryptoBenchmark.exe`.
 2. In Batch Creator, create two SHA-256 Hash entries with 8-byte input, N=1,
@@ -105,8 +107,25 @@ the recorded reference. Do not press Yes.
    Inapplicable on the actual host, record that honestly; do not override the
    loader or claim a numeric host-qualified estimate.
 
-Manual interactive GUI smoke: PASS (user-reported, 2026-11-01). Release numerical ETA and disclosure, File/Creator parity, No without execution or output, and Debug unavailable estimate were confirmed. Warning-text shortening remains a separate M23.5-C task. The
-offscreen GUI test is automated evidence only.
+Manual interactive GUI smoke: PASS (user-reported, 2026-11-01). Release
+numerical ETA and the then-current detailed disclosure, File/Creator parity,
+No without execution or output, and Debug unavailable estimate were confirmed.
+The offscreen GUI test is automated evidence only.
+
+## M23.5-C post-change visual check — PASS (user-reported, 2026-11-02)
+
+The user confirmed satisfactory interactive GUI behavior with the shortened warnings on 2026-11-02. This is user-reported manual evidence, separate from automated CTest results.
+
+1. In a compatible Release build, create a two-entry, modest SHA-256 Batch in
+   Creator, then repeat with the equivalent File Batch JSON.
+2. Inspect the confirmation and the exact pragmatic disclosure:
+   “Rough, order-of-magnitude estimate of cryptographic work, actual time may be longer.”
+3. Choose **No** or Escape in both paths and verify no execution or output.
+   Do not choose **Yes**.
+4. In Debug, verify the estimate remains nonnumeric/unavailable and decline.
+   If Release is Inapplicable on the actual host, report that honestly; do not
+   bypass compatibility.
+5. Post-change interactive GUI check: **PASS (user-reported, 2026-11-02)**. The user confirmed the updated GUI was satisfactory.
 
 ## Remaining work
 

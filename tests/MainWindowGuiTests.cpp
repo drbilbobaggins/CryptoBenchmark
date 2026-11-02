@@ -1269,9 +1269,7 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         require(partialText.contains(QStringLiteral(
                     "Estimated total batch duration unavailable: calibration data is incomplete for 2 of 2 entries."))
                     && partialText.contains(QStringLiteral(
-                        "The estimated measured cryptographic block duration per logical run is below 1 second for entry 1."))
-                    && partialText.contains(QStringLiteral(
-                        "Shorter runs may be more sensitive to fixed overhead and system noise."))
+                        "Measured block below 1 s per run for entry 1; overhead and noise may affect accuracy."))
                     && !partialText.contains(QStringLiteral("approximately")),
             "partial coverage or short-run text changed");
 
@@ -1289,7 +1287,7 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         require(overheadText.contains(QStringLiteral(
                     "Estimated total batch duration unavailable: batch-level calibration overhead is missing."))
                     && !overheadText.contains(QStringLiteral("0 of 1 entries"))
-                    && !overheadText.contains(QStringLiteral("below 1 second")),
+                    && !overheadText.contains(QStringLiteral("Measured block below 1 s per run")),
             "Batch-overhead-only missing message was misleading");
 
         const auto invalid = makeRuntimeEstimate(
@@ -1331,17 +1329,13 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
             gui::batchRuntimeEstimateConfirmationText(
                 availableZero,
                 gui::BatchRuntimeEstimatePresentationMode::PragmaticReducedScope);
-        require(pragmaticAvailableText.contains(QStringLiteral(
-                    "rough, approximate order-of-magnitude estimate"))
-                    && pragmaticAvailableText.contains(QStringLiteral(
-                        "worker startup, setup/preparation, IPC, checkpoint/persistence"))
-                    && pragmaticAvailableText.contains(QStringLiteral(
-                        "actual elapsed time may be longer"))
-                    && pragmaticAvailableText.contains(QStringLiteral(
-                        "Source timings use 5 ms memory sampling"))
-                    && pragmaticAvailableText.contains(QStringLiteral(
-                        "1–4 ms estimates assume comparable timing and were not measured separately")),
-            "pragmatic numerical disclosure omitted a required limitation");
+        require(
+            pragmaticAvailableText
+                == QStringLiteral(
+                    "Estimated batch duration: approximately 0 seconds.\n\n"
+                    "Rough, order-of-magnitude estimate of cryptographic work, actual time may be longer.\n\n"
+                    "Start the batch anyway?"),
+            "pragmatic disclosure did not match the approved one-sentence copy");
         require(!gui::batchRuntimeEstimateConfirmationText(availableZero).contains(
                     QStringLiteral("order-of-magnitude estimate")),
             "legacy/fake-provider presentation unexpectedly enabled pragmatic disclosure");
@@ -1368,19 +1362,22 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
                 0,
                 std::move(indices)));
         };
-        require(!warningFor(0).contains(QStringLiteral("below 1 second")),
+        require(!warningFor(0).contains(
+                    QStringLiteral("Measured block below 1 s per run")),
             "zero short entries produced a warning");
-        require(warningFor(1).contains(QStringLiteral("for entry 1.")),
-            "single short entry was not singular");
+        require(warningFor(1).contains(QStringLiteral(
+                    "Measured block below 1 s per run for entry 1; overhead and noise may affect accuracy.")),
+            "single short entry copy was not singular or one sentence");
         const auto tenText = warningFor(10);
-        require(tenText.contains(QStringLiteral("entries 1, 2, 3, 4, 5, 6, 7, 8, 9, 10."))
+        require(tenText.contains(QStringLiteral(
+                    "Measured block below 1 s per run for entries 1, 2, 3, 4, 5, 6, 7, 8, 9, 10; overhead and noise may affect accuracy."))
                     && !tenText.contains(QStringLiteral("plus")),
-            "ten short entries were not listed exactly");
+            "ten short entries were not listed exactly in the concise sentence");
         require(warningFor(11).contains(QStringLiteral(
-                    "entries 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, plus 1 more.")),
+                    "Measured block below 1 s per run for entries 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, plus 1 more; overhead and noise may affect accuracy.")),
             "eleven short entries were not capped with exact remainder");
         require(warningFor(1000).contains(QStringLiteral(
-                    "entries 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, plus 990 more.")),
+                    "Measured block below 1 s per run for entries 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, plus 990 more; overhead and noise may affect accuracy.")),
             "1000 short entries were not capped with exact remainder");
     }
 
@@ -1922,11 +1919,9 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         require(fileText.contains(QStringLiteral(
                         "Estimated batch duration: approximately "))
                 && fileText.contains(QStringLiteral(
-                        "rough, approximate order-of-magnitude estimate"))
+                        "Rough, order-of-magnitude estimate of cryptographic work, actual time may be longer."))
                 && fileText.contains(QStringLiteral(
-                        "worker startup, setup/preparation, IPC, checkpoint/persistence"))
-                && fileText.contains(QStringLiteral(
-                        "1–4 ms estimates assume comparable timing and were not measured separately")),
+                        "Start the batch anyway?")),
             "reference-context numerical ETA omitted its reduced-scope disclosure");
 
         const auto actualEnvironment = currentRuntimeEnvironment();
