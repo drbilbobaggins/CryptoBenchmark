@@ -17,6 +17,7 @@ add_executable(CryptoBenchmark
 set_target_properties(CryptoBenchmark PROPERTIES
     AUTOUIC ON
     AUTOMOC ON
+    WIN32_EXECUTABLE ON
 )
 
 target_link_libraries(CryptoBenchmark

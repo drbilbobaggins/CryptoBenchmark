@@ -1,5 +1,7 @@
 #include <cryptobench/platform/windows/WindowsWorkerProcess.h>
 
+#include <windows.h>
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -11,6 +13,13 @@ namespace cryptobench::platform::windows {
 WindowsWorkerProcess::WindowsWorkerProcess(QObject* parent)
     : QObject(parent)
 {
+    process_.setCreateProcessArgumentsModifier(
+        [](QProcess::CreateProcessArguments* arguments) {
+            constexpr auto consoleCreationFlags =
+                static_cast<unsigned long>(CREATE_NEW_CONSOLE | DETACHED_PROCESS);
+            arguments->flags &= ~consoleCreationFlags;
+            arguments->flags |= static_cast<unsigned long>(CREATE_NO_WINDOW);
+        });
     connect(&process_, &QProcess::started, this, &WindowsWorkerProcess::started);
     connect(&process_, &QProcess::finished, this, &WindowsWorkerProcess::finished);
     connect(&process_, &QProcess::stateChanged, this, &WindowsWorkerProcess::stateChanged);
