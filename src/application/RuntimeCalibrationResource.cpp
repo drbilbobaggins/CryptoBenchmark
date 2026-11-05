@@ -1006,14 +1006,7 @@ RuntimeCalibrationResource parsePragmaticResource(
     }
 
     environmentMatches =
-        sourceEnvironment.calibrationProtocolId == expectedEnvironment.calibrationProtocolId
-        && sourceEnvironment.operatingSystem == expectedEnvironment.operatingSystem
-        && sourceEnvironment.architecture == expectedEnvironment.architecture
-        && sourceEnvironment.buildType == expectedEnvironment.buildType
-        && sourceEnvironment.opensslVersion == expectedEnvironment.opensslVersion;
-    if (!registryMatches) {
-        environmentMatches = false;
-    }
+        sourceEnvironment.calibrationProtocolId == expectedEnvironment.calibrationProtocolId;
     return resource;
 }
 

@@ -453,12 +453,42 @@ void verifyPragmaticValidAndHashSemantics(QTemporaryDir& directory)
                 path, kZeroHash, expectedEnvironment()).status
             == RuntimeCalibrationResourceStatus::Corrupt,
         "wrong compiled expected resource SHA was accepted for pragmatic dialect");
+
+    const auto requireLoadedForEnvironment = [&](auto otherEnvironment) {
+        const auto result = application::loadRuntimeCalibrationResource(
+            path, digest(bytes).toStdString(), otherEnvironment);
+        require(result.status == RuntimeCalibrationResourceStatus::Loaded
+                && result.resource.has_value(),
+            "valid pragmatic resource was unavailable on a different runtime");
+    };
     auto otherEnvironment = expectedEnvironment();
+    otherEnvironment.operatingSystem = "other-os";
+    requireLoadedForEnvironment(otherEnvironment);
+    otherEnvironment = expectedEnvironment();
+    otherEnvironment.architecture = "other-architecture";
+    requireLoadedForEnvironment(otherEnvironment);
+    otherEnvironment = expectedEnvironment();
+    otherEnvironment.buildType = "Debug";
+    requireLoadedForEnvironment(otherEnvironment);
+    otherEnvironment = expectedEnvironment();
     otherEnvironment.opensslVersion = "other-openssl";
+    requireLoadedForEnvironment(otherEnvironment);
+
+    otherEnvironment = expectedEnvironment();
+    otherEnvironment.calibrationProtocolId = "other-protocol";
     require(application::loadRuntimeCalibrationResource(
                 path, digest(bytes).toStdString(), otherEnvironment).status
             == RuntimeCalibrationResourceStatus::Inapplicable,
-        "pragmatic resource with mismatched runtime context was not inapplicable");
+        "pragmatic resource accepted an unsupported calibration protocol");
+
+    auto changedRegistry = validPragmaticResource();
+    changedRegistry.insert("registryInventorySha256", QLatin1String(kZeroHash));
+    const auto changedRegistryBytes = serialize(changedRegistry);
+    const auto changedRegistryPath = QDir(directory.path()).filePath(
+        QStringLiteral("pragmatic-registry-mismatch.json"));
+    require(loadBytes(changedRegistryPath, changedRegistryBytes)
+                == RuntimeCalibrationResourceStatus::Inapplicable,
+        "pragmatic resource for a different canonical registry was not inapplicable");
 }
 
 void verifyPragmaticProvenanceRejections(QTemporaryDir& directory)
@@ -992,45 +1022,39 @@ void verifyExecutableRelativeAndRelocatedPath(QTemporaryDir& directory)
         environmentInfo.architecture,
         environmentInfo.buildType,
         environmentInfo.opensslVersion};
-    const bool actualContextMatchesReference =
-        actualEnvironment.calibrationProtocolId
-            == referenceEnvironment.calibrationProtocolId
-        && actualEnvironment.operatingSystem == referenceEnvironment.operatingSystem
-        && actualEnvironment.architecture == referenceEnvironment.architecture
-        && actualEnvironment.buildType == referenceEnvironment.buildType
-        && actualEnvironment.opensslVersion == referenceEnvironment.opensslVersion;
     const auto actualLoad = application::loadRuntimeCalibrationResource(
         buildResourcePath, compiledSha256, actualEnvironment);
-    const auto expectedActualStatus = actualContextMatchesReference
-        ? RuntimeCalibrationResourceStatus::Loaded
-        : RuntimeCalibrationResourceStatus::Inapplicable;
-    require(actualLoad.status == expectedActualStatus
-            && actualLoad.resource.has_value() == actualContextMatchesReference,
-        "actual-host compatibility did not match all recorded context fields");
+    require(actualLoad.status == RuntimeCalibrationResourceStatus::Loaded
+            && actualLoad.resource.has_value(),
+        "approved pragmatic resource did not load on the actual runtime");
 
-    const auto requireInapplicableContext = [&](auto incompatibleEnvironment) {
-        require(application::loadRuntimeCalibrationResource(
-                    buildResourcePath,
-                    compiledSha256,
-                    incompatibleEnvironment).status
-                == RuntimeCalibrationResourceStatus::Inapplicable,
-            "deliberately mismatched runtime context was not inapplicable");
+    const auto requireLoadedContext = [&](auto runtimeEnvironment) {
+        const auto result = application::loadRuntimeCalibrationResource(
+            buildResourcePath, compiledSha256, runtimeEnvironment);
+        require(result.status == RuntimeCalibrationResourceStatus::Loaded
+                && result.resource.has_value(),
+            "pragmatic resource was unavailable for a different runtime context");
     };
     auto incompatibleEnvironment = referenceEnvironment;
     incompatibleEnvironment.operatingSystem += " (different)";
-    requireInapplicableContext(incompatibleEnvironment);
+    requireLoadedContext(incompatibleEnvironment);
     incompatibleEnvironment = referenceEnvironment;
     incompatibleEnvironment.architecture = "different-architecture";
-    requireInapplicableContext(incompatibleEnvironment);
+    requireLoadedContext(incompatibleEnvironment);
     incompatibleEnvironment = referenceEnvironment;
     incompatibleEnvironment.buildType = "Debug";
-    requireInapplicableContext(incompatibleEnvironment);
+    requireLoadedContext(incompatibleEnvironment);
     incompatibleEnvironment = referenceEnvironment;
     incompatibleEnvironment.opensslVersion = "different-openssl";
-    requireInapplicableContext(incompatibleEnvironment);
+    requireLoadedContext(incompatibleEnvironment);
     incompatibleEnvironment = referenceEnvironment;
     incompatibleEnvironment.calibrationProtocolId = "different-protocol";
-    requireInapplicableContext(incompatibleEnvironment);
+    require(application::loadRuntimeCalibrationResource(
+                buildResourcePath,
+                compiledSha256,
+                incompatibleEnvironment).status
+            == RuntimeCalibrationResourceStatus::Inapplicable,
+        "pragmatic resource accepted an unsupported calibration protocol");
 
     const auto corruptStageDirectory =
         QDir(directory.path()).filePath(QStringLiteral("corrupt-stage"));

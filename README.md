@@ -33,7 +33,7 @@ Batch input-v1 is strict JSON. This minimal example is one SHA-256 hash entry:
 }
 ```
 
-The pragmatic Batch ETA is an order-of-magnitude estimate of cryptographic work, not a prediction of total Batch elapsed time; actual time may be longer. Numeric estimates are available only when the runtime context is compatible with the calibration data.
+The pragmatic Batch ETA is an order-of-magnitude estimate of cryptographic work, not a prediction of total Batch elapsed time; actual time may be longer. Numeric estimates use the reviewed calibration across supported runtime environments.
 
 ## Version, provenance, and notices
 

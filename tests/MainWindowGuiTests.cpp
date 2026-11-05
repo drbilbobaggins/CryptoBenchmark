@@ -33,7 +33,6 @@
 #include <cryptobench/application/BatchInputParser.h>
 #include <cryptobench/application/BenchmarkConfigJson.h>
 #include <cryptobench/application/BuildInfo.h>
-#include <cryptobench/application/EnvironmentInfoProvider.h>
 #include <cryptobench/application/PragmaticRuntimeCalibrationProvider.h>
 #include <cryptobench/application/RuntimeCalibrationResource.h>
 
@@ -234,28 +233,6 @@ application::RuntimeCalibrationEnvironment recordedReferenceEnvironment()
         "x86_64",
         "Release",
         "3.6.5"};
-}
-
-application::RuntimeCalibrationEnvironment currentRuntimeEnvironment()
-{
-    const auto environment = application::collectEnvironmentInfo();
-    return {
-        "memory-v2-calibration-v1",
-        environment.operatingSystem,
-        environment.architecture,
-        environment.buildType,
-        environment.opensslVersion};
-}
-
-bool matchesRecordedReferenceContext(
-    const application::RuntimeCalibrationEnvironment& environment)
-{
-    const auto reference = recordedReferenceEnvironment();
-    return environment.calibrationProtocolId == reference.calibrationProtocolId
-        && environment.operatingSystem == reference.operatingSystem
-        && environment.architecture == reference.architecture
-        && environment.buildType == reference.buildType
-        && environment.opensslVersion == reference.opensslVersion;
 }
 
 application::RuntimeEstimate makeRuntimeEstimate(
@@ -1816,8 +1793,8 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
         const auto fileOutput = directory.filePath("production-pragmatic-file-output.json");
         const auto creatorOutput =
             directory.filePath("production-pragmatic-creator-output.json");
-        const auto actualHostOutput =
-            directory.filePath("production-pragmatic-actual-host-output.json");
+        const auto differentHostOutput =
+            directory.filePath("production-pragmatic-different-host-output.json");
         const QByteArray sameBatch =
             R"({"format":"cryptobenchmark-batch-input","schemaVersion":1,"entries":[)"
             R"({"profileId":"sha256","operation":"hash","iterationsPerRun":1,"runs":1,"parameters":{"inputSizeBytes":8}},)"
@@ -1924,43 +1901,35 @@ void testSingleBatchMemoryV2ParityAndSnapshotIsolation()
                         "Start the batch anyway?")),
             "reference-context numerical ETA omitted its reduced-scope disclosure");
 
-        const auto actualEnvironment = currentRuntimeEnvironment();
-        const bool actualContextMatchesReference =
-            matchesRecordedReferenceContext(actualEnvironment);
-        const auto actualExpectedStatus = actualContextMatchesReference
-            ? application::RuntimeCalibrationResourceStatus::Loaded
-            : application::RuntimeCalibrationResourceStatus::Inapplicable;
-        MainWindow actualHostWindow(
+        auto differentEnvironment = referenceEnvironment;
+        differentEnvironment.operatingSystem += " (different)";
+        differentEnvironment.architecture = "different-architecture";
+        differentEnvironment.buildType = "Debug";
+        differentEnvironment.opensslVersion = "different-openssl";
+        MainWindow differentHostWindow(
             makeInstalledPragmaticProvider(
-                actualEnvironment, actualExpectedStatus),
+                differentEnvironment,
+                application::RuntimeCalibrationResourceStatus::Loaded),
             gui::BatchRuntimeEstimatePresentationMode::PragmaticReducedScope);
-        actualHostWindow.show();
-        MainWindow::DialogCallbacks actualHostCallbacks;
-        actualHostCallbacks.chooseOpenTarget =
+        differentHostWindow.show();
+        MainWindow::DialogCallbacks differentHostCallbacks;
+        differentHostCallbacks.chooseOpenTarget =
             [&](QWidget*) { return inputPath; };
-        actualHostCallbacks.chooseSaveTarget =
-            [&](QWidget*) { return actualHostOutput; };
-        actualHostWindow.setDialogCallbacks(std::move(actualHostCallbacks));
-        widget<QPushButton>(actualHostWindow, "batchInputBrowseButton")->click();
-        widget<QPushButton>(actualHostWindow, "batchOutputBrowseButton")->click();
-        const auto actualHostText = captureAndDecline(actualHostWindow);
-        if (actualContextMatchesReference) {
-            require(actualHostText.contains(QStringLiteral(
-                        "Estimated batch duration: approximately "))
-                    && actualHostText.contains(QStringLiteral(
-                        "order-of-magnitude estimate")),
-                "matching actual runtime context did not show its numerical ETA");
-        } else {
-            require(actualHostText.contains(QStringLiteral(
-                        "Estimated total batch duration unavailable"))
-                    && !actualHostText.contains(QStringLiteral(
-                        "Estimated batch duration: approximately "))
-                    && !actualHostText.contains(QStringLiteral(
-                        "order-of-magnitude estimate")),
-                "incompatible actual runtime context showed a numeric ETA");
-        }
-        require(!QFileInfo::exists(actualHostOutput),
-            "declining actual-host compatibility confirmation wrote output");
+        differentHostCallbacks.chooseSaveTarget =
+            [&](QWidget*) { return differentHostOutput; };
+        differentHostWindow.setDialogCallbacks(std::move(differentHostCallbacks));
+        widget<QPushButton>(differentHostWindow, "batchInputBrowseButton")->click();
+        widget<QPushButton>(differentHostWindow, "batchOutputBrowseButton")->click();
+        const auto differentHostText = captureAndDecline(differentHostWindow);
+        require(differentHostText.contains(QStringLiteral(
+                    "Estimated batch duration: approximately "))
+                && differentHostText.contains(QStringLiteral(
+                    "Rough, order-of-magnitude estimate of cryptographic work, actual time may be longer."))
+                && differentHostText.contains(QStringLiteral(
+                    "Start the batch anyway?")),
+            "different runtime context did not show the unchanged numerical ETA disclosure");
+        require(!QFileInfo::exists(differentHostOutput),
+            "declining different-host ETA confirmation wrote output");
     }
 
     void testConfirmationCloseAttemptCancelsStart()
